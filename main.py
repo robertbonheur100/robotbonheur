@@ -398,7 +398,9 @@ def trading_loop(st):
                 time.sleep(30); continue
 
             sig,conf=fn(candles)
-            add_log(st,f"📊 {symbol} | {sig} | Conf: {conf:.0%} | {strategy}")
+            cl=[x["close"] for x in candles]
+e9=ema(cl,9); e21=ema(cl,21)
+add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Bouji:{len(candles)} | EMA9:{round(e9[-1],4) if e9 else 'N/A'} | EMA21:{round(e21[-1],4) if e21 else 'N/A'}")
 
             if sig!="NONE" and conf>=min_conf:
                 entry=candles[-1]["close"]

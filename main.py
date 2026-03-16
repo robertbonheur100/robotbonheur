@@ -298,7 +298,7 @@ class DerivClient:
         if not res[0]: return []
         return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),"close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
 
-    def place_trade(self, symbol, direction, amount=1.0, multiplier=10):
+    def place_trade(self, symbol, direction, amount=1.0, multiplier=100):
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         ct="MULTUP" if direction=="BUY" else "MULTDOWN"

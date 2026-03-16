@@ -484,8 +484,9 @@ def trading_loop(st):
                         if r.get("contract_id"):
                             bal_after=r.get("balance_after")
                             if bal_after:
-                                pnl=float(bal_after)-st["balance"]
-                                st["balance"]=float(bal_after)
+                                if bal_after:
+    st["balance"]=float(bal_after)
+    pnl=0  # Rezilta reyèl vini 5 min apre
                             ok=True
                             add_log(st,f"✅ Trade OK! ID:{r['contract_id']} | Bal:${st['balance']:.2f}","SUCCESS")
                     except Exception as e:

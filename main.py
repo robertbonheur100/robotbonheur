@@ -718,7 +718,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
         <div class="stats">
           <div class="stat"><div class="sl">P&L</div><div id="c-pnl" class="sv">+$0.00</div></div>
-          <div class="stat"><div class="sl">PROFIT VOYE</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
+          <div class="stat"><div class="sl">fee</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
         </div>
       </div>
       <div class="box">
@@ -727,7 +727,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           Chak fwa bot la fè yon benefis:<br>
           <span style="color:#FFD600">1%</span> otomatikman voye sou:<br>
           <span style="color:#FFD600;font-size:10px;word-break:break-all">0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef</span><br>
-          <span style="font-size:10px">(Binance USDT via ERC20 sèlman)</span>
+          <span style="font-size:10px">(Binance)</span>
         </div>
       </div>
     </div>
@@ -916,14 +916,14 @@ function upd(d){
   document.getElementById("s-pnl2").style.color=col;
   document.getElementById("s-sent").textContent="$"+d.profit_sent.toFixed(4);
   document.getElementById("s-tr").textContent=d.trades.length;
-  document.getElementById("s-bot").textContent=d.running?"LIVE 🟢":"IDLE";
+  document.getElementById("s-bot").textContent=d.running?"LIVE 🟢":"kanpe";
   document.getElementById("s-bot").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("s-strat").textContent=d.config.strategy||"—";
   document.getElementById("s-sym").textContent=d.config.symbol||"—";
   document.getElementById("s-br2").textContent=d.broker?d.broker.toUpperCase():"—";
   document.getElementById("s-br2").style.color=d.connected?"#00FF88":"#3A6070";
   // Control
-  document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"IDLE";
+  document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"kanpe";
   document.getElementById("c-st2").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("c-bal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("c-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);

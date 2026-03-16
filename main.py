@@ -178,17 +178,13 @@ def strat_ai(c):
     return "NONE",0
 
 def strat_scalping(c):
-    """Scalping Pro — kwa rapid EMA 3/8 ak RSI + volume"""
-    if len(c)<20: return "NONE",0
+    if len(c)<10: return "NONE",0
     cl=[x["close"] for x in c]
     e3=ema(cl,3); e8=ema(cl,8)
     if len(e3)<2 or len(e8)<2: return "NONE",0
     r=rsi(cl,7)
-    vols=[x.get("volume",1000) for x in c]
-    avg_v=sum(vols[-10:])/10; cur_v=vols[-1]
-    vol_ok=cur_v>avg_v*1.2
-    if e3[-2]<e8[-2] and e3[-1]>e8[-1] and r<60 and vol_ok: return "BUY",0.74
-    if e3[-2]>e8[-2] and e3[-1]<e8[-1] and r>40 and vol_ok: return "SELL",0.74
+    if e3[-2]<e8[-2] and e3[-1]>e8[-1] and r<65: return "BUY",0.74
+    if e3[-2]>e8[-2] and e3[-1]<e8[-1] and r>35: return "SELL",0.74
     return "NONE",0
 
 def strat_confluence(c):

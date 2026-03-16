@@ -84,11 +84,11 @@ def strat_ema(c):
     if len(e9)<3 or len(e21)<3: return "NONE",0
     r=rsi(cl)
     if e9[-2]<=e21[-2] and e9[-1]>e21[-1]:
-        if (not e50 or cl[-1]>e50[-1]) and 30<r<70:
-            return "BUY", 0.78
+        if (not e50 or cl[-1]>e50[-1]) and r<75:
+            return "BUY", 0.76
     if e9[-2]>=e21[-2] and e9[-1]<e21[-1]:
-        if (not e50 or cl[-1]<e50[-1]) and 30<r<70:
-            return "SELL", 0.78
+        if (not e50 or cl[-1]<e50[-1]) and r>25:
+            return "SELL", 0.76
     return "NONE",0
 
 def strat_fibonacci(c):
@@ -122,14 +122,14 @@ def strat_rsi(c):
     if len(cl)<25: return "NONE",0
     r=rsi(cl); r2=rsi(cl[:-3]) if len(cl)>3 else r
     e50=ema(cl,50) if len(cl)>=50 else None
-    if r<25:
-        if not e50 or cl[-1]>e50[-1]*0.995: return "BUY", 0.84
-    if 25<=r<38 and r>r2:
-        if not e50 or cl[-1]>e50[-1]*0.993: return "BUY", 0.76
-    if r>75:
-        if not e50 or cl[-1]<e50[-1]*1.005: return "SELL", 0.84
-    if 62<r<=75 and r<r2:
-        if not e50 or cl[-1]<e50[-1]*1.007: return "SELL", 0.76
+    if r<30:
+        if not e50 or cl[-1]>e50[-1]*0.998: return "BUY", 0.82
+    if 30<=r<42 and r>r2:
+        if not e50 or cl[-1]>e50[-1]*0.996: return "BUY", 0.74
+    if r>70:
+        if not e50 or cl[-1]<e50[-1]*1.002: return "SELL", 0.82
+    if 58<r<=70 and r<r2:
+        if not e50 or cl[-1]<e50[-1]*1.004: return "SELL", 0.74
     return "NONE",0
 
 def strat_macd(c):
@@ -138,12 +138,14 @@ def strat_macd(c):
     up,mid,lo=bb(cl,20,2.0); m,sig=macd(cl)
     if up is None: return "NONE",0
     r=rsi(cl); at=atr(c) or 1
-    if m>sig and lo and cl[-1]<lo and r<50:
-        conf=0.84 if cl[-1]<lo-at*0.3 else 0.78
-        return "BUY", conf
-    if m<sig and up and cl[-1]>up and r>50:
-        conf=0.84 if cl[-1]>up+at*0.3 else 0.78
-        return "SELL", conf
+    if m>sig and lo and cl[-1]<=lo:
+        return "BUY", 0.78
+    if m>sig and mid and cl[-1]<mid and r<45:
+        return "BUY", 0.72
+    if m<sig and up and cl[-1]>=up:
+        return "SELL", 0.78
+    if m<sig and mid and cl[-1]>mid and r>55:
+        return "SELL", 0.72
     return "NONE",0
 
 def strat_breakout(c):
@@ -229,8 +231,8 @@ def strat_ai(c):
         elif mom>0.1: sc+=0.5
         elif mom<-0.3: sc-=1.0
         elif mom<-0.1: sc-=0.5
-    if sc>=4.5: return "BUY", min(0.92, 0.70+(sc-4.5)*0.03)
-    if sc<=-4.5: return "SELL", min(0.92, 0.70+(-sc-4.5)*0.03)
+    if sc>=3.0: return "BUY", min(0.92, 0.68+(sc-3.0)*0.04)
+    if sc<=-3.0: return "SELL", min(0.92, 0.68+(-sc-3.0)*0.04)
     return "NONE",0
 
 def strat_scalping(c):
@@ -240,10 +242,10 @@ def strat_scalping(c):
     if len(e5)<3 or len(e13)<3: return "NONE",0
     r=rsi(cl,9)
     mom3=(cl[-1]-cl[-4])/max(cl[-4],0.0001)*100 if len(cl)>=4 else 0
-    if e5[-2]<=e13[-2] and e5[-1]>e13[-1] and mom3>0.05 and 35<r<68:
-        if not e50 or cl[-1]>e50[-1]*0.997: return "BUY", 0.78
-    if e5[-2]>=e13[-2] and e5[-1]<e13[-1] and mom3<-0.05 and 32<r<65:
-        if not e50 or cl[-1]<e50[-1]*1.003: return "SELL", 0.78
+    if e5[-1]>e13[-1] and r<70:
+        if not e50 or cl[-1]>e50[-1]*0.997: return "BUY", 0.74
+    if e5[-1]<e13[-1] and r>30:
+        if not e50 or cl[-1]<e50[-1]*1.003: return "SELL", 0.74
     return "NONE",0
 
 def strat_confluence(c):
@@ -255,8 +257,8 @@ def strat_confluence(c):
     for fn,w in fns:
         try:
             s,conf=fn(c)
-            if s=="BUY" and conf>=0.70: buy_score+=conf*w; buy_cnt+=1
-            elif s=="SELL" and conf>=0.70: sell_score+=conf*w; sell_cnt+=1
+            if s=="BUY" and conf>=0.65: buy_score+=conf*w; buy_cnt+=1
+            elif s=="SELL" and conf>=0.65: sell_score+=conf*w; sell_cnt+=1
         except: pass
     if buy_cnt>=2 and buy_score>sell_score:
         return "BUY", min(0.94, max(0.72, buy_score/(buy_cnt*1.5)))

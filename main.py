@@ -484,9 +484,8 @@ def trading_loop(st):
                         if r.get("contract_id"):
                             bal_after=r.get("balance_after")
                             if bal_after:
-                                if bal_after:
-    st["balance"]=float(bal_after)
-    pnl=0  # Rezilta reyèl vini 5 min apre
+                                pnl=float(bal_after)-st["balance"]
+                                st["balance"]=float(bal_after)
                             ok=True
                             add_log(st,f"✅ Trade OK! ID:{r['contract_id']} | Bal:${st['balance']:.2f}","SUCCESS")
                     except Exception as e:
@@ -504,18 +503,20 @@ def trading_loop(st):
                 if ok:
                     # Martingale logic
                     if pnl > 0:
+                        total_recovered = base_lot * ((2 ** consec_losses) - 1)
+                        net_profit = pnl - total_recovered
                         current_lot = base_lot  # Reset apre victwa
                         consec_losses = 0
-                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Lot reset: ${base_lot:.2f}","SUCCESS")
+                        add_log(st,f"✅ GENYEN! Rekipere tout + benefis ${net_profit:.2f} | Lot reset: ${base_lot:.2f}","SUCCESS")
                     elif pnl < 0:
                         consec_losses += 1
-                        if consec_losses <= 4:  # Max 4 doubleman
-                            current_lot = min(current_lot * 2, base_lot * 16)
-                            add_log(st,f"⚠ Pèdi ${abs(pnl):.2f} | Martingale: lot → ${current_lot:.2f}","WARN")
+                        if consec_losses <= 6:  # Max 6 doubleman
+                            current_lot = base_lot * (2 ** consec_losses)
+                            add_log(st,f"⚠ Pèdi ${abs(pnl):.2f} | Martingale #{consec_losses}: lot → ${current_lot:.2f}","WARN")
                         else:
-                            current_lot = base_lot  # Reset apre 4 pèt
+                            current_lot = base_lot  # Reset apre 6 pèt
                             consec_losses = 0
-                            add_log(st,f"🔄 Reset martingale apre 4 pèt","WARN")
+                            add_log(st,f"🔄 Reset martingale apre 6 pèt konsekitif","WARN")
 
                     trade={
                         "id":len(st["trades"])+1,

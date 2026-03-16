@@ -387,15 +387,22 @@ def trading_loop(st):
     while st["running"]:
         try:
             candles=[]
-            if broker=="deriv" and st.get("deriv_api"):
-                candles=st["deriv_api"].get_candles(symbol,200,tf)
-            elif broker=="binance" and st.get("binance_api"):
-                iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"1m")
-                candles=st["binance_api"].get_candles(symbol,iv,200)
+            api = st.get("deriv_api") if broker=="deriv" else st.get("binance_api")
+            if not api:
+                add_log(st,"Broker pa konekte — STOP","ERROR")
+                st["running"]=False; break
 
-            if len(candles)<50:
+            if broker=="deriv":
+                candles=api.get_candles(symbol,200,tf)
+            elif broker=="binance":
+                iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"1m")
+                candles=api.get_candles(symbol,iv,200)
+
+            add_log(st,f"📡 Bouji resevwa: {len(candles)} | {symbol}")
+
+            if len(candles)<10:
                 add_log(st,f"Pa ase done ({len(candles)}) — ap tann...","WARN")
-                time.sleep(30); continue
+                time.sleep(15); continue
 
             sig,conf=fn(candles)
             add_log(st,f"📊 {symbol} | {sig} | Conf: {conf:.0%} | {strategy}")

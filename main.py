@@ -477,7 +477,10 @@ def trading_loop(st):
                     try:
                         r=st["deriv_api"].place_trade(symbol,sig,max(1.0,lot*100))
                         if r.get("contract_id"):
-                            pnl=float(r.get("buy_price",1))*0.08
+                            bal_before=st["balance"]
+bal_after=float(r.get("balance_after", st["balance"]))
+pnl=bal_after - bal_before
+st["balance"]=bal_after
                             ok=True
                             add_log(st,f"✅ Trade OK! ID:{r['contract_id']}","SUCCESS")
                             # Mete ajou balans reyèl

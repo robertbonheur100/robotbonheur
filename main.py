@@ -362,7 +362,7 @@ class DerivClient:
     def place_trade(self, symbol, direction, amount=1.0, multiplier=40):
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
-        ct="MULTUP" if direction=="BUY" else "MULTDOWN"
+        ct="CALL" if direction=="BUY" else "PUT"
         def on_msg(ws,msg):
             d=json.loads(msg)
             mt=d.get("msg_type","")

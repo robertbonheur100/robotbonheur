@@ -359,7 +359,7 @@ class DerivClient:
         if not res[0]: return []
         return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),"close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
 
-    def place_trade(self, symbol, direction, amount=1.0, multiplier=40):
+    def place_trade(self, symbol, direction, amount=1.0):
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         ct="CALL" if direction=="BUY" else "PUT"
@@ -445,6 +445,11 @@ def trading_loop(st):
 
     add_log(st,f"🚀 BonheurBot démarré | {symbol} | {strategy} | {broker}")
 
+    # Martingale variables
+    base_lot = lot
+    current_lot = lot
+    consec_losses = 0
+
     while st["running"]:
         try:
             candles=[]
@@ -470,22 +475,19 @@ def trading_loop(st):
 
             if sig!="NONE" and conf>=min_conf:
                 entry=candles[-1]["close"]
-                add_log(st,f"⚡ Trade {sig} @ {entry:.5f} | Conf: {conf:.0%}")
+                add_log(st,f"⚡ Trade {sig} @ {entry:.5f} | Conf: {conf:.0%} | Mise: ${current_lot:.2f}")
                 pnl=0; ok=False
 
                 if broker=="deriv" and st.get("deriv_api"):
                     try:
-                        r=st["deriv_api"].place_trade(symbol,sig,max(1.0,lot*100))
+                        r=st["deriv_api"].place_trade(symbol,sig,max(1.0,current_lot))
                         if r.get("contract_id"):
-                            bal_before=st["balance"]
-bal_after=float(r.get("balance_after", st["balance"]))
-pnl=bal_after - bal_before
-st["balance"]=bal_after
-                            ok=True
-                            add_log(st,f"✅ Trade OK! ID:{r['contract_id']}","SUCCESS")
-                            # Mete ajou balans reyèl
                             bal_after=r.get("balance_after")
-                            if bal_after: st["balance"]=float(bal_after)
+                            if bal_after:
+                                pnl=float(bal_after)-st["balance"]
+                                st["balance"]=float(bal_after)
+                            ok=True
+                            add_log(st,f"✅ Trade OK! ID:{r['contract_id']} | Bal:${st['balance']:.2f}","SUCCESS")
                     except Exception as e:
                         add_log(st,f"Trade echwe: {e}","ERROR")
 
@@ -499,12 +501,27 @@ st["balance"]=bal_after
                         add_log(st,f"Trade echwe: {e}","ERROR")
 
                 if ok:
+                    # Martingale logic
+                    if pnl > 0:
+                        current_lot = base_lot  # Reset apre victwa
+                        consec_losses = 0
+                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Lot reset: ${base_lot:.2f}","SUCCESS")
+                    elif pnl < 0:
+                        consec_losses += 1
+                        if consec_losses <= 4:  # Max 4 doubleman
+                            current_lot = min(current_lot * 2, base_lot * 16)
+                            add_log(st,f"⚠ Pèdi ${abs(pnl):.2f} | Martingale: lot → ${current_lot:.2f}","WARN")
+                        else:
+                            current_lot = base_lot  # Reset apre 4 pèt
+                            consec_losses = 0
+                            add_log(st,f"🔄 Reset martingale apre 4 pèt","WARN")
+
                     trade={
                         "id":len(st["trades"])+1,
                         "time":datetime.now().strftime("%H:%M:%S"),
                         "symbol":symbol,"side":sig,
                         "entry":round(entry,5),"conf":f"{conf:.0%}",
-                        "strategy":strategy,"pnl":round(pnl,2),"status":"open"
+                        "strategy":strategy,"pnl":round(pnl,2),"status":"closed"
                     }
                     st["trades"].insert(0,trade)
                     st["total_pnl"]+=pnl

@@ -367,7 +367,7 @@ class DerivClient:
             d=json.loads(msg)
             mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal":1,"amount":max(1.0,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"multiplier":40}))
+                ws.send(json.dumps({"proposal":1,"amount":max(1.0,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"duration":5,"duration_unit":"m"}))
             elif mt=="proposal":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))

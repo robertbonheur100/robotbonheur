@@ -3,7 +3,7 @@ import numpy as np
 
 MIN_CONF = 0.75
 RISK_PER_TRADE = 0.01
-
+MULTIPLIER = 40  # <-- Fikse multiplier nan 40 otomatikman
 # ===============================
 # INDICATORS
 # ===============================

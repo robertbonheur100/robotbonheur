@@ -298,7 +298,7 @@ class DerivClient:
         if not res[0]: return []
         return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),"close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
 
-    def place_trade(self, symbol, direction, amount=1.0, multiplier=40):
+    def place_trade(self, symbol, direction, amount=1.0, multiplier=70):
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         ct="MULTUP" if direction=="BUY" else "MULTDOWN"
@@ -306,7 +306,7 @@ class DerivClient:
             d=json.loads(msg)
             mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal":1,"amount":max(1.0,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"multiplier":40}))
+                ws.send(json.dumps({"proposal":1,"amount":max(1.0,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"multiplier":70}))
             elif mt=="proposal":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))

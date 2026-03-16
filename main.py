@@ -173,22 +173,18 @@ def strat_ai(c):
         avg5=sum(cl[-5:])/5
         if cl[-1]>avg5*1.001: sc+=0.5
         elif cl[-1]<avg5*0.999: sc-=0.5
-    if sc>=4: return "BUY", min(0.95, 0.65+(sc-4)*0.05)
-    if sc<=-4: return "SELL", min(0.95, 0.65+(-sc-4)*0.05)
+    if sc>=1.5: return "BUY", min(0.95, 0.60+(sc-1.5)*0.05)
+    if sc<=-1.5: return "SELL", min(0.95, 0.60+(-sc-1.5)*0.05)
     return "NONE",0
 
 def strat_scalping(c):
-    """Scalping Pro — kwa rapid EMA 3/8 ak RSI + volume"""
-    if len(c)<20: return "NONE",0
+    if len(c)<10: return "NONE",0
     cl=[x["close"] for x in c]
     e3=ema(cl,3); e8=ema(cl,8)
     if len(e3)<2 or len(e8)<2: return "NONE",0
     r=rsi(cl,7)
-    vols=[x.get("volume",1000) for x in c]
-    avg_v=sum(vols[-10:])/10; cur_v=vols[-1]
-    vol_ok=cur_v>avg_v*1.2
-    if e3[-2]<e8[-2] and e3[-1]>e8[-1] and r<60 and vol_ok: return "BUY",0.74
-    if e3[-2]>e8[-2] and e3[-1]<e8[-1] and r>40 and vol_ok: return "SELL",0.74
+    if e3[-1]>e8[-1] and r<70: return "BUY",0.70
+    if e3[-1]<e8[-1] and r>30: return "SELL",0.70
     return "NONE",0
 
 def strat_confluence(c):
@@ -198,12 +194,12 @@ def strat_confluence(c):
     for f in fns:
         try:
             s,conf=f(c)
-            if s=="BUY" and conf>=0.65: buy+=1; tc+=conf
-            if s=="SELL" and conf>=0.65: sell+=1; tc+=conf
+            if s=="BUY" and conf>=0.60: buy+=1; tc+=conf
+            if s=="SELL" and conf>=0.60: sell+=1; tc+=conf
         except: pass
     tot=buy+sell
-    if buy>=3 and buy>sell: return "BUY", min(0.95,tc/tot if tot else 0.70)
-    if sell>=3 and sell>buy: return "SELL", min(0.95,tc/tot if tot else 0.70)
+    if buy>=2 and buy>sell: return "BUY", min(0.95,tc/tot if tot else 0.70)
+    if sell>=2 and sell>buy: return "SELL", min(0.95,tc/tot if tot else 0.70)
     return "NONE",0
 
 STRATEGIES={
@@ -302,7 +298,7 @@ class DerivClient:
         if not res[0]: return []
         return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),"close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
 
-    def place_trade(self, symbol, direction, amount=1.0, multiplier=10):
+    def place_trade(self, symbol, direction, amount=1.0, multiplier=100):
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         ct="MULTUP" if direction=="BUY" else "MULTDOWN"
@@ -310,7 +306,7 @@ class DerivClient:
             d=json.loads(msg)
             mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal":1,"amount":max(1.0,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"multiplier":multiplier}))
+                ws.send(json.dumps({"proposal":1,"amount":max(1.0,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"multiplier":100}))
             elif mt=="proposal":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))

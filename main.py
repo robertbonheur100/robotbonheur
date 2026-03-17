@@ -649,7 +649,7 @@ def trading_loop(st):
         except Exception as e:
             add_log(st,f"Erè: {e}","ERROR")
 
-        time.sleep(tf)
+        time.sleep(320)  # Toujou tann 5 min 20 sek ant chak analiz
 
     add_log(st,"⏹ BonheurBot arrêté")
 

@@ -442,6 +442,26 @@ class DerivClient:
         if err[0]: raise Exception(err[0])
         return res[0]
 
+    def get_balance_sync(self):
+        """Jwenn balans reyèl apre kontrak fini"""
+        import websocket as wsl
+        res=[None]; done=threading.Event()
+        def on_msg(ws,msg):
+            d=json.loads(msg)
+            if d.get("msg_type")=="authorize" and "error" not in d:
+                ws.send(json.dumps({"balance":1,"account":"current"}))
+            elif d.get("msg_type")=="balance":
+                b=d.get("balance",{}).get("balance")
+                if b is not None: res[0]=float(b); done.set()
+            elif "error" in d: done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
+        threading.Thread(target=w.run_forever,daemon=True).start()
+        done.wait(timeout=15)
+        if res[0]: self._bal=res[0]
+        return res[0] or self._bal
+
     @property
     def balance(self): return self._bal
 
@@ -541,18 +561,32 @@ def trading_loop(st):
             if sig!="NONE" and conf>=min_conf:
                 entry=candles[-1]["close"]
                 add_log(st,f"⚡ Trade {sig} @ {entry:.5f} | Conf: {conf:.0%} | Mise: ${current_lot:.2f}")
-                pnl=0; ok=False
+                pnl=0; ok=False; contract_id=None
 
                 if broker=="deriv" and st.get("deriv_api"):
                     try:
                         r=st["deriv_api"].place_trade(symbol,sig,max(0.5,current_lot))
                         if r.get("contract_id"):
-                            bal_after=r.get("balance_after")
-                            if bal_after:
-                                pnl=float(bal_after)-st["balance"]
-                                st["balance"]=float(bal_after)
+                            contract_id = r["contract_id"]
+                            bal_before = st["balance"]
+                            # Retire mise a nan balans — Deriv deja retire l
+                            st["balance"] = float(r.get("balance_after", st["balance"]))
                             ok=True
-                            add_log(st,f"✅ Trade OK! ID:{r['contract_id']} | Bal:${st['balance']:.2f}","SUCCESS")
+                            add_log(st,f"⏳ Kontrak #{contract_id} louvri | Ap tann 5 min pou rezilta...","SUCCESS")
+                            # TANN 5 MINIT POU KONTRAK FINI
+                            time.sleep(320)  # 5 min 20 sek
+                            # Jwenn balans aktyèl apre kontrak fini
+                            try:
+                                new_bal = st["deriv_api"].get_balance_sync()
+                                if new_bal and new_bal > 0:
+                                    pnl = new_bal - st["balance"]
+                                    st["balance"] = new_bal
+                                    if pnl > 0:
+                                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Nouvo bal: ${st['balance']:.2f}","SUCCESS")
+                                    else:
+                                        add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Nouvo bal: ${st['balance']:.2f}","WARN")
+                            except Exception as e:
+                                add_log(st,f"Bal update: {e}","WARN")
                     except Exception as e:
                         add_log(st,f"Trade echwe: {e}","ERROR")
 
@@ -567,29 +601,25 @@ def trading_loop(st):
 
                 if ok:
                     if pnl > 0:
-                        # ✅ GENYEN — reset tout
                         net = pnl
-                        add_log(st,f"✅ GENYEN +${pnl:.2f} | Rekipere ${total_lost:.2f} | Benefis net: ${net:.2f}","SUCCESS")
+                        add_log(st,f"💰 GENYEN +${pnl:.2f} | Rekipere ${total_lost:.2f} | Net: ${net:.2f}","SUCCESS")
                         current_lot = base_lot
                         consec_losses = 0
                         total_lost = 0.0
                     elif pnl < 0:
-                        # ❌ PÈDI — kalkile prochèn mise pou rekipere tout
                         total_lost += abs(pnl)
                         consec_losses += 1
                         if consec_losses <= 4:
-                            # Fòmil pwofesyonèl: (total_pèdi + base_lot) / 0.95
                             next_lot = round((total_lost + base_lot) / 0.95, 2)
                             next_lot = max(0.5, next_lot)
                             current_lot = next_lot
-                            add_log(st,f"⚠ Pèt #{consec_losses} | Pèdi: ${total_lost:.2f} | Prochèn: ${current_lot:.2f}","WARN")
+                            add_log(st,f"⚠ Pèt #{consec_losses} | Total pèdi: ${total_lost:.2f} | Prochèn: ${current_lot:.2f}","WARN")
                         else:
-                            # Reset apre 4 pèt konsekitif
                             add_log(st,f"🔄 Reset apre 4 pèt | Total pèdi: ${total_lost:.2f}","WARN")
                             current_lot = base_lot
                             consec_losses = 0
                             total_lost = 0.0
-                            time.sleep(300)  # Tann 5 minit
+                            time.sleep(300)
 
                     trade={
                         "id":len(st["trades"])+1,
@@ -603,19 +633,17 @@ def trading_loop(st):
                     if pnl>0:
                         profit_send=round(pnl*PROFIT_PCT,2)
                         st["profit_sent"]+=profit_send
-                        add_log(st,f"📊 1% kalkilé: ${profit_send:.2f} | Total: ${st["profit_sent"]:.2f}","PROFIT")
                         if broker=="deriv" and st.get("deriv_api") and profit_send>=0.5:
                             try:
                                 st["deriv_api"].transfer_to_account("CR9560099", profit_send)
-                                add_log(st,f"💸 1% voye Deriv: ${profit_send} → CR9560099","PROFIT")
+                                add_log(st,f"💸 1% voye: ${profit_send} → CR9560099","PROFIT")
                             except Exception as e:
                                 add_log(st,f"Transfer echwe: {e}","ERROR")
                         if broker=="binance" and st.get("binance_api") and profit_send>=0.10:
                             try:
                                 st["binance_api"].send_profit(profit_send)
-                                add_log(st,f"💸 1% voye Binance: ${profit_send} → {PROFIT_WALLET[:12]}...","PROFIT")
-                            except Exception as e:
-                                add_log(st,f"Binance transfer echwe: {e}","ERROR")
+                                add_log(st,f"💸 1% voye Binance: ${profit_send}","PROFIT")
+                            except: pass
 
         except Exception as e:
             add_log(st,f"Erè: {e}","ERROR")

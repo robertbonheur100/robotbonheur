@@ -579,7 +579,8 @@ def trading_loop(st):
                             try:
                                 new_bal = st["deriv_api"].get_balance_sync()
                                 if new_bal and new_bal > 0:
-                                    pnl = new_bal - st["balance"]
+                                    # Deriv retire mise nan kontrak louvri — nou bezwen konpare ak anvan
+                                    pnl = new_bal - bal_before
                                     st["balance"] = new_bal
                                     if pnl > 0:
                                         add_log(st,f"✅ GENYEN! +${pnl:.2f} | Nouvo bal: ${st['balance']:.2f}","SUCCESS")

@@ -482,10 +482,8 @@ def trading_loop(st):
                     try:
                         r=st["deriv_api"].place_trade(symbol,sig,max(1.0,current_lot))
                         if r.get("contract_id"):
-                            bal_after=r.get("balance_after")
-                            if bal_after:
-                                pnl=float(bal_after)-st["balance"]
-                                st["balance"]=float(bal_after)
+                        pnl = float(r.get("profit",0))
+                        st["balance"] += pnl
                             ok=True
                             add_log(st,f"✅ Trade OK! ID:{r['contract_id']} | Bal:${st['balance']:.2f}","SUCCESS")
                     except Exception as e:

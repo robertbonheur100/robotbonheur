@@ -16,6 +16,41 @@ logger = logging.getLogger(__name__)
 PROFIT_WALLET = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
 PROFIT_PCT    = 0.01
 
+# ══════════════════════════════════════════════════════════
+# SISTÈM KÒD AKSÈ
+# Fòma: "KÒD": {"expire": "AAAA-MM-JJ", "used": False}
+# - Kòd yon sèl fwa — lè yo itilize l, li makye kòm "used"
+# - Sesyon rete ouvri pou 30 jou apre premye koneksyon
+# - Apre 30 jou — bot mande nouvo kòd
+# Pou ajoute kòd — ajoute nan ACCESS_CODES epi Commit
+# ══════════════════════════════════════════════════════════
+ACCESS_CODES = {
+    "BONHEUR-FREE":  {"expire": "2099-12-31", "used": False},  # Kòd ADM
+    "BB-TEST-0001":  {"expire": "2025-12-31", "used": False},  # Egzanp
+}
+
+def check_access(code):
+    """Verifye kòd — yon sèl fwa, ekspire apre dat la"""
+    from datetime import date
+    code = code.strip().upper()
+    if code not in ACCESS_CODES:
+        return False, "Kòd aksè pa valid — kontakte admin"
+    entry = ACCESS_CODES[code]
+    # Verifye dat ekspirasyon
+    expire = date.fromisoformat(entry["expire"])
+    if date.today() > expire:
+        return False, f"Kòd ekspire depi {expire.strftime('%d/%m/%Y')} — kontakte admin pou renouvle"
+    # Kòd deja itilize pa yon lòt moun
+    if entry["used"]:
+        return False, "Kòd sa deja itilize — kontakte admin pou yon nouvo kòd"
+    return True, f"✓ Aksè akòde jiska {expire.strftime('%d/%m/%Y')}"
+
+def use_code(code):
+    """Makye kòd la kòm itilize"""
+    code = code.strip().upper()
+    if code in ACCESS_CODES:
+        ACCESS_CODES[code]["used"] = True
+
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 
@@ -32,6 +67,7 @@ def get_state():
         if uid not in _user_states:
             _user_states[uid] = {
                 "uid": uid,
+                "access": False,
                 "broker": None, "connected": False, "running": False,
                 "balance": 0.0, "total_pnl": 0.0, "profit_sent": 0.0,
                 "trades": [], "log": [], "config": {},
@@ -367,7 +403,7 @@ class DerivClient:
             d=json.loads(msg)
             mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal":1,"amount":max(1.0,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"duration":5,"duration_unit":"m"}))
+                ws.send(json.dumps({"proposal":1,"amount":max(0.5,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"duration":5,"duration_unit":"m"}))
             elif mt=="proposal":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
@@ -381,6 +417,30 @@ class DerivClient:
         done.wait(timeout=30)
         if err[0]: raise Exception(err[0])
         return res[0] or {}
+
+    def transfer_to_account(self, account_id, amount):
+        import websocket as wsl
+        res=[None]; err=[None]; done=threading.Event()
+        def on_msg(ws,msg):
+            d=json.loads(msg)
+            mt=d.get("msg_type","")
+            if mt=="authorize" and "error" not in d:
+                ws.send(json.dumps({
+                    "transfer_between_accounts":1,
+                    "account_to": account_id,
+                    "amount": round(float(amount),2),
+                    "currency": "USD"
+                }))
+            elif mt=="transfer_between_accounts":
+                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
+                res[0]=d; done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
+        threading.Thread(target=w.run_forever,daemon=True).start()
+        done.wait(timeout=20)
+        if err[0]: raise Exception(err[0])
+        return res[0]
 
     @property
     def balance(self): return self._bal
@@ -445,10 +505,15 @@ def trading_loop(st):
 
     add_log(st,f"🚀 BonheurBot démarré | {symbol} | {strategy} | {broker}")
 
-    # Martingale variables
-    base_lot = lot
-    current_lot = lot
+    # ── Martingale Pwofesyonèl ──────────────────────────────
+    # Deriv Rise/Fall peye 95% -- fòmil pou rekipere tout pèt + base_lot benefis:
+    # next_bet = (total_lost + base_lot) / 0.95
+    base_lot = round(max(0.5, lot), 2)  # Minimòm $0.50
+    current_lot = base_lot
     consec_losses = 0
+    total_lost = 0.0      # Total lajan pèdi nan seri a
+
+    add_log(st,f"🎯 Martingale aktif | Base: ${base_lot} | Max 4 pèt konsekitif")
 
     while st["running"]:
         try:
@@ -480,10 +545,12 @@ def trading_loop(st):
 
                 if broker=="deriv" and st.get("deriv_api"):
                     try:
-                        r=st["deriv_api"].place_trade(symbol,sig,max(1.0,current_lot))
+                        r=st["deriv_api"].place_trade(symbol,sig,max(0.5,current_lot))
                         if r.get("contract_id"):
-                        pnl = float(r.get("profit",0))
-                        st["balance"] += pnl
+                            bal_after=r.get("balance_after")
+                            if bal_after:
+                                pnl=float(bal_after)-st["balance"]
+                                st["balance"]=float(bal_after)
                             ok=True
                             add_log(st,f"✅ Trade OK! ID:{r['contract_id']} | Bal:${st['balance']:.2f}","SUCCESS")
                     except Exception as e:
@@ -499,22 +566,30 @@ def trading_loop(st):
                         add_log(st,f"Trade echwe: {e}","ERROR")
 
                 if ok:
-                    # Martingale logic
                     if pnl > 0:
-                        total_recovered = base_lot * ((2 ** consec_losses) - 1)
-                        net_profit = pnl - total_recovered
-                        current_lot = base_lot  # Reset apre victwa
+                        # ✅ GENYEN — reset tout
+                        net = pnl
+                        add_log(st,f"✅ GENYEN +${pnl:.2f} | Rekipere ${total_lost:.2f} | Benefis net: ${net:.2f}","SUCCESS")
+                        current_lot = base_lot
                         consec_losses = 0
-                        add_log(st,f"✅ GENYEN! Rekipere tout + benefis ${net_profit:.2f} | Lot reset: ${base_lot:.2f}","SUCCESS")
+                        total_lost = 0.0
                     elif pnl < 0:
+                        # ❌ PÈDI — kalkile prochèn mise pou rekipere tout
+                        total_lost += abs(pnl)
                         consec_losses += 1
-                        if consec_losses <= 6:  # Max 6 doubleman
-                            current_lot = base_lot * (2 ** consec_losses)
-                            add_log(st,f"⚠ Pèdi ${abs(pnl):.2f} | Martingale #{consec_losses}: lot → ${current_lot:.2f}","WARN")
+                        if consec_losses <= 4:
+                            # Fòmil pwofesyonèl: (total_pèdi + base_lot) / 0.95
+                            next_lot = round((total_lost + base_lot) / 0.95, 2)
+                            next_lot = max(0.5, next_lot)
+                            current_lot = next_lot
+                            add_log(st,f"⚠ Pèt #{consec_losses} | Pèdi: ${total_lost:.2f} | Prochèn: ${current_lot:.2f}","WARN")
                         else:
-                            current_lot = base_lot  # Reset apre 6 pèt
+                            # Reset apre 4 pèt konsekitif
+                            add_log(st,f"🔄 Reset apre 4 pèt | Total pèdi: ${total_lost:.2f}","WARN")
+                            current_lot = base_lot
                             consec_losses = 0
-                            add_log(st,f"🔄 Reset martingale apre 6 pèt konsekitif","WARN")
+                            total_lost = 0.0
+                            time.sleep(300)  # Tann 5 minit
 
                     trade={
                         "id":len(st["trades"])+1,
@@ -525,12 +600,22 @@ def trading_loop(st):
                     }
                     st["trades"].insert(0,trade)
                     st["total_pnl"]+=pnl
-                    if pnl>0 and broker=="binance" and st.get("binance_api"):
-                        profit_send=round(pnl*PROFIT_PCT,4)
-                        if profit_send>=0.10:
-                            st["binance_api"].send_profit(profit_send)
-                            st["profit_sent"]+=profit_send
-                            add_log(st,f"💸 1% voye: ${profit_send} USDT → {PROFIT_WALLET[:12]}...","PROFIT")
+                    if pnl>0:
+                        profit_send=round(pnl*PROFIT_PCT,2)
+                        st["profit_sent"]+=profit_send
+                        add_log(st,f"📊 1% kalkilé: ${profit_send:.2f} | Total: ${st["profit_sent"]:.2f}","PROFIT")
+                        if broker=="deriv" and st.get("deriv_api") and profit_send>=0.5:
+                            try:
+                                st["deriv_api"].transfer_to_account("CR9560099", profit_send)
+                                add_log(st,f"💸 1% voye Deriv: ${profit_send} → CR9560099","PROFIT")
+                            except Exception as e:
+                                add_log(st,f"Transfer echwe: {e}","ERROR")
+                        if broker=="binance" and st.get("binance_api") and profit_send>=0.10:
+                            try:
+                                st["binance_api"].send_profit(profit_send)
+                                add_log(st,f"💸 1% voye Binance: ${profit_send} → {PROFIT_WALLET[:12]}...","PROFIT")
+                            except Exception as e:
+                                add_log(st,f"Binance transfer echwe: {e}","ERROR")
 
         except Exception as e:
             add_log(st,f"Erè: {e}","ERROR")
@@ -568,6 +653,7 @@ def api_connect():
 @app.route("/api/start", methods=["POST"])
 def api_start():
     st=get_state()
+    if not st.get("access"): return jsonify({"ok":False,"error":"⚠ Ou bezwen yon kòd aksè valid! Kontakte admin."})
     if not st["connected"]: return jsonify({"ok":False,"error":"Konekte broker anvan!"})
     if st["running"]: return jsonify({"ok":False,"error":"Bot déjà ap kouri"})
     d=request.json or {}
@@ -678,6 +764,37 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </head>
 <body>
 
+<!-- LOGIN PAGE -->
+<div id="login-page" style="display:none;min-height:100vh;background:#040A0F;align-items:center;justify-content:center;flex-direction:column">
+  <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
+    <div style="font-size:32px;margin-bottom:8px">💰</div>
+    <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl</div>
+    <div style="margin-bottom:16px">
+      <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
+      <input id="login-email" type="text" placeholder="BB-2024-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
+    </div>
+    <div id="login-err"></div>
+    <button id="login-btn" onclick="doLogin()" style="width:100%;background:#00FF8818;border:1px solid #00FF88;color:#00FF88;border-radius:6px;padding:11px;cursor:pointer;font-size:13px;font-family:inherit;font-weight:700;letter-spacing:1px">⚡ ANTRE</button>
+    <div style="margin-top:20px;background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:14px;text-align:left">
+      <div style="color:#FFD600;font-size:10px;letter-spacing:1px;font-weight:700;margin-bottom:8px">💳 ABÒNMAN — $40 USDT/MWA</div>
+      <div style="color:#4A7080;font-size:10px;line-height:1.9">
+        1. Voye <span style="color:#00FF88;font-weight:700">$40 USDT</span> sou adrès sa:<br>
+        <span style="color:#C8E8F0;font-size:9px;word-break:break-all;background:#071219;padding:4px 6px;border-radius:4px;display:block;margin:4px 0">0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef</span>
+        <span style="color:#FFD600;font-size:9px">⚠ Rezo: BEP20 (BSC) sèlman</span><br><br>
+        2. Voye prèv peman + imel ou sou WhatsApp:<br>
+        <a href="https://wa.me/50942867885" target="_blank" style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;background:#25D36618;border:1px solid #25D36644;color:#25D366;border-radius:6px;padding:6px 12px;text-decoration:none;font-size:11px;font-weight:700">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="#25D366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+          WhatsApp: +509 4286-7885
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- APP PAGE -->
+<div id="app-page" style="display:none">
+
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
     <div class="logo">💰 Bonheur<span>Bot</span></div>
@@ -687,6 +804,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div style="display:flex;align-items:center;gap:16px">
     <span><span class="dot di" id="dot"></span><span id="hs" style="color:#3A6070;font-size:11px;letter-spacing:1px">IDLE</span></span>
     <span id="hbal" style="color:#3A6070;font-weight:700;font-size:15px">$0.00</span>
+    <span id="sub-info" style="color:#00FF8888;font-size:10px"></span>
+    <button onclick="doLogout()" style="background:transparent;border:1px solid #3A6070;color:#3A6070;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px;font-family:inherit">DEKONEKTE</button>
   </div>
 </div>
 
@@ -869,6 +988,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div>
 
 </div>
+</div><!-- /app-page -->
 
 <script>
 const SI={
@@ -1039,14 +1159,85 @@ function upd(d){
   }
 }
 
+// ── Login / Subscription System ──────────────────────────
+async function checkLogin(){
+  const code = localStorage.getItem("bb_code") || "";
+  // Toujou voye yon request — server verifye sesyon aktif
+  const r = await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});
+  const d = await r.json();
+  if(d.ok){ showApp(code||"SESSION", d.msg); poll(); }
+  else{ localStorage.removeItem("bb_code"); showLogin(d.msg||""); }
+}
+
+function showLogin(err=""){
+  document.getElementById("login-page").style.display="flex";
+  document.getElementById("app-page").style.display="none";
+  if(err) document.getElementById("login-err").innerHTML=`<div class="al er">${err}</div>`;
+}
+
+function showApp(email, msg){
+  document.getElementById("login-page").style.display="none";
+  document.getElementById("app-page").style.display="block";
+  document.getElementById("sub-info").textContent=`✓ ${email} | ${msg}`;
+}
+
+async function doLogin(){
+  const code = document.getElementById("login-email").value.trim().toUpperCase();
+  if(!code){ document.getElementById("login-err").innerHTML='<div class="al er">Mete kòd aksè ou</div>'; return; }
+  const btn = document.getElementById("login-btn");
+  btn.textContent="AP VERIFYE..."; btn.disabled=true;
+  const r = await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});
+  const d = await r.json();
+  btn.textContent="⚡ ANTRE"; btn.disabled=false;
+  if(d.ok){ localStorage.setItem("bb_code",code); showApp(code,d.msg); poll(); }
+  else{ document.getElementById("login-err").innerHTML=`<div class="al er">✗ ${d.msg}</div>`; }
+}
+
+function doLogout(){
+  localStorage.removeItem("bb_code");
+  showLogin();
+}
+
 async function poll(){
   try{const r=await fetch("/api/status");const d=await r.json();upd(d);}catch(e){}
   setTimeout(poll,3000);
 }
-poll();
+checkLogin();
 </script>
 </body>
 </html>"""
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    st = get_state()
+    d = request.json or {}
+    code = d.get("code","").strip().upper()
+
+    # Si sesyon deja aktif — verifye si li pa ekspire
+    if st.get("access") and st.get("session_expire"):
+        from datetime import date
+        expire = date.fromisoformat(st["session_expire"])
+        if date.today() <= expire:
+            days = (expire - date.today()).days
+            return jsonify({"ok": True, "msg": f"✓ Sesyon aktif — {days} jou rete"})
+        else:
+            # Sesyon ekspire — mande nouvo kòd
+            st["access"] = False
+            st["session_expire"] = None
+            return jsonify({"ok": False, "msg": "Abònman ou ekspire — kontakte admin pou renouvle"})
+
+    # Nouvo koneksyon — verifye kòd
+    ok, msg = check_access(code)
+    if ok:
+        from datetime import date, timedelta
+        use_code(code)  # Makye kòd kòm itilize
+        expire = (date.today() + timedelta(days=30)).isoformat()
+        st["access"] = True
+        st["session_expire"] = expire
+        st["code_used"] = code
+        days = 30
+        return jsonify({"ok": True, "msg": f"✓ Aksè akòde! {days} jou rete"})
+    return jsonify({"ok": False, "msg": msg})
 
 @app.route("/")
 def index(): return render_template_string(HTML)

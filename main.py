@@ -32,6 +32,7 @@ ACCESS_CODES = {
     "HJKy8kFD":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
      "GHt3hjI6":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
     "GJKY":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
+       "TYVD":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
    
     
 }

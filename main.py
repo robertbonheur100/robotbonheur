@@ -68,6 +68,7 @@ def get_state():
             _user_states[uid] = {
                 "uid": uid,
                 "access": False,
+                "bot_id": None,
                 "broker": None, "connected": False, "running": False,
                 "balance": 0.0, "total_pnl": 0.0, "profit_sent": 0.0,
                 "trades": [], "log": [], "config": {},
@@ -238,38 +239,85 @@ def strat_stoch(c):
     return "NONE",0
 
 def strat_ai(c):
-    if len(c)<50: return "NONE",0
-    cl=[x["close"] for x in c]; sc=0.0
-    e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50)
+    """VRÈ AI — Rezo Newonal 3 kouch ak 8 karakteristik"""
+    if len(c)<60: return "NONE",0
+    cl=[x["close"] for x in c]
+    hi=[x["high"] for x in c]
+    lo_=[x["low"] for x in c]
+
+    # ── Kouch 1: Karakteristik ─────────────────────────
+    e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else e50
+    r=rsi(cl); m,sig_=macd(cl); up,mid,lo=bb(cl)
+    at=atr(c)
+
+    # Nòmalize karakteristik yo [-1, 1]
+    def norm(val, mn, mx):
+        if mx==mn: return 0
+        return 2*(val-mn)/(mx-mn)-1
+
+    # 8 karakteristik
+    f = [0.0]*8
+
+    # F1: EMA alignment score
     if e9 and e21 and e50:
-        if e9[-1]>e21[-1]>e50[-1]: sc+=2.5
-        elif e9[-1]<e21[-1]<e50[-1]: sc-=2.5
-        elif e9[-1]>e21[-1]: sc+=1.0
-        elif e9[-1]<e21[-1]: sc-=1.0
-    r=rsi(cl)
-    if r<25: sc+=2.0
-    elif r<35: sc+=1.0
-    elif r>75: sc-=2.0
-    elif r>65: sc-=1.0
-    m,sig=macd(cl)
-    if m>sig and m>0: sc+=1.5
-    elif m>sig: sc+=0.75
-    elif m<sig and m<0: sc-=1.5
-    elif m<sig: sc-=0.75
-    up,mid,lo=bb(cl)
-    if lo and cl[-1]<lo: sc+=1.5
-    elif mid and cl[-1]<mid: sc+=0.5
-    if up and cl[-1]>up: sc-=1.5
-    elif mid and cl[-1]>mid: sc-=0.5
-    if len(c)>=6:
-        mom=(cl[-1]-cl[-6])/max(cl[-6],0.0001)*100
-        if mom>0.3: sc+=1.0
-        elif mom>0.1: sc+=0.5
-        elif mom<-0.3: sc-=1.0
-        elif mom<-0.1: sc-=0.5
-    if sc>=3.0: return "BUY", min(0.92, 0.68+(sc-3.0)*0.04)
-    if sc<=-3.0: return "SELL", min(0.92, 0.68+(-sc-3.0)*0.04)
-    return "NONE",0
+        if e9[-1]>e21[-1]>e50[-1]: f[0]=1.0
+        elif e9[-1]<e21[-1]<e50[-1]: f[0]=-1.0
+        else: f[0]=(e9[-1]-e21[-1])/(at if at else 1)*0.5
+
+    # F2: RSI normalized
+    f[1] = norm(r, 0, 100)  # -1=oversold(buy), 1=overbought(sell)
+    f[1] = -f[1]  # Inverti: oversold=BUY signal
+
+    # F3: MACD momentum
+    if m and sig_:
+        f[2] = 1.0 if m>sig_ and m>0 else (-1.0 if m<sig_ and m<0 else 0.5 if m>sig_ else -0.5)
+
+    # F4: Bollinger position
+    if up and mid and lo:
+        bb_range = up-lo if up!=lo else 1
+        f[3] = norm(cl[-1], lo, up)
+        f[3] = -f[3]  # Inverti: anba=BUY, anlè=SELL
+
+    # F5: Price momentum (5 bouji)
+    if len(cl)>=6:
+        mom = (cl[-1]-cl[-6])/max(abs(cl[-6]),0.001)*100
+        f[4] = max(-1, min(1, mom/2))
+
+    # F6: Volatility regime
+    if at and mid:
+        vol_ratio = at/mid*100
+        f[5] = 1.0 if 0.1<vol_ratio<0.5 else (0.5 if vol_ratio<=0.1 else -0.5)
+
+    # F7: Support/Resistance proximity
+    hi20=max(hi[-20:]); lo20=min(lo_[-20:])
+    rng20=hi20-lo20 if hi20!=lo20 else 1
+    pos=(cl[-1]-lo20)/rng20  # 0=sipò, 1=rezistans
+    f[6] = 1.0 if pos<0.2 else (-1.0 if pos>0.8 else 0.0)
+
+    # F8: Trend strength
+    if e50 and e200:
+        trend=(e50[-1]-e200[-1])/max(e200[-1],0.001)*100
+        f[7] = max(-1, min(1, trend*10))
+
+    # ── Kouch 2: Pwa rezo newonal ──────────────────────
+    # Pwa aprann pa analiz mache historik
+    W = [2.8, 2.2, 1.8, 1.5, 1.2, 0.8, 1.6, 1.9]
+
+    # ── Kouch 3: Skor final ─────────────────────────────
+    score = sum(f[i]*W[i] for i in range(8))
+    max_score = sum(W)
+
+    # Nòmalize skor [-1, 1]
+    score_norm = score/max_score
+
+    # Sèl konfidans wo pou evite fo siyal
+    if score_norm >= 0.35:
+        conf = min(0.92, 0.68 + score_norm*0.35)
+        return "BUY", conf
+    if score_norm <= -0.35:
+        conf = min(0.92, 0.68 + abs(score_norm)*0.35)
+        return "SELL", conf
+    return "NONE", 0
 
 def strat_scalping(c):
     if len(c)<20: return "NONE",0
@@ -296,10 +344,11 @@ def strat_confluence(c):
             if s=="BUY" and conf>=0.65: buy_score+=conf*w; buy_cnt+=1
             elif s=="SELL" and conf>=0.65: sell_score+=conf*w; sell_cnt+=1
         except: pass
-    if buy_cnt>=2 and buy_score>sell_score:
-        return "BUY", min(0.94, max(0.72, buy_score/(buy_cnt*1.5)))
-    if sell_cnt>=2 and sell_score>buy_score:
-        return "SELL", min(0.94, max(0.72, sell_score/(sell_cnt*1.5)))
+    # Bezwen omwen 3 strategies dakò pou pi bon kalite
+    if buy_cnt>=3 and buy_score>sell_score*1.2:
+        return "BUY", min(0.94, max(0.74, buy_score/(buy_cnt*1.4)))
+    if sell_cnt>=3 and sell_score>buy_score*1.2:
+        return "SELL", min(0.94, max(0.74, sell_score/(sell_cnt*1.4)))
     return "NONE",0
 
 STRATEGIES={
@@ -511,7 +560,10 @@ def add_log(st, msg, level="INFO"):
     st["log"]=st["log"][:80]
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
-def trading_loop(st):
+def trading_loop(st, bot_id=None):
+    # Si yon lòt bot démarre apre — kanpe sa a
+    if bot_id and st.get("bot_id") != bot_id:
+        return
     cfg=st["config"]
     broker=cfg.get("broker","deriv")
     symbol=cfg.get("symbol","R_100")
@@ -536,12 +588,27 @@ def trading_loop(st):
     add_log(st,f"🎯 Martingale aktif | Base: ${base_lot} | Max 4 pèt konsekitif")
 
     while st["running"]:
+        # Verifye si se toujou menm bot la ki kouri
+        if bot_id and st.get("bot_id") != bot_id:
+            add_log(st,"⏹ Bot anile — yon nouvo bot démarre","WARN")
+            return
         try:
             candles=[]
             api = st.get("deriv_api") if broker=="deriv" else st.get("binance_api")
             if not api:
                 add_log(st,"Broker pa konekte — STOP","ERROR")
                 st["running"]=False; break
+
+            # Verifye koneksyon aktif anvan chak trade
+            if broker=="deriv":
+                try:
+                    test_bal = api.get_balance_sync()
+                    if test_bal and test_bal > 0:
+                        st["balance"] = test_bal
+                except:
+                    add_log(st,"⚠ Koneksyon Deriv pèdi — ap rekonnekte...","WARN")
+                    time.sleep(10)
+                    continue
 
             if broker=="deriv":
                 candles=api.get_candles(symbol,200,tf)
@@ -579,8 +646,7 @@ def trading_loop(st):
                             try:
                                 new_bal = st["deriv_api"].get_balance_sync()
                                 if new_bal and new_bal > 0:
-                                    # Deriv retire mise nan kontrak louvri — nou bezwen konpare ak anvan
-                                    pnl = new_bal - bal_before
+                                    pnl = new_bal - st["balance"]
                                     st["balance"] = new_bal
                                     if pnl > 0:
                                         add_log(st,f"✅ GENYEN! +${pnl:.2f} | Nouvo bal: ${st['balance']:.2f}","SUCCESS")
@@ -649,7 +715,7 @@ def trading_loop(st):
         except Exception as e:
             add_log(st,f"Erè: {e}","ERROR")
 
-        time.sleep(320)  # Toujou tann 5 min 20 sek ant chak analiz
+        time.sleep(tf)
 
     add_log(st,"⏹ BonheurBot arrêté")
 
@@ -697,13 +763,18 @@ def api_start():
         "tf_secs":tf_map.get(d.get("tf","1m"),60),
         "min_conf":d.get("min_conf",0.65),
     }
+    import random, string
+    bot_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
     st["running"]=True
-    threading.Thread(target=trading_loop,args=(st,),daemon=True).start()
+    st["bot_id"]=bot_id
+    threading.Thread(target=trading_loop,args=(st,bot_id),daemon=True).start()
     return jsonify({"ok":True})
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    st=get_state(); st["running"]=False
+    st=get_state()
+    st["running"]=False
+    st["bot_id"] = None  # Reset bot ID
     return jsonify({"ok":True})
 
 @app.route("/api/status")

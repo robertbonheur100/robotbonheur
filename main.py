@@ -28,7 +28,7 @@ PROFIT_PCT    = 0.01
 # Fòma: "KÒD": {"created_at": timestamp, "used": False}
 # Adm ajoute kòd yo isit — yo bon pou 1 MINIT sèlman
 ACCESS_CODES = {
-    "BONHEUR-FREE":  {"created_at": None, "used": False},  # Kòd ADM (pa ekspire)
+    "BONHEURWIN":  {"created_at": None, "used": False},  # Kòd ADM (pa ekspire)
     "BB-TEST-0001":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
 }
 

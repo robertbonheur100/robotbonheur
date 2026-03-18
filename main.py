@@ -29,7 +29,10 @@ PROFIT_PCT    = 0.01
 # Adm ajoute kòd yo isit — yo bon pou 1 MINIT sèlman
 ACCESS_CODES = {
     "BONHEURWIIN":  {"created_at": None, "used": False},  # Kòd ADM (pa ekspire)
-    "BB-TEST-0001":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
+    "HJKy8kFD":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
+     "GHt3hjI6":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
+    "K5nJFUCD":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
+    
 }
 
 CODE_TTL_SECONDS = 60  # 1 minit

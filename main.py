@@ -18,26 +18,26 @@ PROFIT_PCT    = 0.01
 
 # ══════════════════════════════════════════════════════════
 # SISTÈM KÒD AKSÈ
-# ── FIX #2: Kòd ekspire 1 MINIT apre kreyasyon (pa yon dat fix)
+# ── FIX #2: Kòd ekspire 3 MINIT apre kreyasyon (pa yon dat fix)
 # ── Sesyon browser dire 30 JOU (stoke nan _sessions dict)
 # ── Si menm browser — pa mande kòd ankò (via session_token cookie)
-# ── Si nouvo browser — mande kòd, men kòd la deja ekspire (1 min)
+# ── Si nouvo browser — mande kòd, men kòd la deja ekspire (3 min)
 #    => Adm dwe voye nouvo kòd pou chak aksè
 # ══════════════════════════════════════════════════════════
 
 # Fòma: "KÒD": {"created_at": timestamp, "used": False}
-# Adm ajoute kòd yo isit — yo bon pou 1 MINIT sèlman
+# Adm ajoute kòd yo isit — yo bon pou 3 MINIT sèlman
 ACCESS_CODES = {
     "BONHEURWIIN":  {"created_at": None, "used": False},  # Kòd ADM (pa ekspire)
-    "HJKy8kFD":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
-     "GHt3hjI6":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
-    "GJKY":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
-       "TYVD":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
+    "HJKy8kFD":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 3 min
+     "GHt3hjI6":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 3 min
+    "GJKY":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 3 min
+        "EHJI":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 3 min
    
     
 }
 
-CODE_TTL_SECONDS = 60  # 1 minit
+CODE_TTL_SECONDS = 180  # 3 minit
 
 def check_access(code):
     """Verifye kòd — ekspire 1 minit apre kreyasyon, yon sèl fwa sèlman"""

@@ -31,7 +31,7 @@ ACCESS_CODES = {
     "BONHEURWIIN":  {"created_at": None, "used": False},  # Kòd ADM (pa ekspire)
     "HJKy8kFD":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
      "GHt3hjI6":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
-    "GHUJ":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
+    "GJKY":  {"created_at": time.time(), "used": False},  # Egzanp — bon pou 1 min
    
     
 }

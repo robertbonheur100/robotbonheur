@@ -25,8 +25,11 @@ PROFIT_PCT    = 0.01
 # Pou ajoute kòd — ajoute nan ACCESS_CODES epi Commit
 # ══════════════════════════════════════════════════════════
 ACCESS_CODES = {
-    "BONHEUR-FREE":  {"expire": "2099-12-31", "used": False},  # Kòd ADM
-    "BB-TEST-0001":  {"expire": "2025-12-31", "used": False},  # Egzanp
+       "BONHEURWIIN":  {"created_at": None,         "used": False},  # Kòd ADM — pa janm ekspire
+    "HJKy8kFD":     {"created_at": time.time(),  "used": False},
+    "GHt3hjI6":     {"created_at": time.time(),  "used": False},
+    "GJKY":         {"created_at": time.time(),  "used": False},
+    "EHJI":         {"created_at": time.time(),  "used": False},
 }
 
 def check_access(code):

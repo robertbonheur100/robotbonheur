@@ -1559,7 +1559,9 @@ def api_connect():
             import websocket
             api=DerivClient(d["token"],d.get("app_id","1089"))
             bal=api.connect()
-            st["deriv_api"]=api; st["deriv_digits_api"]=api
+            st["deriv_api"]=api
+            digits_api = DerivDigitsClient(d["token"], d.get("app_id","1089"))
+            st["deriv_digits_api"] = digits_api
             st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"deriv"})
         elif broker=="binance":

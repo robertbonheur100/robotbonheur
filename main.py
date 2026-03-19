@@ -393,11 +393,17 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
         if s=="BUY":
             if nxt["low"]<=entry-sl*0.0001: pnl=-sl*lot*10; losses+=1
             elif nxt["high"]>=entry+tp*0.0001: pnl=tp*lot*10; wins+=1
-            else: pnl=(nxt["close"]-entry)*lot*100000
-        else:
+            else:
+            pnl=(nxt["close"]-entry)*lot*100000
+            if pnl>0: wins+=1
+            else: losses+=1
+            else:
             if nxt["high"]>=entry+sl*0.0001: pnl=-sl*lot*10; losses+=1
             elif nxt["low"]<=entry-tp*0.0001: pnl=tp*lot*10; wins+=1
-            else: pnl=(entry-nxt["close"])*lot*100000
+            else:
+           pnl=(nxt["close"]-entry)*lot*100000
+          if pnl>0: wins+=1
+        else: losses+=1
         if pnl>0: wins+=1 if s=="NONE" else 0
         else: losses+=1 if s=="NONE" else 0
         bal+=pnl; equity.append(round(bal,2))
@@ -418,7 +424,7 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
         "win_rate":round(wins/tot*100,1) if tot else 0,
         "net_pnl":net,"return_pct":round(net/equity[0]*100,2),
         "max_dd":round(dd,2),"pf":round(gp/gl,2) if gl else 999,
-        "sharpe":round(avg/std*math.sqrt(252),2) if std else 0,
+        "sharpe":round(avg/std*math.sqrt(252),2) if std and std>0 else 0,
         "equity":equity[-50:],
     }
 

@@ -1936,12 +1936,12 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div id="digits-opts" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:10px;margin-bottom:10px">
         <div class="iw"><div class="il">TIP DIGITS</div>
           <select id="c-digit-type">
-            <option value="over_under">Over 4 / Under 5 (~55% chans)</option>
-            <option value="even_odd">Even / Odd (~50% chans)</option>
+            <option value="over_under">Over 4 / Under 5 </option>
+            <option value="even_odd">Even / Odd </option>
           </select>
         </div>
         <div style="color:#FFD600;font-size:11px;line-height:1.8">
-          ⚠ Digits mode: estrateji teknik dezaktive<br>
+          ⚠ Digits mode: estrateji teknik <br>
           <span style="color:#00FF88">✓ Rekòmande: R_10 | Mise $0.35 | Over 4/Under 5</span>
         </div>
       </div>
@@ -1987,9 +1987,9 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
       </div>
       <div class="box">
-        <div class="bt">💰 PROFIT AUTO-TRANSFER</div>
+        <div class="bt">💰 PROFIT </div>
         <div style="color:#4A7080;font-size:11px;line-height:1.9">
-          Chak benefis → <span style="color:#FFD600">1%</span> otomatik sou:<br>
+           → <span style="color:#FFD600">1%</span> otomatik sou:<br>
           <span style="color:#FFD600;font-size:10px">CR9560099 (Deriv)</span>
         </div>
       </div>

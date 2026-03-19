@@ -993,114 +993,184 @@ def add_log(st, msg, level="INFO"):
 # DIGITS TRADING LOOP
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
-    if bot_id and st.get("bot_id")!=bot_id: return
-    cfg=st["config"]
-    symbol=cfg.get("symbol","R_10")
-    lot=float(cfg.get("lot",0.35))
-    digit_type=cfg.get("digit_type","over_under")
-    PAYOUT=0.95
+    """
+    Digits loop — respekte min_conf + tann siyal valid
+    Pa plase trade si siyal pa satisfè konfidans itilizatè a
+    """
+    if bot_id and st.get("bot_id") != bot_id: return
 
-    base_lot=round(max(0.35,lot),2); current_lot=base_lot
-    consec_losses=0; total_lost=0.0
+    cfg        = st["config"]
+    symbol     = cfg.get("symbol", "R_10")
+    lot        = float(cfg.get("lot", 0.35))
+    digit_type = cfg.get("digit_type", "over_under")
+    min_conf   = float(cfg.get("min_conf", 0.70))  # ← respekte konfidans itilizatè
+    PAYOUT     = 0.95
 
-    add_log(st,f"🎲 Digits Bot | {symbol} | {digit_type} | Base:${base_lot}")
+    base_lot      = round(max(0.35, lot), 2)
+    current_lot   = base_lot
+    consec_losses = 0
+    total_lost    = 0.0
+
+    add_log(st, f"🎲 Digits Bot | {symbol} | {digit_type} | Base:${base_lot} | Conf min:{min_conf:.0%}")
 
     while st["running"]:
-        if bot_id and st.get("bot_id")!=bot_id:
-            add_log(st,"⏹ Digits bot anile","WARN"); return
+        if bot_id and st.get("bot_id") != bot_id:
+            add_log(st, "⏹ Digits bot anile", "WARN"); return
         try:
-            api=st.get("deriv_digits_api")
+            api = st.get("deriv_digits_api")
             if not api:
-                add_log(st,"Digits API pa konekte","ERROR")
-                st["running"]=False; break
+                add_log(st, "Digits API pa konekte", "ERROR")
+                st["running"] = False; break
 
+            # Balans aktyèl
             try:
-                b=api.get_balance_sync()
-                if b and b>0: st["balance"]=b
+                b = api.get_balance_sync()
+                if b and b > 0: st["balance"] = b
             except: pass
 
-            if st["balance"]<current_lot:
-                add_log(st,f"⚠ Balans ${st['balance']:.2f} ensifizan — reset","WARN")
-                current_lot=base_lot; consec_losses=0; total_lost=0.0
+            # Verifye balans ase
+            if st["balance"] < current_lot:
+                add_log(st, f"⚠ Balans ${st['balance']:.2f} ensifizan — reset", "WARN")
+                current_lot = base_lot; consec_losses = 0; total_lost = 0.0
 
-            candles=api.get_candles(symbol,50,60)
-            if len(candles)<10: time.sleep(5); continue
+            # ── Jwenn bouji pou analiz ──────────────────────
+            candles = api.get_candles(symbol, 50, 60)
+            if len(candles) < 20:
+                add_log(st, f"Pa ase done ({len(candles)}) — tann...", "WARN")
+                time.sleep(30); continue
 
-            sig="NONE"; conf=0; contract_type=""; barrier=None
-            if digit_type=="over_under":
-                action,conf=strat_digits_over(candles,threshold=4)
-                if action=="OVER":  contract_type="DIGITOVER";  barrier=4; sig="OVER 4"
-                elif action=="UNDER": contract_type="DIGITUNDER"; barrier=5; sig="UNDER 5"
-            elif digit_type=="even_odd":
-                action,conf=strat_digits_even_odd(candles)
-                if action=="EVEN": contract_type="DIGITEVEN"; sig="EVEN"
-                elif action=="ODD":  contract_type="DIGITODD";  sig="ODD"
+            # ── Evalye estrateji — respekte min_conf ────────
+            sig = "NONE"; conf = 0.0
+            contract_type = ""; barrier = None
 
-            add_log(st,f"🎲 {symbol} | {sig} | Conf:{conf:.0%} | Mise:${current_lot:.2f}")
+            if digit_type == "over_under":
+                action, conf = strat_digits_over(candles, threshold=4)
+                if action == "OVER":
+                    contract_type = "DIGITOVER"; barrier = 4; sig = "OVER 4"
+                elif action == "UNDER":
+                    contract_type = "DIGITUNDER"; barrier = 5; sig = "UNDER 5"
 
-            if sig=="NONE" or conf<0.55:
-                add_log(st,"⏭ Pa gen siyal digits — tann...")
-                time.sleep(10); continue
+            elif digit_type == "even_odd":
+                action, conf = strat_digits_even_odd(candles)
+                if action == "EVEN":
+                    contract_type = "DIGITEVEN"; sig = "EVEN"
+                elif action == "ODD":
+                    contract_type = "DIGITODD"; sig = "ODD"
 
-            bal_before=st["balance"]
+            # ── FILTRE KONFIDANS — kle koreksyon an ─────────
+            # Si siyal pa satisfè min_conf — PA plase trade
+            # Tann 30 segonn epi rechèche siyal nouvo
+            if sig == "NONE":
+                add_log(st, f"⏭ Pa gen siyal — ap tann 30sek...")
+                time.sleep(30); continue
+
+            if conf < min_conf:
+                add_log(st, f"⏭ Conf {conf:.0%} < {min_conf:.0%} requi — pa trade | tann...")
+                time.sleep(30); continue
+
+            # ── Siyal valid — plase trade ────────────────────
+            add_log(st, f"✅ Siyal valid | {sig} | Conf:{conf:.0%} ≥ {min_conf:.0%} | Mise:${current_lot:.2f}")
+
+            bal_before = st["balance"]
             try:
-                r=api.place_digits_trade(symbol,contract_type,current_lot,barrier)
+                r = api.place_digits_trade(symbol, contract_type, current_lot, barrier)
                 if r.get("contract_id"):
-                    cid=r["contract_id"]
-                    bal_open=float(r.get("balance_after",bal_before-current_lot))
-                    st["balance"]=bal_open
-                    add_log(st,f"⏳ Digits #{cid} | {sig} | Ap tann 10sek...","SUCCESS")
-                    time.sleep(10)
+                    cid      = r["contract_id"]
+                    bal_open = float(r.get("balance_after", bal_before - current_lot))
+                    st["balance"] = bal_open
 
-                    pnl=0.0
+                    add_log(st, f"⏳ #{cid} | {sig} | Ap tann rezilta kontrak...", "SUCCESS")
+
+                    # Tann kontrak fini — Digits = 5 tiks ≈ 15-20 segonn
+                    time.sleep(20)
+
+                    # Jwenn rezilta reyèl — eseye 3 fwa
+                    pnl = 0.0
                     for attempt in range(3):
                         try:
-                            nb=api.get_balance_sync()
-                            if nb and nb>0 and abs(nb-bal_open)>0.01:
-                                st["balance"]=nb; pnl=nb-bal_open; break
-                            time.sleep(3)
-                        except: time.sleep(3)
+                            nb = api.get_balance_sync()
+                            if nb and nb > 0 and abs(nb - bal_open) > 0.01:
+                                st["balance"] = nb
+                                pnl = nb - bal_open
+                                break
+                            time.sleep(5)
+                        except:
+                            time.sleep(5)
 
-                    if abs(pnl)<0.01: pnl=-(bal_before-bal_open)
+                    # Si pa ka konfime — kalkile manyèlman
+                    if abs(pnl) < 0.01:
+                        pnl = -(bal_before - bal_open)
 
-                    if pnl>0:
-                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
-                        current_lot=base_lot; consec_losses=0; total_lost=0.0
+                    # ── Rezilta ──────────────────────────────
+                    if pnl > 0:
+                        add_log(st, f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}", "SUCCESS")
+                        current_lot   = base_lot
+                        consec_losses = 0
+                        total_lost    = 0.0
                     else:
-                        loss=abs(pnl) if abs(pnl)>0.01 else current_lot
-                        total_lost+=loss; consec_losses+=1
-                        if consec_losses<=5:
-                            next_lot=round((total_lost+base_lot)/PAYOUT,2)
-                            current_lot=max(0.35,next_lot)
-                            add_log(st,f"⚠ Pèt #{consec_losses} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
+                        loss          = abs(pnl) if abs(pnl) > 0.01 else current_lot
+                        total_lost   += loss
+                        consec_losses += 1
+                        add_log(st, f"❌ PÈDI ${abs(pnl):.2f} | Bal:${st['balance']:.2f}", "WARN")
+
+                        if consec_losses <= 3:  # Max 3 pèt konsekitif
+                            next_lot    = round((total_lost + base_lot) / PAYOUT, 2)
+                            current_lot = max(base_lot, next_lot)
+                            add_log(st, f"⚠ Pèt #{consec_losses}/3 | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}", "WARN")
                         else:
-                            add_log(st,f"🔄 Reset apre 5 pèt | Pèdi:${total_lost:.2f}","WARN")
-                            current_lot=base_lot; consec_losses=0; total_lost=0.0
-                            time.sleep(60)
+                            # 3 pèt konsekitif — STOP martingale, tann 2 min
+                            add_log(st, f"🔄 Reset apre 3 pèt | Pèdi:${total_lost:.2f} | Tann 2 min...", "WARN")
+                            current_lot   = base_lot
+                            consec_losses = 0
+                            total_lost    = 0.0
+                            time.sleep(120)
 
-                    trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                        "symbol":symbol,"side":sig,"entry":round(candles[-1]["close"],5),
-                        "conf":f"{conf:.0%}","strategy":f"Digits-{digit_type}","tf":"ticks",
-                        "stake":round(current_lot,2),"pnl":round(pnl,2),
-                        "status":"won" if pnl>0 else "lost"}
-                    st["trades"].insert(0,trade); st["total_pnl"]+=pnl
+                    # Anrejistre trade
+                    trade = {
+                        "id":       len(st["trades"]) + 1,
+                        "time":     datetime.now().strftime("%H:%M:%S"),
+                        "symbol":   symbol,
+                        "side":     sig,
+                        "entry":    round(candles[-1]["close"], 5),
+                        "conf":     f"{conf:.0%}",
+                        "strategy": f"Digits-{digit_type}",
+                        "tf":       "ticks",
+                        "stake":    round(current_lot, 2),
+                        "pnl":      round(pnl, 2),
+                        "status":   "won" if pnl > 0 else "lost"
+                    }
+                    st["trades"].insert(0, trade)
+                    st["total_pnl"] += pnl
 
-                    if pnl>0:
-                        ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
-                        if ps>=0.5:
-                            try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 1%:${ps}","PROFIT")
+                    # 1% profit transfer
+                    if pnl > 0:
+                        ps = round(pnl * PROFIT_PCT, 2)
+                        st["profit_sent"] += ps
+                        if ps >= 0.5:
+                            try:
+                                api.transfer_to_account("CR9560099", ps)
+                                add_log(st, f"💸 1%:${ps}", "PROFIT")
                             except: pass
+
+                    # ── Tann anvan pwochen siyal ─────────────
+                    # PA kouri imedyatman — tann 30sek pou mache chanje
+                    add_log(st, f"⏸ Tann 30sek anvan pwochen siyal...")
+                    time.sleep(30)
+
             except Exception as e:
-                add_log(st,f"Digits trade echwe: {e}","ERROR")
+                add_log(st, f"Digits trade echwe: {e}", "ERROR")
+                time.sleep(15)
+
         except Exception as e:
-            add_log(st,f"Erè digits: {e}","ERROR")
-        time.sleep(3)
+            add_log(st, f"Erè digits: {e}", "ERROR")
+            time.sleep(15)
 
-    add_log(st,"⏹ Digits Bot arrêté")
+        # Tann 30 segonn ant chak sikl analiz
+        time.sleep(30)
 
-# ═══════════════════════════════════════════════════════════
-# TRADING LOOP — FIX: timeframe respekte + PNL kòrèk
-# ═══════════════════════════════════════════════════════════
+    add_log(st, "⏹ Digits Bot arrêté")
+
+
 # ═══════════════════════════════════════════════════════════
 # MT5 TRADING LOOP — Forex reyèl ak SL/TP
 # ═══════════════════════════════════════════════════════════
@@ -1435,7 +1505,7 @@ def trading_loop(st, bot_id=None):
 
             if len(candles)<10:
                 add_log(st,f"Pa ase done ({len(candles)}) — tann...","WARN")
-                time.sleep(30); continue
+                time.sleep(60); continue
 
             add_log(st,f"📡 {len(candles)} bouji | {symbol} {tf//60}min")
             sig,conf=fn(candles)
@@ -1559,9 +1629,7 @@ def api_connect():
             import websocket
             api=DerivClient(d["token"],d.get("app_id","1089"))
             bal=api.connect()
-            st["deriv_api"]=api
-            digits_api = DerivDigitsClient(d["token"], d.get("app_id","1089"))
-            st["deriv_digits_api"] = digits_api
+            st["deriv_api"]=api; st["deriv_digits_api"]=api
             st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"deriv"})
         elif broker=="binance":
@@ -1924,6 +1992,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
             <option value="0.70">70% (bon)</option>
             <option value="0.75" selected>75% (presiz)</option>
             <option value="0.80">80% (trè presiz)</option>
+            <option value="0.90">90% (trè presiz)</option>
           </select>
         </div>
         <div class="iw"><div class="il">STOP LOSS (pips)</div><input id="c-sl" type="number" value="20"></div>
@@ -1943,11 +2012,11 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </select>
         </div>
         <div style="color:#FFD600;font-size:11px;line-height:1.8">
-          ⚠ Digits mode: estrateji teknik <br>
+          ⚠ Digits mode: estrateji teknik dezaktive<br>
           <span style="color:#00FF88">✓ Rekòmande: R_10 | Mise $0.35 | Over 4/Under 5</span>
         </div>
       </div>
-      <div class="iw"><div class="il">STRATEGY (Forex sèlman)</div>
+      <div class="iw"><div class="il">STRATEGY (Forex ak deriv)</div>
         <select id="c-st">
           <option value="confluence">🔥 Confluence (Tout strategies)</option>
           <option value="ai">🤖 AI (Entèlijans Atifisyèl)</option>

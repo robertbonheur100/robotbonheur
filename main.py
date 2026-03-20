@@ -32,7 +32,7 @@ ACCESS_CODES = {
     "EHJI":        {"created_at": time.time(), "used": False},
 }
 
-CODE_TTL_SECONDS = 180  # 3 minit
+CODE_TTL_SECONDS = 43200 # 720 minit
 
 def check_access(code):
     code = code.strip().upper()

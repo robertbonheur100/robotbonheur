@@ -879,13 +879,9 @@ def trading_loop(st, bot_id=None):
     min_conf=float(cfg.get("min_conf",0.75))
     fn=STRATEGIES.get(strategy,strat_confluence)
 
-    wait_after=tf+45
-    base_lot=round(max(0.5,lot),2); current_lot=base_lot
-    consec_losses=0; total_lost=0.0
-
+  wait_after=tf+45
     add_log(st,f"🚀 BonheurBot | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st,f"🎯 Martingale | Base:${base_lot} | Tann:{wait_after//60}min {wait_after%60}s | Max 4 pèt")
-
+    
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id:
             add_log(st,"⏹ Bot anile","WARN"); return
@@ -986,22 +982,11 @@ def trading_loop(st, bot_id=None):
                     add_log(st,f"✅ Binance trade | PNL:${pnl:.4f}","SUCCESS")
                 except Exception as e:
                     add_log(st,f"Trade echwe: {e}","ERROR")
-
-            if ok:
+                 if ok:
                 if pnl>0:
-                    add_log(st,f"💰 Net:+${pnl:.2f} | Rekipere:${total_lost:.2f}","SUCCESS")
-                    current_lot=base_lot; consec_losses=0; total_lost=0.0
+                    add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
                 else:
-                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot
-                    total_lost+=loss; consec_losses+=1
-                    if consec_losses<=4:
-                        next_lot=round((total_lost+base_lot)/0.95,2)
-                        current_lot=max(0.5,next_lot)
-                        add_log(st,f"⚠ Pèt #{consec_losses} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
-                    else:
-                        add_log(st,f"🔄 Reset apre 4 pèt | Pèdi:${total_lost:.2f}","WARN")
-                        current_lot=base_lot; consec_losses=0; total_lost=0.0
-                        time.sleep(300)
+                    add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${st['balance']:.2f}","WARN")
 
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
                     "symbol":symbol,"side":sig,"entry":round(entry,5),"conf":f"{conf:.0%}",

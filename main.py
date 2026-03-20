@@ -25,14 +25,16 @@ PROFIT_PCT    = 0.01
 # ── Nouvo browser = mande kòd
 # ══════════════════════════════════════════════════════════
 ACCESS_CODES = {
-    "BONHEURWIIN": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
-    "HJKy8kFD":    {"created_at": time.time(), "used": False},
-    "GHt3hjI6":    {"created_at": time.time(), "used": False},
-    "GJKY":        {"created_at": time.time(), "used": False},
-    "EHJI":        {"created_at": time.time(), "used": False},
+    # Kòd ADM — created_at=None = pa janm ekspire, itilizab plizyè fwa
+    "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
+    # Kòd itilizatè — expire apre 30 jou (1 mwa), yon sèl fwa
+    "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adm": False},
+    "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
+    "GJKY":        {"created_at": time.time(), "used": False, "is_adm": False},
+    "EHJI":        {"created_at": time.time(), "used": False, "is_adm": False},
 }
 
-CODE_TTL_SECONDS = 43200 # 720 minit
+CODE_TTL_SECONDS = 2592000  # 30 jou (1 mwa)
 
 def check_access(code):
     code = code.strip().upper()
@@ -40,25 +42,26 @@ def check_access(code):
         return False, "Kòd aksè pa valid — kontakte admin"
     entry = ACCESS_CODES[code]
 
-    # Kòd ADM — pa janm ekspire, pa janm makye used
-    if entry["created_at"] is None:
+    # Kòd ADM — pa janm ekspire, itilizab plizyè fwa
+    if entry["created_at"] is None or entry.get("is_adm"):
         return True, "✓ Aksè admin akòde"
 
-    # Kòd itilizatè — verifye ekspire
+    # Kòd itilizatè — verifye ekspire (1 mwa)
     age = time.time() - entry["created_at"]
     if age > CODE_TTL_SECONDS:
-        secs = int(age - CODE_TTL_SECONDS)
-        return False, f"Kòd ekspire depi {secs}s — kontakte admin"
+        days_ago = int((age - CODE_TTL_SECONDS) / 86400)
+        return False, f"Kòd ekspire depi {days_ago} jou — kontakte admin"
     if entry["used"]:
         return False, "Kòd sa deja itilize — kontakte admin"
-    remaining = int(CODE_TTL_SECONDS - age)
-    return True, f"✓ Aksè akòde — {remaining}s rete"
+    days_left = int((CODE_TTL_SECONDS - age) / 86400)
+    return True, f"✓ Aksè akòde — {days_left} jou rete"
 
 def use_code(code):
     code = code.strip().upper()
     if code in ACCESS_CODES:
         # PA janm makye kòd ADM kòm used
-        if ACCESS_CODES[code]["created_at"] is not None:
+        entry = ACCESS_CODES[code]
+        if entry["created_at"] is not None and not entry.get("is_adm"):
             ACCESS_CODES[code]["used"] = True
 
 # ══════════════════════════════════════════════════════════
@@ -109,6 +112,24 @@ def validate_session(token):
         return False, "Abònman ou ekspire (30 jou) — kontakte admin"
     days_left = (exp - date.today()).days
     return True, f"Sesyon aktif — {days_left} jou rete"
+
+def validate_session_full(token):
+    """Retounen (ok, msg, is_admin)"""
+    if not token:
+        return False, "Pa gen sesyon", False
+    with _sess_lock:
+        sess = _sessions.get(token)
+    if not sess:
+        return False, "Sesyon pa valid — antre kòd aksè ou", False
+    exp = date.fromisoformat(sess["expire"])
+    if date.today() > exp:
+        with _sess_lock:
+            _sessions.pop(token, None)
+            _save_sessions()
+        return False, "Abònman ou ekspire (30 jou) — kontakte admin", False
+    days_left = (exp - date.today()).days
+    is_adm = sess.get("is_admin", False)
+    return True, f"Sesyon aktif — {days_left} jou rete", is_adm
 
 # ── Flask ak secret_key fiks (pa chanje apre restart) ────
 SECRET_KEY_FILE = "secret.key"
@@ -1143,10 +1164,331 @@ def api_login():
     if ok:
         use_code(code)
         new_token,expire=create_session()
-        st["access"]=True; st["session_token"]=new_token
-        return jsonify({"ok":True,"msg":"✓ Aksè akòde! 30 jou rete","session_token":new_token,"expire":expire})
+        is_adm = ACCESS_CODES.get(code,{}).get("is_adm", False) or ACCESS_CODES.get(code,{}).get("created_at") is None
+        st["access"]=True; st["session_token"]=new_token; st["is_admin"]=is_adm
+        with _sess_lock:
+            _sessions[new_token]["is_admin"] = is_adm
+            _save_sessions()
+        msg_out = "✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete"
+        return jsonify({"ok":True,"msg":msg_out,"session_token":new_token,"expire":expire,"is_admin":is_adm})
 
     return jsonify({"ok":False,"msg":msg_text,"need_code":True})
+
+# ═══════════════════════════════════════════════════════════
+# ADMIN ROUTES — Jere kòd aksè san restart
+# ═══════════════════════════════════════════════════════════
+ADMIN_PASSWORD = "BONHEURWIIN"  # Chanje sa ak yon modpas solid
+
+@app.route("/api/admin/codes", methods=["POST"])
+def admin_get_codes():
+    """Jwenn tout kòd aksè yo"""
+    d = request.json or {}
+    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
+        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
+    
+    codes = []
+    now = time.time()
+    for code, entry in ACCESS_CODES.items():
+        if entry["created_at"] is None:
+            status = "ADM"
+            remaining = "∞"
+        elif entry["used"]:
+            status = "ITILIZE"
+            remaining = "0"
+        else:
+            age = now - entry["created_at"]
+            if age > CODE_TTL_SECONDS:
+                status = "EKSPIRE"
+                remaining = "0"
+            else:
+                status = "AKTIF"
+                remaining = str(int(CODE_TTL_SECONDS - age)) + "s"
+        
+        # Jwenn sesyon ki itilize kòd sa
+        sessions_count = 0
+        with _sess_lock:
+            sessions_count = len(_sessions)
+        
+        codes.append({
+            "code": code,
+            "status": status,
+            "remaining": remaining,
+            "used": entry["used"],
+            "is_adm": entry["created_at"] is None,
+        })
+    
+    return jsonify({"ok":True,"codes":codes,"total_sessions":len(_sessions)})
+
+@app.route("/api/admin/add_code", methods=["POST"])
+def admin_add_code():
+    """Ajoute yon nouvo kòd aksè — aktif imedyatman"""
+    d = request.json or {}
+    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
+        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
+    
+    code = d.get("code","").strip().upper()
+    if not code:
+        return jsonify({"ok":False,"error":"Mete yon kòd"})
+    if len(code) < 4:
+        return jsonify({"ok":False,"error":"Kòd dwe gen omwen 4 karaktè"})
+    if code in ACCESS_CODES:
+        return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
+    
+    is_adm = d.get("is_adm", False)
+    ACCESS_CODES[code] = {
+        "created_at": None if is_adm else time.time(),
+        "used": False
+    }
+    
+    typ = "ADM (pa ekspire)" if is_adm else f"itilizatè ({CODE_TTL_SECONDS//60} min)"
+    logger.info(f"Nouvo kòd aksè ajoute: {code} [{typ}]")
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} ajoute [{typ}]"})
+
+@app.route("/api/admin/revoke_code", methods=["POST"])
+def admin_revoke_code():
+    """Revoke / efase yon kòd aksè"""
+    d = request.json or {}
+    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
+        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
+    
+    code = d.get("code","").strip().upper()
+    if not code:
+        return jsonify({"ok":False,"error":"Mete kòd pou revoke"})
+    if code not in ACCESS_CODES:
+        return jsonify({"ok":False,"error":"Kòd sa pa egziste"})
+    if ACCESS_CODES[code]["created_at"] is None and code == "BONHEURWIIN":
+        return jsonify({"ok":False,"error":"Pa ka revoke kòd ADM prensipal la"})
+    
+    del ACCESS_CODES[code]
+    logger.info(f"Kòd aksè revoke: {code}")
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} revoke ak siksè"})
+
+@app.route("/api/admin/reset_code", methods=["POST"])
+def admin_reset_code():
+    """Reset yon kòd — pèmèt li itilize ankò"""
+    d = request.json or {}
+    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
+        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
+    
+    code = d.get("code","").strip().upper()
+    if code not in ACCESS_CODES:
+        return jsonify({"ok":False,"error":"Kòd sa pa egziste"})
+    
+    ACCESS_CODES[code]["used"] = False
+    ACCESS_CODES[code]["created_at"] = time.time()  # Renouvle 3 min
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} reset — aktif pou {CODE_TTL_SECONDS//60} min"})
+
+@app.route("/api/admin/sessions", methods=["POST"])
+def admin_sessions():
+    """Jwenn tout sesyon aktif yo"""
+    d = request.json or {}
+    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
+        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
+    
+    sessions = []
+    today = date.today()
+    with _sess_lock:
+        for token, sess in _sessions.items():
+            exp = date.fromisoformat(sess["expire"])
+            days_left = (exp - today).days
+            sessions.append({
+                "token": token[:8] + "...",  # Pa montre token konplè
+                "expire": sess["expire"],
+                "days_left": days_left,
+                "active": days_left > 0,
+            })
+    
+    return jsonify({"ok":True,"sessions":sessions})
+
+@app.route("/api/admin/revoke_session", methods=["POST"])
+def admin_revoke_session():
+    """Revoke yon sesyon — dekonekte itilizatè a"""
+    d = request.json or {}
+    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
+        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
+    
+    # Revoke tout sesyon ekspire
+    if d.get("clean_expired"):
+        count = 0
+        today = date.today()
+        with _sess_lock:
+            expired = [t for t,s in _sessions.items() 
+                      if date.fromisoformat(s["expire"]) <= today]
+            for t in expired:
+                del _sessions[t]
+                count += 1
+            _save_sessions()
+        return jsonify({"ok":True,"msg":f"✓ {count} sesyon ekspire efase"})
+    
+    return jsonify({"ok":True,"msg":"✓ Done"})
+
+
+# ═══════════════════════════════════════════════════════════
+# ADMIN API ROUTES
+# ═══════════════════════════════════════════════════════════
+
+def require_admin(d):
+    """Verifye si request la soti nan admin"""
+    token = d.get("admin_token","").strip()
+    if not token: return False
+    with _sess_lock:
+        sess = _sessions.get(token)
+    if not sess: return False
+    return sess.get("is_admin", False)
+
+@app.route("/api/admin/codes", methods=["POST"])
+def admin_get_codes():
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    now = time.time()
+    codes = []
+    for c, entry in ACCESS_CODES.items():
+        if entry["created_at"] is None or entry.get("is_adm"):
+            status="ADM"; remaining="∞"; days_left="∞"
+        elif entry["used"]:
+            status="ITILIZE"; remaining="0"; days_left="0"
+        else:
+            age = now - entry["created_at"]
+            if age > CODE_TTL_SECONDS:
+                status="EKSPIRE"; remaining="0"; days_left="0"
+            else:
+                left = CODE_TTL_SECONDS - age
+                status="AKTIF"
+                days_left = str(int(left/86400))
+                remaining = days_left + " jou"
+        codes.append({
+            "code":c, "status":status,
+            "remaining":remaining, "days_left":days_left,
+            "used":entry["used"], "is_adm":entry.get("is_adm",False)
+        })
+    # Konte sesyon aktif
+    today = date.today()
+    active_sessions = sum(1 for s in _sessions.values()
+                         if date.fromisoformat(s["expire"]) > today)
+    return jsonify({"ok":True,"codes":codes,"total_sessions":active_sessions})
+
+@app.route("/api/admin/add_code", methods=["POST"])
+def admin_add_code():
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    code = d.get("code","").strip().upper()
+    if not code or len(code) < 3:
+        return jsonify({"ok":False,"error":"Kòd dwe gen omwen 3 karaktè"})
+    if code in ACCESS_CODES:
+        return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
+    is_adm = d.get("is_adm", False)
+    ACCESS_CODES[code] = {
+        "created_at": None if is_adm else time.time(),
+        "used": False,
+        "is_adm": is_adm
+    }
+    typ = "Admin (pa ekspire)" if is_adm else "Itilizatè (1 mwa)"
+    logger.info(f"Nouvo kòd: {code} [{typ}]")
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye [{typ}]"})
+
+@app.route("/api/admin/revoke_code", methods=["POST"])
+def admin_revoke_code():
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    code = d.get("code","").strip().upper()
+    if not code or code not in ACCESS_CODES:
+        return jsonify({"ok":False,"error":"Kòd pa jwenn"})
+    if code == "BONHEURWIIN":
+        return jsonify({"ok":False,"error":"Pa ka revoke kòd ADM prensipal"})
+    del ACCESS_CODES[code]
+    logger.info(f"Kòd revoke: {code}")
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} revoke"})
+
+@app.route("/api/admin/reset_code", methods=["POST"])
+def admin_reset_code():
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    code = d.get("code","").strip().upper()
+    if code not in ACCESS_CODES:
+        return jsonify({"ok":False,"error":"Kòd pa jwenn"})
+    ACCESS_CODES[code]["used"] = False
+    if not ACCESS_CODES[code].get("is_adm"):
+        ACCESS_CODES[code]["created_at"] = time.time()
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} reset — aktif pou 1 mwa"})
+
+@app.route("/api/admin/users", methods=["POST"])
+def admin_get_users():
+    """Wè tout itilizatè aktif yo ak trade yo"""
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    users = []
+    with _user_lock:
+        for uid, st in _user_states.items():
+            users.append({
+                "uid": uid[:8]+"...",
+                "connected": st.get("connected",False),
+                "broker": st.get("broker","—"),
+                "running": st.get("running",False),
+                "balance": round(st.get("balance",0),2),
+                "pnl": round(st.get("total_pnl",0),2),
+                "trades": len(st.get("trades",[])),
+                "profit_sent": round(st.get("profit_sent",0),4),
+                "symbol": st.get("config",{}).get("symbol","—"),
+                "strategy": st.get("config",{}).get("strategy","—"),
+            })
+    return jsonify({"ok":True,"users":users,"total":len(users)})
+
+@app.route("/api/admin/stop_user", methods=["POST"])
+def admin_stop_user():
+    """Kanpe bot yon itilizatè"""
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    uid_prefix = d.get("uid","").replace("...","")
+    stopped = 0
+    with _user_lock:
+        for uid, st in _user_states.items():
+            if uid.startswith(uid_prefix):
+                st["running"] = False
+                st["bot_id"] = None
+                stopped += 1
+    return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
+
+@app.route("/api/admin/sessions", methods=["POST"])
+def admin_sessions():
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    today = date.today()
+    sessions = []
+    with _sess_lock:
+        for token, sess in _sessions.items():
+            exp = date.fromisoformat(sess["expire"])
+            days_left = (exp - today).days
+            sessions.append({
+                "token": token[:8]+"...",
+                "expire": sess["expire"],
+                "days_left": days_left,
+                "is_admin": sess.get("is_admin",False),
+                "active": days_left > 0,
+            })
+    return jsonify({"ok":True,"sessions":sessions,"total":len(sessions)})
+
+@app.route("/api/admin/clean_sessions", methods=["POST"])
+def admin_clean_sessions():
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    today = date.today()
+    count = 0
+    with _sess_lock:
+        expired = [t for t,s in _sessions.items()
+                  if date.fromisoformat(s["expire"]) <= today]
+        for t in expired:
+            del _sessions[t]; count += 1
+        if count: _save_sessions()
+    return jsonify({"ok":True,"msg":f"✓ {count} sesyon ekspire efase"})
+
 
 @app.route("/")
 def index(): return render_template_string(HTML)
@@ -1264,6 +1606,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <button class="tab" onclick="sw('backtest',this)">BACKTEST</button>
   <button class="tab" onclick="sw('trades',this)">TRADES</button>
   <button class="tab" onclick="sw('log',this)">LOGS</button>
+  <button class="tab" id="tab-admin" style="display:none;color:#FFD600" onclick="sw('admin',this)">⚙ ADMIN</button>
 </div>
 
 <div class="wrap">
@@ -1476,6 +1819,84 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div id="logs"></div>
   </div>
 </div>
+
+<!-- ADMIN PAGE -->
+<div id="pg-admin" class="pg">
+  <div class="stats">
+    <div class="stat"><div class="sl">KÒD TOTAL</div><div class="sv" id="adm-total" style="color:#FFD600">—</div></div>
+    <div class="stat"><div class="sl">KÒD AKTIF</div><div class="sv" id="adm-aktif" style="color:#00FF88">—</div></div>
+    <div class="stat"><div class="sl">ITILIZE</div><div class="sv" id="adm-used" style="color:#FF3B6B">—</div></div>
+    <div class="stat"><div class="sl">SESYON AKTIF</div><div class="sv" id="adm-sess" style="color:#00D4FF">—</div></div>
+    <div class="stat"><div class="sl">ITILIZATÈ</div><div class="sv" id="adm-users-count" style="color:#FFD600">—</div></div>
+  </div>
+
+  <div class="g2">
+    <!-- Kreye kòd -->
+    <div class="box">
+      <div class="bt">➕ KREYE KÒD AKSÈ</div>
+      <div class="iw">
+        <div class="il">KÒD (lèt + chif)</div>
+        <input id="new-code" type="text" placeholder="BB-2025-XXXX" oninput="this.value=this.value.toUpperCase()">
+      </div>
+      <div class="iw">
+        <div class="il">TIP KÒD</div>
+        <select id="new-code-type">
+          <option value="user">👤 Itilizatè — valid 1 mwa, yon sèl fwa</option>
+          <option value="adm">👑 Admin — pa janm ekspire, plizyè fwa</option>
+        </select>
+      </div>
+      <button class="btn fw" onclick="admAddCode()">➕ KREYE KÒD</button>
+      <div id="add-code-msg" style="margin-top:8px"></div>
+
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid #0D2233">
+        <div class="bt" style="margin-bottom:8px">⚡ GENERATÈ RAPID</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn b" style="padding:5px 14px;font-size:11px" onclick="genCode(6)">6 karaktè</button>
+          <button class="btn b" style="padding:5px 14px;font-size:11px" onclick="genCode(8)">8 karaktè</button>
+          <button class="btn b" style="padding:5px 14px;font-size:11px" onclick="genCode(10)">10 karaktè</button>
+        </div>
+        <div id="gen-result" style="margin-top:10px;font-size:14px;font-weight:700;color:#00FF88;letter-spacing:2px"></div>
+        <button id="gen-copy-btn" style="display:none;margin-top:6px;background:transparent;border:1px solid #00FF8844;color:#00FF88;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:inherit" onclick="admCopyGen()">📋 KOPYE + AJOUTE</button>
+      </div>
+    </div>
+
+    <!-- Sesyon -->
+    <div class="box">
+      <div class="bt" style="display:flex;justify-content:space-between">
+        <span>🔐 SESYON AKTIF</span>
+        <div style="display:flex;gap:6px">
+          <button class="btn b" style="padding:3px 10px;font-size:10px" onclick="admRefresh()">🔄</button>
+          <button class="btn r" style="padding:3px 10px;font-size:10px" onclick="admCleanSessions()">🗑 NETWAYE</button>
+        </div>
+      </div>
+      <div id="adm-sessions-list" style="color:#4A7080;font-size:11px;max-height:200px;overflow-y:auto">
+        Klike 🔄 pou wè sesyon yo
+      </div>
+    </div>
+  </div>
+
+  <!-- Liste kòd -->
+  <div class="box">
+    <div class="bt" style="display:flex;justify-content:space-between;align-items:center">
+      <span>📋 TOUT KÒD AKSÈ</span>
+      <button class="btn b" style="padding:4px 12px;font-size:10px" onclick="admRefresh()">🔄 REFRESH</button>
+    </div>
+    <div id="adm-codes-list">
+      <div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH pou wè kòd yo</div>
+    </div>
+  </div>
+
+  <!-- Itilizatè aktif -->
+  <div class="box">
+    <div class="bt" style="display:flex;justify-content:space-between;align-items:center">
+      <span>👥 ITILIZATÈ AKTIF</span>
+      <button class="btn b" style="padding:4px 12px;font-size:10px" onclick="admRefresh()">🔄 REFRESH</button>
+    </div>
+    <div id="adm-users-list">
+      <div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH pou wè itilizatè yo</div>
+    </div>
+  </div>
+</div>
 </div>
 </div>
 
@@ -1516,7 +1937,9 @@ async function checkLogin(){
     const d=await r.json();
     if(d.ok){
       if(d.session_token)saveToken(d.session_token);
+      updateAdminTab(d.is_admin||false);
       showApp(d.msg); poll();
+      if(d.is_admin) setTimeout(()=>admRefresh(),500);
     }else{
       if(d.msg&&d.msg.includes("ekspire"))clearToken();
       showLogin(d.msg||"");
@@ -1552,7 +1975,9 @@ async function doLogin(){
         document.getElementById("login-err").innerHTML='<div class="al er">⚠ Browser pa ka sove sesyon — verifye cookies/localStorage</div>';
         btn.textContent="⚡ ANTRE";btn.disabled=false;return;
       }
+      updateAdminTab(d.is_admin||false);
       showApp(d.msg);poll();
+      if(d.is_admin) setTimeout(()=>admRefresh(),500);
     }else{
       document.getElementById("login-err").innerHTML=`<div class="al er">✗ ${d.msg}</div>`;
     }
@@ -1757,6 +2182,198 @@ function upd(d){
 async function poll(){
   try{const r=await fetch("/api/status");const d=await r.json();upd(d);}catch(e){}
   setTimeout(poll,3000);
+}
+
+
+// ══════════════════════════════════════════════════════════
+// ADMIN PANEL JAVASCRIPT
+// ══════════════════════════════════════════════════════════
+let _admToken = "";
+
+function admGetToken(){
+  return getStoredToken();
+}
+
+// Montre/kache tab admin selon is_admin
+function updateAdminTab(isAdmin){
+  const tab = document.getElementById("tab-admin");
+  if(tab) tab.style.display = isAdmin ? "block" : "none";
+}
+
+async function admRefresh(){
+  _admToken = admGetToken();
+  if(!_admToken){ alert("Ou pa konekte!"); return; }
+
+  // Jwenn kòd yo
+  try{
+    const r = await fetch("/api/admin/codes",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({admin_token:_admToken})});
+    const d = await r.json();
+    if(d.ok){
+      const codes = d.codes;
+      const total = codes.length;
+      const aktif = codes.filter(c=>c.status==="AKTIF").length;
+      const used  = codes.filter(c=>c.status==="ITILIZE").length;
+
+      document.getElementById("adm-total").textContent = total;
+      document.getElementById("adm-aktif").textContent = aktif;
+      document.getElementById("adm-used").textContent  = used;
+      document.getElementById("adm-sess").textContent  = d.total_sessions;
+
+      // Rann liste kòd yo
+      const statusColor = {
+        "ADM":"#00D4FF","AKTIF":"#00FF88",
+        "ITILIZE":"#FF3B6B","EKSPIRE":"#4A7080"
+      };
+      document.getElementById("adm-codes-list").innerHTML = `
+        <table>
+          <tr>
+            <th>KÒD</th><th>STATUS</th><th>RETE</th><th>TIP</th><th>AKSYON</th>
+          </tr>
+          ${codes.map(c=>`
+          <tr>
+            <td style="font-weight:700;letter-spacing:1px">${c.code}</td>
+            <td><span class="tag" style="color:${statusColor[c.status]||"#4A7080"};border-color:${statusColor[c.status]||"#4A7080"}44">${c.status}</span></td>
+            <td style="color:#4A7080">${c.remaining}</td>
+            <td style="color:#4A7080">${c.is_adm?"👑 Admin":"👤 User"}</td>
+            <td style="display:flex;gap:4px">
+              ${c.status!=="ADM"?`<button onclick="admReset('${c.code}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">↺ RESET</button>`:""}
+              ${c.code!=="BONHEURWIIN"?`<button onclick="admRevoke('${c.code}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕ REVOKE</button>`:""}
+            </td>
+          </tr>`).join("")}
+        </table>`;
+    } else {
+      document.getElementById("adm-codes-list").innerHTML = `<div class="al er">${d.error}</div>`;
+    }
+  }catch(e){ console.error(e); }
+
+  // Jwenn itilizatè yo
+  try{
+    const r2 = await fetch("/api/admin/users",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({admin_token:_admToken})});
+    const d2 = await r2.json();
+    if(d2.ok){
+      document.getElementById("adm-users-count").textContent = d2.total;
+      if(d2.users.length === 0){
+        document.getElementById("adm-users-list").innerHTML =
+          '<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè konekte</div>';
+      } else {
+        document.getElementById("adm-users-list").innerHTML = `
+          <table>
+            <tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>
+            ${d2.users.map(u=>`
+            <tr>
+              <td style="color:#4A7080;font-size:10px">${u.uid}</td>
+              <td>${u.broker||"—"}</td>
+              <td style="font-weight:700">${u.symbol||"—"}</td>
+              <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
+              <td style="color:#00D4FF">$${u.balance}</td>
+              <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
+              <td style="color:#FFD600">${u.trades}</td>
+              <td>${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■ STOP</button>`:"—"}</td>
+            </tr>`).join("")}
+          </table>`;
+      }
+    }
+  }catch(e){ console.error(e); }
+
+  // Jwenn sesyon yo
+  try{
+    const r3 = await fetch("/api/admin/sessions",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({admin_token:_admToken})});
+    const d3 = await r3.json();
+    if(d3.ok){
+      document.getElementById("adm-sessions-list").innerHTML =
+        d3.sessions.length === 0
+        ? '<div style="text-align:center;padding:10px">Pa gen sesyon aktif</div>'
+        : d3.sessions.map(s=>`
+          <div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between">
+            <span style="color:#4A7080">${s.token}</span>
+            <span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span>
+            <span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span>
+            <span style="color:#4A7080">${s.expire}</span>
+          </div>`).join("");
+    }
+  }catch(e){ console.error(e); }
+}
+
+async function admAddCode(){
+  _admToken = admGetToken();
+  const code = document.getElementById("new-code").value.trim().toUpperCase();
+  if(!code){ document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>'; return; }
+  const isAdm = document.getElementById("new-code-type").value === "adm";
+  try{
+    const r = await fetch("/api/admin/add_code",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({admin_token:_admToken, code:code, is_adm:isAdm})});
+    const d = await r.json();
+    document.getElementById("add-code-msg").innerHTML =
+      `<div class="al ${d.ok?"ok":"er"}">${d.ok?d.msg:d.error}</div>`;
+    if(d.ok){ document.getElementById("new-code").value=""; admRefresh(); }
+  }catch(e){ document.getElementById("add-code-msg").innerHTML=`<div class="al er">${e.message}</div>`; }
+}
+
+async function admRevoke(code){
+  if(!confirm(`Revoke kòd ${code}? Itilizatè ki gentan konekte ap kontinye jiska sesyon yo ekspire.`)) return;
+  _admToken = admGetToken();
+  const r = await fetch("/api/admin/revoke_code",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({admin_token:_admToken, code:code})});
+  const d = await r.json();
+  alert(d.ok ? d.msg : d.error);
+  if(d.ok) admRefresh();
+}
+
+async function admReset(code){
+  _admToken = admGetToken();
+  const r = await fetch("/api/admin/reset_code",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({admin_token:_admToken, code:code})});
+  const d = await r.json();
+  alert(d.ok ? d.msg : d.error);
+  if(d.ok) admRefresh();
+}
+
+async function admStopUser(uid){
+  if(!confirm(`Kanpe bot itilizatè ${uid}?`)) return;
+  _admToken = admGetToken();
+  const r = await fetch("/api/admin/stop_user",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({admin_token:_admToken, uid:uid})});
+  const d = await r.json();
+  alert(d.ok ? d.msg : d.error);
+  if(d.ok) admRefresh();
+}
+
+async function admCleanSessions(){
+  _admToken = admGetToken();
+  const r = await fetch("/api/admin/clean_sessions",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({admin_token:_admToken})});
+  const d = await r.json();
+  alert(d.ok ? d.msg : d.error);
+  if(d.ok) admRefresh();
+}
+
+function genCode(len){
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let result = "";
+  for(let i=0;i<len;i++){
+    if(i>0 && i%4===0) result+="-";
+    result+=chars[Math.floor(Math.random()*chars.length)];
+  }
+  document.getElementById("gen-result").textContent = result;
+  document.getElementById("gen-copy-btn").style.display = "inline-block";
+  document.getElementById("new-code").value = result;
+}
+
+function admCopyGen(){
+  const code = document.getElementById("gen-result").textContent;
+  navigator.clipboard.writeText(code).catch(()=>{});
+  admAddCode();
 }
 
 checkLogin();

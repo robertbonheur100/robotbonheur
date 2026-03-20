@@ -1391,7 +1391,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div>
       <div class="box">
-        <div class="bt">ESTATI + MARTINGALE</div>
+        <div class="bt">ESTATI + </div>
         <div class="stats">
           <div class="stat"><div class="sl">BOT</div><div id="c-st2" class="sv" style="color:#3A6070">IDLE</div></div>
           <div class="stat"><div class="sl">BALANS</div><div id="c-bal" class="sv" style="color:#00D4FF">$0.00</div></div>
@@ -1399,11 +1399,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="stats">
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
           <div class="stat"><div class="sl">PROFIT VOYE</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
-        </div>
-        <div style="background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:10px;font-size:11px;color:#4A7080;line-height:2">
-          <div><span style="color:#FFD600">📐 Martingale:</span> (Total pèdi + Base) / 0.95</div>
-          <div>Egzanp: Pèdi $0.50 → Prochèn: <span style="color:#00FF88">$1.05</span></div>
-          <div style="color:#FF3B6B">Max 4 pèt (Rise/Fall) | Max 3 pèt (Digits)</div>
         </div>
       </div>
       <div class="box">

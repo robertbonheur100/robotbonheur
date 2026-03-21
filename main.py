@@ -20,7 +20,7 @@ PROFIT_PCT    = 0.01
 # SISTÈM KÒD AKSÈ
 # ── Kòd ADM (created_at=None): pa janm ekspire, pa janm used
 # ── Kòd itilizatè: ekspire 3 MINIT apre kreyasyon
-# ── Sesyon: stoke nan sessions.json — dire 30 JOU
+# ── Sesyon: stokenan sessions.json — dire 30 JOU
 # ── Menm browser = pa mande kòd (localStorage + cookie)
 # ── Nouvo browser = mande kòd
 # ══════════════════════════════════════════════════════════

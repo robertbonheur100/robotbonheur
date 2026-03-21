@@ -35,7 +35,7 @@ ACCESS_CODES = {
     "HHHO":        {"created_at": time.time(), "used": False},
     "FFFY":        {"created_at": time.time(), "used": False},
 }
-CODE_TTL_SECONDS = 180  # 3 minit
+CODE_TTL_SECONDS = 43200 # 720 minit
 
 def check_access(code):
     code = code.strip().upper()
@@ -688,7 +688,7 @@ def trading_loop(st, bot_id=None):
 
     wait_after=tf+45
     add_log(st,f"🚀 BonheurBot | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-
+    
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id:
             add_log(st,"⏹ Bot anile","WARN"); return
@@ -789,7 +789,7 @@ def trading_loop(st, bot_id=None):
             if ok:
                 if pnl>0:
                     add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
-                elif pnl<-0.01:
+                else:
                     add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${st['balance']:.2f}","WARN")
 
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),

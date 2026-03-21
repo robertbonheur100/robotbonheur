@@ -30,6 +30,7 @@ ACCESS_CODES = {
            "GJKY": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
            "HHHA": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
            "HHBB": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
+           "FGHG": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
     "HJKy8kFD":    {"created_at": time.time(), "used": False},
     "GHt3hjI6":    {"created_at": time.time(), "used": False},
     "HHHO":        {"created_at": time.time(), "used": False},

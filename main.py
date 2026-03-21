@@ -26,15 +26,15 @@ PROFIT_PCT    = 0.01
 # ══════════════════════════════════════════════════════════
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
+           "EHJI": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
            "GJKY": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
            "HHHA": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
+           "HHBB": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
     "HJKy8kFD":    {"created_at": time.time(), "used": False},
-    "EHJI":        {"created_at": time.time(), "used": False},
+    "GHt3hjI6":    {"created_at": time.time(), "used": False},
     "HHHO":        {"created_at": time.time(), "used": False},
-    "FFFA":        {"created_at": time.time(), "used": False},
-    
+    "FFFY":        {"created_at": time.time(), "used": False},
 }
-
 CODE_TTL_SECONDS = 180  # 3 minit
 
 def check_access(code):
@@ -676,156 +676,146 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 def trading_loop(st, bot_id=None):
-    # Si yon lòt bot démarre apre — kanpe sa a
-    if bot_id and st.get("bot_id") != bot_id:
-        return
+    if bot_id and st.get("bot_id")!=bot_id: return
     cfg=st["config"]
     broker=cfg.get("broker","deriv")
     symbol=cfg.get("symbol","R_100")
     strategy=cfg.get("strategy","confluence")
-    lot=float(cfg.get("lot",0.01))
-    sl=float(cfg.get("sl",20))
-    tp=float(cfg.get("tp",40))
+    lot=float(cfg.get("lot",0.5))
     tf=int(cfg.get("tf_secs",60))
-    min_conf=float(cfg.get("min_conf",0.65))
+    min_conf=float(cfg.get("min_conf",0.75))
     fn=STRATEGIES.get(strategy,strat_confluence)
-
-    add_log(st,f"🚀 BonheurBot démarré | {symbol} | {strategy} | {broker}")
 
     wait_after=tf+45
     add_log(st,f"🚀 BonheurBot | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
 
-
-
-
-
-
-
-
     while st["running"]:
-        # Verifye si se toujou menm bot la ki kouri
-        if bot_id and st.get("bot_id") != bot_id:
-            add_log(st,"⏹ Bot anile — yon nouvo bot démarre","WARN"); return
-        # ── Verifye Objektif Profit ak Limit Pèt ──────
+        if bot_id and st.get("bot_id")!=bot_id:
+            add_log(st,"⏹ Bot anile","WARN"); return
+
+        # Verifye objektif profit ak limit pèt
         _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
-            add_log(st,f"🎯 OBJEKTIF ${_target} RIVE! +${st['total_pnl']:.2f} | Bot kanpe!","SUCCESS"); st["running"]=False; break
+            add_log(st,f"🎯 OBJEKTIF ${_target} RIVE! +${st['total_pnl']:.2f} | Bot kanpe!","SUCCESS")
+            st["running"]=False; break
         if _loss>0 and st["total_pnl"]<=-_loss:
-            add_log(st,f"🛑 LIMIT PÈT ${_loss} RIVE! ${st['total_pnl']:.2f} | Bot kanpe!","ERROR"); st["running"]=False; break
+            add_log(st,f"🛑 LIMIT PÈT ${_loss} RIVE! ${st['total_pnl']:.2f} | Bot kanpe!","ERROR")
+            st["running"]=False; break
+
         try:
-            candles=[]
-            api = st.get("deriv_api") if broker=="deriv" else st.get("binance_api")
+            api=st.get("deriv_api") if broker=="deriv" else st.get("binance_api")
             if not api:
                 add_log(st,"Broker pa konekte — STOP","ERROR")
                 st["running"]=False; break
 
-            # Verifye koneksyon aktif anvan chak trade
             if broker=="deriv":
                 try:
-                    test_bal = api.get_balance_sync()
-                    if test_bal and test_bal > 0:
-                        st["balance"] = test_bal
+                    b=api.get_balance_sync()
+                    if b and b>0: st["balance"]=b
                 except:
-                    add_log(st,"⚠ Koneksyon Deriv pèdi — ap rekonnekte...","WARN")
-                    time.sleep(10)
-                    continue
+                    add_log(st,"⚠ Koneksyon pèdi — rekonnekte...","WARN")
+                    time.sleep(15); continue
 
             if broker=="deriv":
                 candles=api.get_candles(symbol,200,tf)
-            elif broker=="binance":
+            else:
                 iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"1m")
                 candles=api.get_candles(symbol,iv,200)
 
-            add_log(st,f"📡 Bouji resevwa: {len(candles)} | {symbol}")
-
             if len(candles)<10:
-                add_log(st,f"Pa ase done ({len(candles)}) — ap tann...","WARN")
-                time.sleep(15); continue
+                add_log(st,f"Pa ase done — tann...","WARN")
+                time.sleep(30); continue
 
+            add_log(st,f"📡 {len(candles)} bouji | {symbol} {tf//60}min")
             sig,conf=fn(candles)
-            add_log(st,f"📊 {symbol} | {sig} | Conf: {conf:.0%} | {strategy}")
+            add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
 
-            if sig!="NONE" and conf>=min_conf:
-                entry=candles[-1]["close"]
-                add_log(st,f"⚡ Trade {sig} @ {entry:.5f} | Conf: {conf:.0%} | Mise: ${current_lot:.2f}")
-                pnl=0; ok=False; contract_id=None
+            if sig=="NONE" or conf<min_conf:
+                add_log(st,f"⏭ Siyal fèb ({conf:.0%}) — tann pwochen bouji...")
+                time.sleep(tf); continue
 
-                if broker=="deriv" and st.get("deriv_api"):
-                    try:
-                        r=st["deriv_api"].place_trade(symbol,sig,max(0.5,lot))
-                        if r.get("contract_id"):
-                            contract_id = r["contract_id"]
-                            bal_before = st["balance"]
-                            # Retire mise a nan balans — Deriv deja retire l
-                            st["balance"] = float(r.get("balance_after", st["balance"]))
-                            ok=True
-                            add_log(st,f"⏳ Kontrak #{contract_id} louvri | Ap tann 5 min pou rezilta...","SUCCESS")
-                            # TANN 5 MINIT POU KONTRAK FINI
-                            time.sleep(320)  # 5 min 20 sek
-                            # Jwenn balans aktyèl apre kontrak fini
+            entry=candles[-1]["close"]
+            add_log(st,f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | Mise:${lot:.2f} | {tf//60}min")
+
+            bal_before=st["balance"]; pnl=0.0; ok=False
+
+            if broker=="deriv" and st.get("deriv_api"):
+                try:
+                    r=st["deriv_api"].place_trade(symbol,sig,max(0.5,lot),duration_secs=tf)
+                    if r.get("contract_id"):
+                        cid=r["contract_id"]
+                        bal_open=float(r.get("balance_after",bal_before-lot))
+                        st["balance"]=bal_open; ok=True
+                        add_log(st,f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
+                        time.sleep(wait_after)
+
+                        bal_close=None
+                        for attempt in range(3):
                             try:
-                                new_bal = st["deriv_api"].get_balance_sync()
-                                if new_bal and new_bal > 0:
-                                    pnl = new_bal - bal_before
-                                    st["balance"] = new_bal
-                                    if pnl > 0:
-                                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal: ${new_bal:.2f}","SUCCESS")
-                                    elif pnl < -0.01:
-                                        add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal: ${new_bal:.2f}","WARN")
-                                    else:
-                                        pnl = -current_lot
-                                        add_log(st,f"❌ PÈDI ${current_lot:.2f} (estimé)","WARN")
+                                nb=st["deriv_api"].get_balance_sync()
+                                if nb and nb>0 and abs(nb-bal_open)>0.01:
+                                    bal_close=nb; break
+                                retry=max(20,tf//4)
+                                add_log(st,f"⏳ Verifye {attempt+1}/3 | Bal:{nb:.2f}","WARN")
+                                time.sleep(retry)
                             except Exception as e:
-                                pnl = -current_lot
-                                add_log(st,f"Bal check echwe: {e} — pèt estimé ${current_lot:.2f}","WARN")
-                    except Exception as e:
-                        add_log(st,f"Trade echwe: {e}","ERROR")
+                                add_log(st,f"Bal check {attempt+1}: {e}","WARN")
+                                time.sleep(15)
 
-                elif broker=="binance" and st.get("binance_api"):
-                    try:
-                        st["binance_api"].place_trade(symbol,sig,lot)
-                        pnl=lot*entry*0.001; ok=True
-                        add_log(st,"✅ Binance trade OK!","SUCCESS")
-                        st["balance"]=st["binance_api"].balance
-                    except Exception as e:
-                        add_log(st,f"Trade echwe: {e}","ERROR")
+                        if bal_close:
+                            st["balance"]=bal_close; pnl=bal_close-bal_open
+                            if pnl>0: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
+                            elif pnl<-0.01: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
+                            else:
+                                pnl=-(bal_before-bal_open)
+                                add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
+                        else:
+                            pnl=-(bal_before-bal_open)
+                            add_log(st,f"❌ PÈDI (konfime) ${abs(pnl):.2f}","WARN")
+                except Exception as e:
+                    add_log(st,f"Trade echwe: {e}","ERROR")
 
-                if ok:
-                    if pnl>0:
-                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
-                    elif pnl<-0.01:
-                        add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${st['balance']:.2f}","WARN")
+            elif broker=="binance" and st.get("binance_api"):
+                try:
+                    bal_b=st["binance_api"].balance
+                    st["binance_api"].place_trade(symbol,sig,lot)
+                    time.sleep(tf)
+                    bal_a=st["binance_api"].balance
+                    st["balance"]=bal_a; pnl=bal_a-bal_b; ok=True
+                    add_log(st,f"✅ Binance trade | PNL:${pnl:.4f}","SUCCESS")
+                except Exception as e:
+                    add_log(st,f"Trade echwe: {e}","ERROR")
 
-                    trade={
-                        "id":len(st["trades"])+1,
-                        "time":datetime.now().strftime("%H:%M:%S"),
-                        "symbol":symbol,"side":sig,
-                        "entry":round(entry,5),"conf":f"{conf:.0%}",
-                        "strategy":strategy,"pnl":round(pnl,2),"status":"closed"
-                    }
-                    st["trades"].insert(0,trade)
-                    st["total_pnl"]+=pnl
-                    if pnl>0:
-                        profit_send=round(pnl*PROFIT_PCT,2)
-                        st["profit_sent"]+=profit_send
-                        if broker=="deriv" and st.get("deriv_api") and profit_send>=0.5:
-                            try:
-                                st["deriv_api"].transfer_to_account("CR9560099", profit_send)
-                                add_log(st,f"💸 1% voye: ${profit_send} → CR9560099","PROFIT")
-                            except Exception as e:
-                                add_log(st,f"Transfer echwe: {e}","ERROR")
-                        if broker=="binance" and st.get("binance_api") and profit_send>=0.10:
-                            try:
-                                st["binance_api"].send_profit(profit_send)
-                                add_log(st,f"💸 1% voye Binance: ${profit_send}","PROFIT")
-                            except: pass
+            if ok:
+                if pnl>0:
+                    add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
+                elif pnl<-0.01:
+                    add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${st['balance']:.2f}","WARN")
+
+                trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
+                    "symbol":symbol,"side":sig,"entry":round(entry,5),"conf":f"{conf:.0%}",
+                    "strategy":strategy,"tf":f"{tf//60}min","stake":round(lot,2),
+                    "pnl":round(pnl,2),"status":"won" if pnl>0 else "lost"}
+                st["trades"].insert(0,trade); st["total_pnl"]+=pnl
+
+                if pnl>0:
+                    ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
+                    if broker=="deriv" and st.get("deriv_api") and ps>=0.5:
+                        try:
+                            st["deriv_api"].transfer_to_account("CR9560099",ps)
+                            add_log(st,f"💸 1%:${ps} → CR9560099","PROFIT")
+                        except Exception as e:
+                            add_log(st,f"Transfer echwe: {e}","ERROR")
+                    if broker=="binance" and st.get("binance_api") and ps>=0.10:
+                        try: st["binance_api"].send_profit(ps)
+                        except: pass
 
         except Exception as e:
             add_log(st,f"Erè: {e}","ERROR")
-
         time.sleep(tf)
 
     add_log(st,"⏹ BonheurBot arrêté")
+
 
 # ═══════════════════════════════════════════════════════════
 # API ROUTES

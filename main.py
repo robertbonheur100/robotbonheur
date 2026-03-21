@@ -1360,7 +1360,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="iw"><div class="il">TIP DIGITS</div>
           <select id="c-digit-type">
             <option value="over_under">Over 4 / Under 5 (~55% chans)</option>
-            <option value="even_odd">Even / Odd (~50% chans)</option>
+            <option value="even_odd">Even / Odd (50% chans)</option>
           </select>
         </div>
         <div style="color:#FFD600;font-size:11px;line-height:1.8">

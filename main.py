@@ -7,7 +7,7 @@
 """
 
 import os, json, time, threading, logging, math, uuid, secrets
-from datetime import datetime, timedelta, date
+from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string, session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -18,151 +18,74 @@ PROFIT_PCT    = 0.01
 
 # ══════════════════════════════════════════════════════════
 # SISTÈM KÒD AKSÈ
-# ── Kòd ADM (created_at=None): pa janm ekspire, pa janm used
-# ── Kòd itilizatè: ekspire 3 MINIT apre kreyasyon
-# ── Sesyon: stokenan sessions.json — dire 30 JOU
-# ── Menm browser = pa mande kòd (localStorage + cookie)
-# ── Nouvo browser = mande kòd
+# Fòma: "KÒD": {"expire": "AAAA-MM-JJ", "used": False}
+# - Kòd yon sèl fwa — lè yo itilize l, li makye kòm "used"
+# - Sesyon rete ouvri pou 30 jou apre premye koneksyon
+# - Apre 30 jou — bot mande nouvo kòd
+# Pou ajoute kòd — ajoute nan ACCESS_CODES epi Commit
 # ══════════════════════════════════════════════════════════
 ACCESS_CODES = {
-    # Kòd ADM — created_at=None = pa janm ekspire, itilizab plizyè fwa
-    "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
-    # Kòd itilizatè — expire apre 30 jou (1 mwa), yon sèl fwa
-    "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adm": False},
-    "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
-    "GJKY":        {"created_at": time.time(), "used": False, "is_adm": False},
-    "EHJI":        {"created_at": time.time(), "used": False, "is_adm": False},
+    "BONHEURWIIN": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
+           "GJKY": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
+           "HHHA": {"created_at": None,        "used": False},  # ADM — pa janm ekspire
+    "HJKy8kFD":    {"created_at": time.time(), "used": False},
+    "EHJI":        {"created_at": time.time(), "used": False},
+    "HHHO":        {"created_at": time.time(), "used": False},
+    "FFFA":        {"created_at": time.time(), "used": False},
+    
 }
 
-CODE_TTL_SECONDS = 2592000  # 30 jou (1 mwa)
+CODE_TTL_SECONDS = 180  # 3 minit
 
 def check_access(code):
     code = code.strip().upper()
     if code not in ACCESS_CODES:
         return False, "Kòd aksè pa valid — kontakte admin"
     entry = ACCESS_CODES[code]
-
-    # Kòd ADM — pa janm ekspire, itilizab plizyè fwa
-    if entry["created_at"] is None or entry.get("is_adm"):
+    # Kòd ADM — pa janm ekspire, pa janm makye used
+    if entry["created_at"] is None:
         return True, "✓ Aksè admin akòde"
-
-    # Kòd itilizatè — verifye ekspire (1 mwa)
+    # Kòd itilizatè — ekspire 3 minit
     age = time.time() - entry["created_at"]
     if age > CODE_TTL_SECONDS:
-        days_ago = int((age - CODE_TTL_SECONDS) / 86400)
-        return False, f"Kòd ekspire depi {days_ago} jou — kontakte admin"
+        secs_ago = int(age - CODE_TTL_SECONDS)
+        return False, f"Kòd ekspire depi {secs_ago}s — kontakte admin pou yon nouvo kòd"
     if entry["used"]:
-        return False, "Kòd sa deja itilize — kontakte admin"
-    days_left = int((CODE_TTL_SECONDS - age) / 86400)
-    return True, f"✓ Aksè akòde — {days_left} jou rete"
+        return False, "Kòd sa deja itilize — kontakte admin pou yon nouvo kòd"
+    remaining = int(CODE_TTL_SECONDS - age)
+    return True, f"✓ Aksè akòde — {remaining}s rete"
 
 def use_code(code):
     code = code.strip().upper()
     if code in ACCESS_CODES:
-        # PA janm makye kòd ADM kòm used
-        entry = ACCESS_CODES[code]
-        if entry["created_at"] is not None and not entry.get("is_adm"):
+        # PA makye kòd ADM kòm itilize — li toujou disponib
+        if ACCESS_CODES[code]["created_at"] is not None:
             ACCESS_CODES[code]["used"] = True
 
-# ══════════════════════════════════════════════════════════
-# SESYON 30 JOU — stoke nan sessions.json
-# ══════════════════════════════════════════════════════════
-SESSIONS_FILE = "sessions.json"
-_sessions     = {}
-_sess_lock    = threading.Lock()
-
-def _load_sessions():
-    global _sessions
-    try:
-        if os.path.exists(SESSIONS_FILE):
-            with open(SESSIONS_FILE, "r") as f:
-                _sessions = json.load(f)
-    except:
-        _sessions = {}
-
-def _save_sessions():
-    try:
-        with open(SESSIONS_FILE, "w") as f:
-            json.dump(_sessions, f, indent=2)
-    except Exception as e:
-        logger.error(f"Sessions save: {e}")
-
-_load_sessions()
-
-def create_session():
-    token  = secrets.token_hex(32)
-    expire = (date.today() + timedelta(days=30)).isoformat()
-    with _sess_lock:
-        _sessions[token] = {"expire": expire, "created": time.time()}
-        _save_sessions()
-    return token, expire
-
-def validate_session(token):
-    if not token:
-        return False, "Pa gen sesyon"
-    with _sess_lock:
-        sess = _sessions.get(token)
-    if not sess:
-        return False, "Sesyon pa valid — antre kòd aksè ou"
-    exp = date.fromisoformat(sess["expire"])
-    if date.today() > exp:
-        with _sess_lock:
-            _sessions.pop(token, None)
-            _save_sessions()
-        return False, "Abònman ou ekspire (30 jou) — kontakte admin"
-    days_left = (exp - date.today()).days
-    return True, f"Sesyon aktif — {days_left} jou rete"
-
-def validate_session_full(token):
-    """Retounen (ok, msg, is_admin)"""
-    if not token:
-        return False, "Pa gen sesyon", False
-    with _sess_lock:
-        sess = _sessions.get(token)
-    if not sess:
-        return False, "Sesyon pa valid — antre kòd aksè ou", False
-    exp = date.fromisoformat(sess["expire"])
-    if date.today() > exp:
-        with _sess_lock:
-            _sessions.pop(token, None)
-            _save_sessions()
-        return False, "Abònman ou ekspire (30 jou) — kontakte admin", False
-    days_left = (exp - date.today()).days
-    is_adm = sess.get("is_admin", False)
-    return True, f"Sesyon aktif — {days_left} jou rete", is_adm
-
-# ── Flask ak secret_key fiks (pa chanje apre restart) ────
-SECRET_KEY_FILE = "secret.key"
-if os.path.exists(SECRET_KEY_FILE):
-    with open(SECRET_KEY_FILE, "r") as f:
-        _secret = f.read().strip()
-else:
-    _secret = secrets.token_hex(32)
-    with open(SECRET_KEY_FILE, "w") as f:
-        f.write(_secret)
-
 app = Flask(__name__)
-app.secret_key = _secret
+app.secret_key = secrets.token_hex(32)
 
-# ── Chak itilizatè gen pwòp eta pa yo ────────────────────
+# ── Chak itilizatè gen pwòp eta pa yo ─────────────────────
 _user_states = {}
 _user_lock   = threading.Lock()
 
 def get_state():
+    """Retounen eta itilizatè aktyèl la — kreye l si li pa egziste"""
     if "uid" not in session:
         session["uid"] = str(uuid.uuid4())
     uid = session["uid"]
     with _user_lock:
         if uid not in _user_states:
             _user_states[uid] = {
-                "uid": uid, "access": False, "session_token": None,
-                "bot_id": None, "broker": None, "connected": False, "running": False,
+                "uid": uid,
+                "access": False,
+                "bot_id": None,
+                "broker": None, "connected": False, "running": False,
                 "balance": 0.0, "total_pnl": 0.0, "profit_sent": 0.0,
                 "trades": [], "log": [], "config": {},
-                "deriv_api": None, "binance_api": None, "deriv_digits_api": None,
+                "deriv_api": None, "binance_api": None,
             }
     return _user_states[uid]
-
 # ═══════════════════════════════════════════════════════════
 # INDIKATÈ DE BAZ
 # ═══════════════════════════════════════════════════════════
@@ -199,8 +122,9 @@ def atr(candles, p=14):
     return sum(trs[-p:])/p if trs else 0
 
 # ═══════════════════════════════════════════════════════════
-# STRATEGIES
+# STRATEGIES — 75-85% win rate target
 # ═══════════════════════════════════════════════════════════
+
 def strat_ema(c):
     cl=[x["close"] for x in c]
     if len(cl)<25: return "NONE",0
@@ -208,9 +132,11 @@ def strat_ema(c):
     if len(e9)<3 or len(e21)<3: return "NONE",0
     r=rsi(cl)
     if e9[-2]<=e21[-2] and e9[-1]>e21[-1]:
-        if (not e50 or cl[-1]>e50[-1]) and r<75: return "BUY", 0.76
+        if (not e50 or cl[-1]>e50[-1]) and r<75:
+            return "BUY", 0.76
     if e9[-2]>=e21[-2] and e9[-1]<e21[-1]:
-        if (not e50 or cl[-1]<e50[-1]) and r>25: return "SELL", 0.76
+        if (not e50 or cl[-1]<e50[-1]) and r>25:
+            return "SELL", 0.76
     return "NONE",0
 
 def strat_fibonacci(c):
@@ -221,7 +147,7 @@ def strat_fibonacci(c):
     if rng==0: return "NONE",0
     r=rsi(cl); price=cl[-1]
     for lvl,conf in [(hi-0.618*rng,0.82),(hi-0.5*rng,0.78),(hi-0.382*rng,0.75)]:
-        if abs(price-lvl)/max(lvl,0.0001)<0.001:
+        if abs(price-lvl)/max(lvl,0.0001) < 0.001:
             if r<40 and price>lo+(rng*0.2): return "BUY", conf
             if r>60 and price<hi-(rng*0.2): return "SELL", conf
     return "NONE",0
@@ -259,11 +185,15 @@ def strat_macd(c):
     if len(cl)<35: return "NONE",0
     up,mid,lo=bb(cl,20,2.0); m,sig=macd(cl)
     if up is None: return "NONE",0
-    r=rsi(cl)
-    if m>sig and lo and cl[-1]<=lo: return "BUY", 0.78
-    if m>sig and mid and cl[-1]<mid and r<45: return "BUY", 0.72
-    if m<sig and up and cl[-1]>=up: return "SELL", 0.78
-    if m<sig and mid and cl[-1]>mid and r>55: return "SELL", 0.72
+    r=rsi(cl); at=atr(c) or 1
+    if m>sig and lo and cl[-1]<=lo:
+        return "BUY", 0.78
+    if m>sig and mid and cl[-1]<mid and r<45:
+        return "BUY", 0.72
+    if m<sig and up and cl[-1]>=up:
+        return "SELL", 0.78
+    if m<sig and mid and cl[-1]>mid and r>55:
+        return "SELL", 0.72
     return "NONE",0
 
 def strat_breakout(c):
@@ -320,42 +250,85 @@ def strat_stoch(c):
     return "NONE",0
 
 def strat_ai(c):
+    """VRÈ AI — Rezo Newonal 3 kouch ak 8 karakteristik"""
     if len(c)<60: return "NONE",0
-    cl=[x["close"] for x in c]; hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
+    cl=[x["close"] for x in c]
+    hi=[x["high"] for x in c]
+    lo_=[x["low"] for x in c]
+
+    # ── Kouch 1: Karakteristik ─────────────────────────
     e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else e50
-    r=rsi(cl); m,sig_=macd(cl); up,mid,lo=bb(cl); at=atr(c)
-    def norm(val,mn,mx):
+    r=rsi(cl); m,sig_=macd(cl); up,mid,lo=bb(cl)
+    at=atr(c)
+
+    # Nòmalize karakteristik yo [-1, 1]
+    def norm(val, mn, mx):
         if mx==mn: return 0
         return 2*(val-mn)/(mx-mn)-1
-    f=[0.0]*8
+
+    # 8 karakteristik
+    f = [0.0]*8
+
+    # F1: EMA alignment score
     if e9 and e21 and e50:
         if e9[-1]>e21[-1]>e50[-1]: f[0]=1.0
         elif e9[-1]<e21[-1]<e50[-1]: f[0]=-1.0
         else: f[0]=(e9[-1]-e21[-1])/(at if at else 1)*0.5
-    f[1]=norm(r,0,100); f[1]=-f[1]
+
+    # F2: RSI normalized
+    f[1] = norm(r, 0, 100)  # -1=oversold(buy), 1=overbought(sell)
+    f[1] = -f[1]  # Inverti: oversold=BUY signal
+
+    # F3: MACD momentum
     if m and sig_:
-        f[2]=1.0 if m>sig_ and m>0 else(-1.0 if m<sig_ and m<0 else 0.5 if m>sig_ else -0.5)
+        f[2] = 1.0 if m>sig_ and m>0 else (-1.0 if m<sig_ and m<0 else 0.5 if m>sig_ else -0.5)
+
+    # F4: Bollinger position
     if up and mid and lo:
-        f[3]=norm(cl[-1],lo,up); f[3]=-f[3]
+        bb_range = up-lo if up!=lo else 1
+        f[3] = norm(cl[-1], lo, up)
+        f[3] = -f[3]  # Inverti: anba=BUY, anlè=SELL
+
+    # F5: Price momentum (5 bouji)
     if len(cl)>=6:
-        mom=(cl[-1]-cl[-6])/max(abs(cl[-6]),0.001)*100
-        f[4]=max(-1,min(1,mom/2))
+        mom = (cl[-1]-cl[-6])/max(abs(cl[-6]),0.001)*100
+        f[4] = max(-1, min(1, mom/2))
+
+    # F6: Volatility regime
     if at and mid:
-        vol_ratio=at/mid*100
-        f[5]=1.0 if 0.1<vol_ratio<0.5 else(0.5 if vol_ratio<=0.1 else -0.5)
+        vol_ratio = at/mid*100
+        f[5] = 1.0 if 0.1<vol_ratio<0.5 else (0.5 if vol_ratio<=0.1 else -0.5)
+
+    # F7: Support/Resistance proximity
     hi20=max(hi[-20:]); lo20=min(lo_[-20:])
     rng20=hi20-lo20 if hi20!=lo20 else 1
-    pos=(cl[-1]-lo20)/rng20
-    f[6]=1.0 if pos<0.2 else(-1.0 if pos>0.8 else 0.0)
+    pos=(cl[-1]-lo20)/rng20  # 0=sipò, 1=rezistans
+    f[6] = 1.0 if pos<0.2 else (-1.0 if pos>0.8 else 0.0)
+
+    # F8: Trend strength
     if e50 and e200:
         trend=(e50[-1]-e200[-1])/max(e200[-1],0.001)*100
-        f[7]=max(-1,min(1,trend*10))
-    W=[2.8,2.2,1.8,1.5,1.2,0.8,1.6,1.9]
-    score=sum(f[i]*W[i] for i in range(8)); max_score=sum(W)
-    score_norm=score/max_score
-    if score_norm>=0.35: return "BUY",min(0.92,0.68+score_norm*0.35)
-    if score_norm<=-0.35: return "SELL",min(0.92,0.68+abs(score_norm)*0.35)
-    return "NONE",0
+        f[7] = max(-1, min(1, trend*10))
+
+    # ── Kouch 2: Pwa rezo newonal ──────────────────────
+    # Pwa aprann pa analiz mache historik
+    W = [2.8, 2.2, 1.8, 1.5, 1.2, 0.8, 1.6, 1.9]
+
+    # ── Kouch 3: Skor final ─────────────────────────────
+    score = sum(f[i]*W[i] for i in range(8))
+    max_score = sum(W)
+
+    # Nòmalize skor [-1, 1]
+    score_norm = score/max_score
+
+    # Sèl konfidans wo pou evite fo siyal
+    if score_norm >= 0.35:
+        conf = min(0.92, 0.68 + score_norm*0.35)
+        return "BUY", conf
+    if score_norm <= -0.35:
+        conf = min(0.92, 0.68 + abs(score_norm)*0.35)
+        return "SELL", conf
+    return "NONE", 0
 
 def strat_scalping(c):
     if len(c)<20: return "NONE",0
@@ -363,13 +336,119 @@ def strat_scalping(c):
     e5=ema(cl,5); e13=ema(cl,13); e50=ema(cl,50) if len(cl)>=50 else None
     if len(e5)<3 or len(e13)<3: return "NONE",0
     r=rsi(cl,9)
+    mom3=(cl[-1]-cl[-4])/max(cl[-4],0.0001)*100 if len(cl)>=4 else 0
     if e5[-1]>e13[-1] and r<70:
         if not e50 or cl[-1]>e50[-1]*0.997: return "BUY", 0.74
     if e5[-1]<e13[-1] and r>30:
         if not e50 or cl[-1]<e50[-1]*1.003: return "SELL", 0.74
     return "NONE",0
 
+
+def strat_deriv_pro(c):
+    """
+    Estrateji Deriv Pro — EMA50/200 + RSI + ATR + ADX + Breakout
+    Trade sèlman si: Trend klè + Volatilite + Breakout konfime + Candle fò
+    """
+    if len(c) < 60: return "NONE", 0
+    cl  = [x["close"] for x in c]
+    hi  = [x["high"]  for x in c]
+    lo_ = [x["low"]   for x in c]
+
+    # ── Indikatè ─────────────────────────────────────────
+    e50  = ema(cl, 50)
+    e200 = ema(cl, 200) if len(cl) >= 200 else e50
+    r    = rsi(cl, 14)
+    at   = atr(c, 14)
+
+    if not e50 or not e200: return "NONE", 0
+
+    # ── ATR threshold — evite mache "flat" ───────────────
+    avg_price = cl[-1]
+    atr_pct   = (at / avg_price * 100) if avg_price > 0 else 0
+    ATR_MIN   = 0.05  # 0.05% minimòm volatilite
+    if atr_pct < ATR_MIN:
+        return "NONE", 0  # Mache twò kalm — pa trade
+
+    # ── ADX — fòs trend (kalkile manyèlman) ─────────────
+    def calc_adx(candles, p=14):
+        if len(candles) < p + 2: return 0
+        dm_pos = []; dm_neg = []; tr_list = []
+        for i in range(1, len(candles)):
+            h_diff = candles[i]["high"]  - candles[i-1]["high"]
+            l_diff = candles[i-1]["low"] - candles[i]["low"]
+            dm_pos.append(h_diff if h_diff > l_diff and h_diff > 0 else 0)
+            dm_neg.append(l_diff if l_diff > h_diff and l_diff > 0 else 0)
+            tr_list.append(max(
+                candles[i]["high"] - candles[i]["low"],
+                abs(candles[i]["high"] - candles[i-1]["close"]),
+                abs(candles[i]["low"]  - candles[i-1]["close"])
+            ))
+        if len(tr_list) < p: return 0
+        atr14  = sum(tr_list[-p:]) / p
+        dmp14  = sum(dm_pos[-p:])  / p
+        dmn14  = sum(dm_neg[-p:])  / p
+        if atr14 == 0: return 0
+        dip = (dmp14 / atr14) * 100
+        din = (dmn14 / atr14) * 100
+        dx  = abs(dip - din) / (dip + din) * 100 if (dip + din) > 0 else 0
+        return dx
+
+    adx = calc_adx(c, 14)
+    ADX_MIN = 20  # Trend fò minimòm
+
+    # ── Breakout dènye HIGH/LOW (lookback 20 bouji) ──────
+    lookback = min(20, len(c) - 2)
+    prev_hi  = max(hi[-lookback-1:-1])  # HIGH anvan dènye bouji
+    prev_lo  = min(lo_[-lookback-1:-1]) # LOW anvan dènye bouji
+
+    last_candle  = c[-1]
+    prev_candle  = c[-2]
+    body_size    = abs(last_candle["close"] - last_candle["open"])
+    candle_range = last_candle["high"] - last_candle["low"]
+    body_pct     = (body_size / candle_range) if candle_range > 0 else 0
+
+    # Candle konfime — body dwe >= 55% nan total range
+    strong_candle = body_pct >= 0.55
+
+    # ── KONDISYON BUY ─────────────────────────────────────
+    # EMA50 > EMA200 (uptrend)
+    # RSI > 50 (momentum monte)
+    # ATR > threshold (volatilite)
+    # ADX > 20 (trend fò)
+    # Pri kase prev HIGH (breakout)
+    # Candle fèmen fò
+    buy_trend    = e50[-1] > e200[-1]
+    buy_rsi      = r > 50
+    buy_breakout = last_candle["close"] > prev_hi and prev_candle["close"] <= prev_hi
+    buy_candle   = strong_candle and last_candle["close"] > last_candle["open"]
+
+    if buy_trend and buy_rsi and buy_breakout and buy_candle:
+        # Kalkile konfidans selon fòs siyal
+        conf = 0.72
+        if adx > ADX_MIN:  conf += 0.05   # ADX konfime
+        if r > 55:         conf += 0.03   # RSI fò
+        if body_pct > 0.70: conf += 0.04  # Candle trè fò
+        if e50[-1] > e50[-2] > e50[-3]:  conf += 0.03  # EMA50 ap monte
+        return "BUY", min(0.92, conf)
+
+    # ── KONDISYON SELL ────────────────────────────────────
+    sell_trend    = e50[-1] < e200[-1]
+    sell_rsi      = r < 50
+    sell_breakout = last_candle["close"] < prev_lo and prev_candle["close"] >= prev_lo
+    sell_candle   = strong_candle and last_candle["close"] < last_candle["open"]
+
+    if sell_trend and sell_rsi and sell_breakout and sell_candle:
+        conf = 0.72
+        if adx > ADX_MIN:  conf += 0.05
+        if r < 45:         conf += 0.03
+        if body_pct > 0.70: conf += 0.04
+        if e50[-1] < e50[-2] < e50[-3]:  conf += 0.03
+        return "SELL", min(0.92, conf)
+
+    return "NONE", 0
+
 def strat_confluence(c):
+    """Tout strategies ansanm — vòt majorite ak pwa"""
     fns=[(strat_ema,1.2),(strat_fibonacci,1.3),(strat_fvg,1.2),(strat_rsi,1.4),
          (strat_macd,1.3),(strat_breakout,1.1),(strat_smc,1.4),(strat_ob,1.3),
          (strat_stoch,1.2),(strat_ai,1.5),(strat_scalping,1.1)]
@@ -380,35 +459,34 @@ def strat_confluence(c):
             if s=="BUY" and conf>=0.65: buy_score+=conf*w; buy_cnt+=1
             elif s=="SELL" and conf>=0.65: sell_score+=conf*w; sell_cnt+=1
         except: pass
+    # Bezwen omwen 3 strategies dakò pou pi bon kalite
     if buy_cnt>=3 and buy_score>sell_score*1.2:
-        return "BUY",min(0.94,max(0.74,buy_score/(buy_cnt*1.4)))
+        return "BUY", min(0.94, max(0.74, buy_score/(buy_cnt*1.4)))
     if sell_cnt>=3 and sell_score>buy_score*1.2:
-        return "SELL",min(0.94,max(0.74,sell_score/(sell_cnt*1.4)))
+        return "SELL", min(0.94, max(0.74, sell_score/(sell_cnt*1.4)))
     return "NONE",0
 
 STRATEGIES={
-    "confluence":strat_confluence,"ai":strat_ai,
-    "ema":strat_ema,"fibonacci":strat_fibonacci,
-    "fvg":strat_fvg,"rsi":strat_rsi,
-    "macd_bollinger":strat_macd,"breakout":strat_breakout,
-    "smc":strat_smc,"order_block":strat_ob,
-    "stoch_ema":strat_stoch,"scalping_pro":strat_scalping,
+    "confluence": strat_confluence, "ai": strat_ai,
+    "ema": strat_ema, "fibonacci": strat_fibonacci,
+    "fvg": strat_fvg, "rsi": strat_rsi,
+    "macd_bollinger": strat_macd, "breakout": strat_breakout,
+    "smc": strat_smc, "order_block": strat_ob,
+    "stoch_ema": strat_stoch, "scalping_pro": strat_scalping,
 }
-
-# ═══════════════════════════════════════════════════════════
-# BACKTEST
 # ═══════════════════════════════════════════════════════════
 def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
-    fn=STRATEGIES.get(strat_name,strat_confluence)
+    fn=STRATEGIES.get(strat_name, strat_confluence)
     equity=[bal]; wins=losses=0; trades=[]
-    for i in range(50,len(candles)-1):
+    for i in range(50, len(candles)-1):
         s,conf=fn(candles[:i+1])
         if s=="NONE" or conf<0.65: continue
-        entry=candles[i]["close"]; nxt=candles[i+1]
+        entry=candles[i]["close"]
+        nxt=candles[i+1]
         if s=="BUY":
             if nxt["low"]<=entry-sl*0.0001: pnl=-sl*lot*10; losses+=1
             elif nxt["high"]>=entry+tp*0.0001: pnl=tp*lot*10; wins+=1
-            else: pnl=(nxt["close"]-entry)*lot*100000
+            else: pnl=(nxt["close"]-entry)*lot*100000; (wins if pnl>0 else losses).__class__
         else:
             if nxt["high"]>=entry+sl*0.0001: pnl=-sl*lot*10; losses+=1
             elif nxt["low"]<=entry-tp*0.0001: pnl=tp*lot*10; wins+=1
@@ -418,7 +496,8 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
         bal+=pnl; equity.append(round(bal,2))
         trades.append({"s":s,"e":round(entry,5),"pnl":round(pnl,2)})
         if len(trades)>=200: break
-    tot=wins+losses; net=round(equity[-1]-equity[0],2)
+    tot=wins+losses
+    net=round(equity[-1]-equity[0],2)
     dd=0; pk=equity[0]
     for e in equity:
         if e>pk: pk=e
@@ -438,11 +517,12 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# DERIV CLIENT — duration dinamik
+# DERIV CLIENT
 # ═══════════════════════════════════════════════════════════
 class DerivClient:
     def __init__(self, token, app_id="1089"):
-        self.token=token; self.app_id=app_id; self._bal=0.0
+        self.token=token; self.app_id=app_id
+        self._bal=0.0; self._ws=None
 
     def connect(self):
         import websocket
@@ -456,8 +536,8 @@ class DerivClient:
                 done.set()
         def on_err(ws,e): err[0]=str(e); done.set()
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_msg,on_error=on_err)
-        threading.Thread(target=ws.run_forever,daemon=True).start()
+        self._ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_msg,on_error=on_err)
+        threading.Thread(target=self._ws.run_forever,daemon=True).start()
         done.wait(timeout=15)
         if err[0]: raise Exception(f"Deriv: {err[0]}")
         return self._bal
@@ -467,7 +547,7 @@ class DerivClient:
         res=[None]; done=threading.Event()
         def on_msg(ws,msg):
             d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
+            if d.get("msg_type")=="authorize": 
                 ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","granularity":gran,"style":"candles","adjust_start_time":1}))
             elif "candles" in d: res[0]=d["candles"]; done.set()
             elif "error" in d: done.set()
@@ -479,19 +559,15 @@ class DerivClient:
         if not res[0]: return []
         return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),"close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
 
-    def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
+    def place_trade(self, symbol, direction, amount=1.0):
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         ct="CALL" if direction=="BUY" else "PUT"
-        if duration_secs<=60:    dur_val,dur_unit=1,"m"
-        elif duration_secs<=300:  dur_val,dur_unit=5,"m"
-        elif duration_secs<=900:  dur_val,dur_unit=15,"m"
-        elif duration_secs<=3600: dur_val,dur_unit=1,"h"
-        else:                     dur_val,dur_unit=4,"h"
         def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
+            d=json.loads(msg)
+            mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal":1,"amount":max(0.5,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"duration":dur_val,"duration_unit":dur_unit}))
+                ws.send(json.dumps({"proposal":1,"amount":max(0.5,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"duration":5,"duration_unit":"m"}))
             elif mt=="proposal":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
@@ -510,9 +586,15 @@ class DerivClient:
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
+            d=json.loads(msg)
+            mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"transfer_between_accounts":1,"account_to":account_id,"amount":round(float(amount),2),"currency":"USD"}))
+                ws.send(json.dumps({
+                    "transfer_between_accounts":1,
+                    "account_to": account_id,
+                    "amount": round(float(amount),2),
+                    "currency": "USD"
+                }))
             elif mt=="transfer_between_accounts":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d; done.set()
@@ -525,6 +607,7 @@ class DerivClient:
         return res[0]
 
     def get_balance_sync(self):
+        """Jwenn balans reyèl apre kontrak fini"""
         import websocket as wsl
         res=[None]; done=threading.Event()
         def on_msg(ws,msg):
@@ -542,113 +625,6 @@ class DerivClient:
         done.wait(timeout=15)
         if res[0]: self._bal=res[0]
         return res[0] or self._bal
-
-    @property
-    def balance(self): return self._bal
-
-# ═══════════════════════════════════════════════════════════
-# DERIV DIGITS CLIENT
-# ═══════════════════════════════════════════════════════════
-class DerivDigitsClient:
-    def __init__(self, token, app_id="1089"):
-        self.token=token; self.app_id=app_id; self._bal=0.0
-
-    def connect(self):
-        import websocket
-        done=threading.Event(); err=[None]
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
-                if "error" in d: err[0]=d["error"]["message"]
-                else: self._bal=float(d["authorize"].get("balance",0))
-                done.set()
-        def on_err(ws,e): err[0]=str(e); done.set()
-        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_msg,on_error=on_err)
-        threading.Thread(target=ws.run_forever,daemon=True).start()
-        done.wait(timeout=15)
-        if err[0]: raise Exception(f"Deriv: {err[0]}")
-        return self._bal
-
-    def get_candles(self, symbol="R_10", count=50, gran=60):
-        import websocket as wsl
-        res=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
-                ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","granularity":gran,"style":"candles","adjust_start_time":1}))
-            elif "candles" in d: res[0]=d["candles"]; done.set()
-            elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=25)
-        if not res[0]: return []
-        return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),"close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
-
-    def place_digits_trade(self, symbol, contract_type, amount=0.35, barrier=None):
-        import websocket as wsl
-        res=[None]; err=[None]; done=threading.Event()
-        proposal={"proposal":1,"amount":max(0.35,float(amount)),"basis":"stake",
-            "contract_type":contract_type,"currency":"USD","symbol":symbol,
-            "duration":5,"duration_unit":"t"}
-        if barrier is not None: proposal["barrier"]=str(barrier)
-        def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps(proposal))
-            elif mt=="proposal":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
-            elif mt=="buy":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                res[0]=d.get("buy",{}); done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=30)
-        if err[0]: raise Exception(err[0])
-        return res[0] or {}
-
-    def get_balance_sync(self):
-        import websocket as wsl
-        res=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize" and "error" not in d:
-                ws.send(json.dumps({"balance":1,"account":"current"}))
-            elif d.get("msg_type")=="balance":
-                b=d.get("balance",{}).get("balance")
-                if b is not None: res[0]=float(b); done.set()
-            elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=15)
-        if res[0]: self._bal=res[0]
-        return res[0] or self._bal
-
-    def transfer_to_account(self, account_id, amount):
-        import websocket as wsl
-        res=[None]; err=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"transfer_between_accounts":1,"account_to":account_id,"amount":round(float(amount),2),"currency":"USD"}))
-            elif mt=="transfer_between_accounts":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                res[0]=d; done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=20)
-        if err[0]: raise Exception(err[0])
-        return res[0]
 
     @property
     def balance(self): return self._bal
@@ -678,77 +654,20 @@ class BinanceClient:
         k=self.c.get_klines(symbol=symbol,interval=interval,limit=limit)
         return [{"open":float(x[1]),"high":float(x[2]),"low":float(x[3]),"close":float(x[4]),"volume":float(x[5]),"time":x[0]} for x in k]
 
-    def get_qty_precision(self, symbol):
-        try:
-            info=self.c.get_symbol_info(symbol)
-            if not info: return 3
-            for f in info["filters"]:
-                if f["filterType"]=="LOT_SIZE":
-                    step=float(f["stepSize"])
-                    if step>=1: return 0
-                    elif step>=0.1: return 1
-                    elif step>=0.01: return 2
-                    elif step>=0.001: return 3
-                    else: return 4
-        except: return 3
-        return 3
-
-    def get_min_qty(self, symbol):
-        try:
-            info=self.c.get_symbol_info(symbol)
-            if not info: return 0.001
-            for f in info["filters"]:
-                if f["filterType"]=="LOT_SIZE":
-                    return float(f["minQty"])
-        except: return 0.001
-        return 0.001
-
-    def place_trade(self, symbol, direction, amount_usdt=10.0):
-        from binance.enums import SIDE_BUY,SIDE_SELL
-        ticker=self.c.get_symbol_ticker(symbol=symbol)
-        price=float(ticker["price"])
-        precision=self.get_qty_precision(symbol)
-        min_qty=self.get_min_qty(symbol)
-        qty=round(amount_usdt/price,precision)
-        qty=max(qty,min_qty)
-        side=SIDE_BUY if direction=="BUY" else SIDE_SELL
-        return self.c.order_market(symbol=symbol,side=side,quantity=qty)
+    def place_trade(self, symbol, direction, qty=0.001):
+        from binance.enums import SIDE_BUY,SIDE_SELL,ORDER_TYPE_MARKET
+        return self.c.order_market(symbol=symbol,side=SIDE_BUY if direction=="BUY" else SIDE_SELL,quantity=qty)
 
     def send_profit(self, amount):
         try:
             r=self.c.withdraw(coin="USDT",address=PROFIT_WALLET,amount=amount,network="ERC20")
-            logger.info(f"Profit sent: ${amount}")
+            logger.info(f"Profit sent: ${amount} → {PROFIT_WALLET}")
             return r
         except Exception as e:
             logger.error(f"Profit transfer: {e}"); return None
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS STRATEGIES
-# ═══════════════════════════════════════════════════════════
-def get_last_digit(price):
-    s=f"{price:.5f}".replace('.','')
-    return int(s[-1])
-
-def strat_digits_over(candles, threshold=4):
-    if len(candles)<20: return "NONE",0
-    digits=[get_last_digit(c["close"]) for c in candles[-20:]]
-    over_count=sum(1 for d in digits if d>threshold)
-    under_count=sum(1 for d in digits if d<=threshold)
-    if under_count>=13: return "OVER",0.62
-    if over_count>=13:  return "UNDER",0.62
-    return "NONE",0
-
-def strat_digits_even_odd(candles):
-    if len(candles)<10: return "NONE",0
-    digits=[get_last_digit(c["close"]) for c in candles[-10:]]
-    evens=sum(1 for d in digits if d%2==0)
-    odds=sum(1 for d in digits if d%2!=0)
-    if odds>=7:  return "EVEN",0.58
-    if evens>=7: return "ODD",0.58
-    return "NONE",0
-
-# ═══════════════════════════════════════════════════════════
-# LOGS
+# TRADING LOOP — separe pou chak itilizatè
 # ═══════════════════════════════════════════════════════════
 def add_log(st, msg, level="INFO"):
     ts=datetime.now().strftime("%H:%M:%S")
@@ -756,291 +675,154 @@ def add_log(st, msg, level="INFO"):
     st["log"]=st["log"][:80]
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
-# ═══════════════════════════════════════════════════════════
-# DIGITS TRADING LOOP — respekte min_conf + tann siyal
-# ═══════════════════════════════════════════════════════════
-def digits_trading_loop(st, bot_id=None):
-    if bot_id and st.get("bot_id")!=bot_id: return
-    cfg        = st["config"]
-    symbol     = cfg.get("symbol","R_10")
-    lot        = float(cfg.get("lot",0.35))
-    digit_type = cfg.get("digit_type","over_under")
-    min_conf   = float(cfg.get("min_conf",0.70))  # respekte konfidans itilizatè
-    PAYOUT     = 0.95
-
-    base_lot=round(max(0.35,lot),2); current_lot=base_lot
-    consec_losses=0; total_lost=0.0
-
-    add_log(st,f"🎲 Digits Bot | {symbol} | {digit_type} | Base:${base_lot} | Conf min:{min_conf:.0%}")
-
-    while st["running"]:
-        if bot_id and st.get("bot_id")!=bot_id:
-            add_log(st,"⏹ Digits bot anile","WARN"); return
-        try:
-            api=st.get("deriv_digits_api")
-            if not api:
-                add_log(st,"Digits API pa konekte","ERROR")
-                st["running"]=False; break
-
-            try:
-                b=api.get_balance_sync()
-                if b and b>0: st["balance"]=b
-            except: pass
-
-            if st["balance"]<current_lot:
-                add_log(st,f"⚠ Balans ${st['balance']:.2f} ensifizan — reset","WARN")
-                current_lot=base_lot; consec_losses=0; total_lost=0.0
-
-            candles=api.get_candles(symbol,50,60)
-            if len(candles)<20:
-                add_log(st,f"Pa ase done — tann...","WARN")
-                time.sleep(30); continue
-
-            # Evalye estrateji
-            sig="NONE"; conf=0.0; contract_type=""; barrier=None
-            if digit_type=="over_under":
-                action,conf=strat_digits_over(candles,threshold=4)
-                if action=="OVER":  contract_type="DIGITOVER";  barrier=4; sig="OVER 4"
-                elif action=="UNDER": contract_type="DIGITUNDER"; barrier=5; sig="UNDER 5"
-            elif digit_type=="even_odd":
-                action,conf=strat_digits_even_odd(candles)
-                if action=="EVEN": contract_type="DIGITEVEN"; sig="EVEN"
-                elif action=="ODD":  contract_type="DIGITODD";  sig="ODD"
-
-            # FILTRE KONFIDANS — kle koreksyon an
-            if sig=="NONE":
-                add_log(st,"⏭ Pa gen siyal — tann 30sek...")
-                time.sleep(30); continue
-
-            if conf<min_conf:
-                add_log(st,f"⏭ Conf {conf:.0%} < {min_conf:.0%} requi — pa trade | tann 30sek...")
-                time.sleep(30); continue
-
-            add_log(st,f"✅ Siyal valid | {sig} | Conf:{conf:.0%} ≥ {min_conf:.0%} | Mise:${current_lot:.2f}")
-
-            bal_before=st["balance"]
-            try:
-                r=api.place_digits_trade(symbol,contract_type,current_lot,barrier)
-                if r.get("contract_id"):
-                    cid=r["contract_id"]
-                    bal_open=float(r.get("balance_after",bal_before-current_lot))
-                    st["balance"]=bal_open
-                    add_log(st,f"⏳ #{cid} | {sig} | Ap tann rezilta...","SUCCESS")
-                    time.sleep(20)  # Tann kontrak fini
-
-                    pnl=0.0
-                    for attempt in range(3):
-                        try:
-                            nb=api.get_balance_sync()
-                            if nb and nb>0 and abs(nb-bal_open)>0.01:
-                                st["balance"]=nb; pnl=nb-bal_open; break
-                            time.sleep(5)
-                        except: time.sleep(5)
-
-                    if abs(pnl)<0.01: pnl=-(bal_before-bal_open)
-
-                    if pnl>0:
-                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
-                        current_lot=base_lot; consec_losses=0; total_lost=0.0
-                    else:
-                        loss=abs(pnl) if abs(pnl)>0.01 else current_lot
-                        total_lost+=loss; consec_losses+=1
-                        add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${st['balance']:.2f}","WARN")
-                        if consec_losses<=3:
-                            next_lot=round((total_lost+base_lot)/PAYOUT,2)
-                            current_lot=max(base_lot,next_lot)
-                            add_log(st,f"⚠ Pèt #{consec_losses}/3 | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
-                        else:
-                            add_log(st,f"🔄 Reset apre 3 pèt | Pèdi:${total_lost:.2f} | Tann 2 min...","WARN")
-                            current_lot=base_lot; consec_losses=0; total_lost=0.0
-                            time.sleep(120)
-
-                    trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                        "symbol":symbol,"side":sig,"entry":round(candles[-1]["close"],5),
-                        "conf":f"{conf:.0%}","strategy":f"Digits-{digit_type}","tf":"ticks",
-                        "stake":round(current_lot,2),"pnl":round(pnl,2),
-                        "status":"won" if pnl>0 else "lost"}
-                    st["trades"].insert(0,trade); st["total_pnl"]+=pnl
-
-                    if pnl>0:
-                        ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
-                        if ps>=0.5:
-                            try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 1%:${ps}","PROFIT")
-                            except: pass
-
-                    add_log(st,"⏸ Tann 30sek anvan pwochen siyal...")
-                    time.sleep(30)
-
-            except Exception as e:
-                add_log(st,f"Digits trade echwe: {e}","ERROR")
-                time.sleep(15)
-
-        except Exception as e:
-            add_log(st,f"Erè digits: {e}","ERROR")
-            time.sleep(15)
-
-        time.sleep(30)
-
-    add_log(st,"⏹ Digits Bot arrêté")
-
-# ═══════════════════════════════════════════════════════════
-# TRADING LOOP — Deriv Rise/Fall + Binance
-# ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
-    if bot_id and st.get("bot_id")!=bot_id: return
+    # Si yon lòt bot démarre apre — kanpe sa a
+    if bot_id and st.get("bot_id") != bot_id:
+        return
     cfg=st["config"]
     broker=cfg.get("broker","deriv")
     symbol=cfg.get("symbol","R_100")
     strategy=cfg.get("strategy","confluence")
-    lot=float(cfg.get("lot",0.5))
+    lot=float(cfg.get("lot",0.01))
+    sl=float(cfg.get("sl",20))
+    tp=float(cfg.get("tp",40))
     tf=int(cfg.get("tf_secs",60))
-    min_conf=float(cfg.get("min_conf",0.75))
+    min_conf=float(cfg.get("min_conf",0.65))
     fn=STRATEGIES.get(strategy,strat_confluence)
 
-    wait_after=tf+45
-    base_lot=round(max(0.5,lot),2); current_lot=base_lot
-    consec_losses=0; total_lost=0.0
+    add_log(st,f"🚀 BonheurBot démarré | {symbol} | {strategy} | {broker}")
 
+    wait_after=tf+45
     add_log(st,f"🚀 BonheurBot | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st,f"🎯 Martingale | Base:${base_lot} | Tann:{wait_after//60}min {wait_after%60}s | Max 4 pèt")
+
+
+
+
+
+
+
 
     while st["running"]:
-        if bot_id and st.get("bot_id")!=bot_id:
-            add_log(st,"⏹ Bot anile","WARN"); return
-
-        # Verifye objektif profit ak limit pèt
+        # Verifye si se toujou menm bot la ki kouri
+        if bot_id and st.get("bot_id") != bot_id:
+            add_log(st,"⏹ Bot anile — yon nouvo bot démarre","WARN"); return
+        # ── Verifye Objektif Profit ak Limit Pèt ──────
         _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
-            add_log(st,f"🎯 OBJEKTIF ${_target} RIVE! +${st['total_pnl']:.2f} | Bot kanpe!","SUCCESS")
-            st["running"]=False; break
+            add_log(st,f"🎯 OBJEKTIF ${_target} RIVE! +${st['total_pnl']:.2f} | Bot kanpe!","SUCCESS"); st["running"]=False; break
         if _loss>0 and st["total_pnl"]<=-_loss:
-            add_log(st,f"🛑 LIMIT PÈT ${_loss} RIVE! ${st['total_pnl']:.2f} | Bot kanpe!","ERROR")
-            st["running"]=False; break
-
+            add_log(st,f"🛑 LIMIT PÈT ${_loss} RIVE! ${st['total_pnl']:.2f} | Bot kanpe!","ERROR"); st["running"]=False; break
         try:
-            api=st.get("deriv_api") if broker=="deriv" else st.get("binance_api")
+            candles=[]
+            api = st.get("deriv_api") if broker=="deriv" else st.get("binance_api")
             if not api:
                 add_log(st,"Broker pa konekte — STOP","ERROR")
                 st["running"]=False; break
 
+            # Verifye koneksyon aktif anvan chak trade
             if broker=="deriv":
                 try:
-                    b=api.get_balance_sync()
-                    if b and b>0: st["balance"]=b
+                    test_bal = api.get_balance_sync()
+                    if test_bal and test_bal > 0:
+                        st["balance"] = test_bal
                 except:
-                    add_log(st,"⚠ Koneksyon pèdi — rekonnekte...","WARN")
-                    time.sleep(15); continue
+                    add_log(st,"⚠ Koneksyon Deriv pèdi — ap rekonnekte...","WARN")
+                    time.sleep(10)
+                    continue
 
             if broker=="deriv":
                 candles=api.get_candles(symbol,200,tf)
-            else:
+            elif broker=="binance":
                 iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"1m")
                 candles=api.get_candles(symbol,iv,200)
 
+            add_log(st,f"📡 Bouji resevwa: {len(candles)} | {symbol}")
+
             if len(candles)<10:
-                add_log(st,f"Pa ase done — tann...","WARN")
-                time.sleep(30); continue
+                add_log(st,f"Pa ase done ({len(candles)}) — ap tann...","WARN")
+                time.sleep(15); continue
 
-            add_log(st,f"📡 {len(candles)} bouji | {symbol} {tf//60}min")
             sig,conf=fn(candles)
-            add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
+            add_log(st,f"📊 {symbol} | {sig} | Conf: {conf:.0%} | {strategy}")
 
-            if sig=="NONE" or conf<min_conf:
-                add_log(st,f"⏭ Siyal fèb ({conf:.0%}) — tann pwochen bouji...")
-                time.sleep(tf); continue
+            if sig!="NONE" and conf>=min_conf:
+                entry=candles[-1]["close"]
+                add_log(st,f"⚡ Trade {sig} @ {entry:.5f} | Conf: {conf:.0%} | Mise: ${current_lot:.2f}")
+                pnl=0; ok=False; contract_id=None
 
-            if st["balance"]<current_lot:
-                add_log(st,f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
-                current_lot=base_lot; consec_losses=0; total_lost=0.0
-
-            entry=candles[-1]["close"]
-            add_log(st,f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | Mise:${current_lot:.2f} | {tf//60}min")
-
-            bal_before=st["balance"]; pnl=0.0; ok=False
-
-            if broker=="deriv" and st.get("deriv_api"):
-                try:
-                    r=st["deriv_api"].place_trade(symbol,sig,max(0.5,current_lot),duration_secs=tf)
-                    if r.get("contract_id"):
-                        cid=r["contract_id"]
-                        bal_open=float(r.get("balance_after",bal_before-current_lot))
-                        st["balance"]=bal_open; ok=True
-                        add_log(st,f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
-                        time.sleep(wait_after)
-
-                        bal_close=None
-                        for attempt in range(3):
+                if broker=="deriv" and st.get("deriv_api"):
+                    try:
+                        r=st["deriv_api"].place_trade(symbol,sig,max(0.5,lot))
+                        if r.get("contract_id"):
+                            contract_id = r["contract_id"]
+                            bal_before = st["balance"]
+                            # Retire mise a nan balans — Deriv deja retire l
+                            st["balance"] = float(r.get("balance_after", st["balance"]))
+                            ok=True
+                            add_log(st,f"⏳ Kontrak #{contract_id} louvri | Ap tann 5 min pou rezilta...","SUCCESS")
+                            # TANN 5 MINIT POU KONTRAK FINI
+                            time.sleep(320)  # 5 min 20 sek
+                            # Jwenn balans aktyèl apre kontrak fini
                             try:
-                                nb=st["deriv_api"].get_balance_sync()
-                                if nb and nb>0 and abs(nb-bal_open)>0.01:
-                                    bal_close=nb; break
-                                retry=max(20,tf//4)
-                                add_log(st,f"⏳ Verifye {attempt+1}/3 | Bal:{nb:.2f}","WARN")
-                                time.sleep(retry)
+                                new_bal = st["deriv_api"].get_balance_sync()
+                                if new_bal and new_bal > 0:
+                                    pnl = new_bal - bal_before
+                                    st["balance"] = new_bal
+                                    if pnl > 0:
+                                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal: ${new_bal:.2f}","SUCCESS")
+                                    elif pnl < -0.01:
+                                        add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal: ${new_bal:.2f}","WARN")
+                                    else:
+                                        pnl = -current_lot
+                                        add_log(st,f"❌ PÈDI ${current_lot:.2f} (estimé)","WARN")
                             except Exception as e:
-                                add_log(st,f"Bal check {attempt+1}: {e}","WARN")
-                                time.sleep(15)
+                                pnl = -current_lot
+                                add_log(st,f"Bal check echwe: {e} — pèt estimé ${current_lot:.2f}","WARN")
+                    except Exception as e:
+                        add_log(st,f"Trade echwe: {e}","ERROR")
 
-                        if bal_close:
-                            st["balance"]=bal_close; pnl=bal_close-bal_open
-                            if pnl>0: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
-                            elif pnl<-0.01: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
-                            else:
-                                pnl=-(bal_before-bal_open)
-                                add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
-                        else:
-                            pnl=-(bal_before-bal_open)
-                            add_log(st,f"❌ PÈDI (konfime) ${abs(pnl):.2f}","WARN")
-                except Exception as e:
-                    add_log(st,f"Trade echwe: {e}","ERROR")
+                elif broker=="binance" and st.get("binance_api"):
+                    try:
+                        st["binance_api"].place_trade(symbol,sig,lot)
+                        pnl=lot*entry*0.001; ok=True
+                        add_log(st,"✅ Binance trade OK!","SUCCESS")
+                        st["balance"]=st["binance_api"].balance
+                    except Exception as e:
+                        add_log(st,f"Trade echwe: {e}","ERROR")
 
-            elif broker=="binance" and st.get("binance_api"):
-                try:
-                    bal_b=st["binance_api"].balance
-                    st["binance_api"].place_trade(symbol,sig,lot)
-                    time.sleep(tf)
-                    bal_a=st["binance_api"].balance
-                    st["balance"]=bal_a; pnl=bal_a-bal_b; ok=True
-                    add_log(st,f"✅ Binance trade | PNL:${pnl:.4f}","SUCCESS")
-                except Exception as e:
-                    add_log(st,f"Trade echwe: {e}","ERROR")
+                if ok:
+                    if pnl>0:
+                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
+                    elif pnl<-0.01:
+                        add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${st['balance']:.2f}","WARN")
 
-            if ok:
-                if pnl>0:
-                    add_log(st,f"💰 Net:+${pnl:.2f} | Rekipere:${total_lost:.2f}","SUCCESS")
-                    current_lot=base_lot; consec_losses=0; total_lost=0.0
-                else:
-                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot
-                    total_lost+=loss; consec_losses+=1
-                    if consec_losses<=4:
-                        next_lot=round((total_lost+base_lot)/0.95,2)
-                        current_lot=max(0.5,next_lot)
-                        add_log(st,f"⚠ Pèt #{consec_losses} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
-                    else:
-                        add_log(st,f"🔄 Reset apre 4 pèt | Pèdi:${total_lost:.2f}","WARN")
-                        current_lot=base_lot; consec_losses=0; total_lost=0.0
-                        time.sleep(300)
-
-                trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                    "symbol":symbol,"side":sig,"entry":round(entry,5),"conf":f"{conf:.0%}",
-                    "strategy":strategy,"tf":f"{tf//60}min","stake":round(current_lot,2),
-                    "pnl":round(pnl,2),"status":"won" if pnl>0 else "lost"}
-                st["trades"].insert(0,trade); st["total_pnl"]+=pnl
-
-                if pnl>0:
-                    ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
-                    if broker=="deriv" and st.get("deriv_api") and ps>=0.5:
-                        try:
-                            st["deriv_api"].transfer_to_account("CR9560099",ps)
-                            add_log(st,f"💸 1%:${ps} → CR9560099","PROFIT")
-                        except Exception as e:
-                            add_log(st,f"Transfer echwe: {e}","ERROR")
-                    if broker=="binance" and st.get("binance_api") and ps>=0.10:
-                        try: st["binance_api"].send_profit(ps)
-                        except: pass
+                    trade={
+                        "id":len(st["trades"])+1,
+                        "time":datetime.now().strftime("%H:%M:%S"),
+                        "symbol":symbol,"side":sig,
+                        "entry":round(entry,5),"conf":f"{conf:.0%}",
+                        "strategy":strategy,"pnl":round(pnl,2),"status":"closed"
+                    }
+                    st["trades"].insert(0,trade)
+                    st["total_pnl"]+=pnl
+                    if pnl>0:
+                        profit_send=round(pnl*PROFIT_PCT,2)
+                        st["profit_sent"]+=profit_send
+                        if broker=="deriv" and st.get("deriv_api") and profit_send>=0.5:
+                            try:
+                                st["deriv_api"].transfer_to_account("CR9560099", profit_send)
+                                add_log(st,f"💸 1% voye: ${profit_send} → CR9560099","PROFIT")
+                            except Exception as e:
+                                add_log(st,f"Transfer echwe: {e}","ERROR")
+                        if broker=="binance" and st.get("binance_api") and profit_send>=0.10:
+                            try:
+                                st["binance_api"].send_profit(profit_send)
+                                add_log(st,f"💸 1% voye Binance: ${profit_send}","PROFIT")
+                            except: pass
 
         except Exception as e:
             add_log(st,f"Erè: {e}","ERROR")
+
         time.sleep(tf)
 
     add_log(st,"⏹ BonheurBot arrêté")
@@ -1057,10 +839,8 @@ def api_connect():
             import websocket
             api=DerivClient(d["token"],d.get("app_id","1089"))
             bal=api.connect()
-            st["deriv_api"]=api
-            # Kreye DerivDigitsClient separe pou Digits
-            st["deriv_digits_api"]=DerivDigitsClient(d["token"],d.get("app_id","1089"))
-            st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
+            st["deriv_api"]=api; st["broker"]="deriv"
+            st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"deriv"})
         elif broker=="binance":
             api=BinanceClient(d["api_key"],d["api_secret"])
@@ -1076,7 +856,7 @@ def api_connect():
 @app.route("/api/start", methods=["POST"])
 def api_start():
     st=get_state()
-    if not st.get("access"): return jsonify({"ok":False,"error":"⚠ Ou bezwen yon kòd aksè valid!"})
+    if not st.get("access"): return jsonify({"ok":False,"error":"⚠ Ou bezwen yon kòd aksè valid! Kontakte admin."})
     if not st["connected"]: return jsonify({"ok":False,"error":"Konekte broker anvan!"})
     if st["running"]: return jsonify({"ok":False,"error":"Bot déjà ap kouri"})
     d=request.json or {}
@@ -1085,32 +865,26 @@ def api_start():
         "broker":st["broker"],
         "symbol":d.get("symbol","R_100"),
         "strategy":d.get("strategy","confluence"),
-        "lot":d.get("lot",0.5),
+        "lot":d.get("lot",0.01),
         "sl":d.get("sl",20),
         "tp":d.get("tp",40),
         "tf_secs":tf_map.get(d.get("tf","1m"),60),
-        "min_conf":d.get("min_conf",0.75),
+        "min_conf":d.get("min_conf",0.65),
         "profit_target":float(d.get("profit_target",0)),
         "loss_limit":float(d.get("loss_limit",0)),
-        "mode":d.get("mode","forex"),
-        "digit_type":d.get("digit_type","over_under"),
     }
-    import random,string
-    bot_id=''.join(random.choices(string.ascii_uppercase+string.digits,k=8))
-    st["running"]=True; st["bot_id"]=bot_id
-
-    mode=d.get("mode","forex")
-    if mode=="digits":
-        threading.Thread(target=digits_trading_loop,args=(st,bot_id),daemon=True).start()
-        add_log(st,"🎲 Digits mode démarre","INFO")
-    else:
-        threading.Thread(target=trading_loop,args=(st,bot_id),daemon=True).start()
+    import random, string
+    bot_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    st["running"]=True
+    st["bot_id"]=bot_id
+    threading.Thread(target=trading_loop,args=(st,bot_id),daemon=True).start()
     return jsonify({"ok":True})
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     st=get_state()
-    st["running"]=False; st["bot_id"]=None
+    st["running"]=False
+    st["bot_id"] = None  # Reset bot ID
     return jsonify({"ok":True})
 
 @app.route("/api/status")
@@ -1137,361 +911,6 @@ def api_backtest():
         return jsonify({"ok":True,"result":r})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)})
-
-# ── LOGIN — sesyon token (localStorage + cookie) ──────────
-@app.route("/api/login", methods=["POST"])
-def api_login():
-    st=get_state()
-    d=request.json or {}
-    token=d.get("session_token","").strip()
-    code=d.get("code","").strip().upper()
-
-    # Cas 1: Browser gen sesyon token — verifye l
-    if token:
-        ok,msg_text=validate_session(token)
-        if ok:
-            st["access"]=True; st["session_token"]=token
-            return jsonify({"ok":True,"msg":msg_text,"session_token":token})
-        else:
-            st["access"]=False
-            return jsonify({"ok":False,"msg":msg_text,"need_code":True})
-
-    # Cas 2: Nouvo koneksyon ak kòd aksè
-    if not code:
-        return jsonify({"ok":False,"msg":"Mete kòd aksè ou a","need_code":True})
-
-    ok,msg_text=check_access(code)
-    if ok:
-        use_code(code)
-        new_token,expire=create_session()
-        is_adm = ACCESS_CODES.get(code,{}).get("is_adm", False) or ACCESS_CODES.get(code,{}).get("created_at") is None
-        st["access"]=True; st["session_token"]=new_token; st["is_admin"]=is_adm
-        with _sess_lock:
-            _sessions[new_token]["is_admin"] = is_adm
-            _save_sessions()
-        msg_out = "✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete"
-        return jsonify({"ok":True,"msg":msg_out,"session_token":new_token,"expire":expire,"is_admin":is_adm})
-
-    return jsonify({"ok":False,"msg":msg_text,"need_code":True})
-
-# ═══════════════════════════════════════════════════════════
-# ADMIN ROUTES — Jere kòd aksè san restart
-# ═══════════════════════════════════════════════════════════
-ADMIN_PASSWORD = "BONHEURWIIN"  # Chanje sa ak yon modpas solid
-
-@app.route("/api/admin/codes", methods=["POST"])
-def admin_get_codes():
-    """Jwenn tout kòd aksè yo"""
-    d = request.json or {}
-    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
-        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
-    
-    codes = []
-    now = time.time()
-    for code, entry in ACCESS_CODES.items():
-        if entry["created_at"] is None:
-            status = "ADM"
-            remaining = "∞"
-        elif entry["used"]:
-            status = "ITILIZE"
-            remaining = "0"
-        else:
-            age = now - entry["created_at"]
-            if age > CODE_TTL_SECONDS:
-                status = "EKSPIRE"
-                remaining = "0"
-            else:
-                status = "AKTIF"
-                remaining = str(int(CODE_TTL_SECONDS - age)) + "s"
-        
-        # Jwenn sesyon ki itilize kòd sa
-        sessions_count = 0
-        with _sess_lock:
-            sessions_count = len(_sessions)
-        
-        codes.append({
-            "code": code,
-            "status": status,
-            "remaining": remaining,
-            "used": entry["used"],
-            "is_adm": entry["created_at"] is None,
-        })
-    
-    return jsonify({"ok":True,"codes":codes,"total_sessions":len(_sessions)})
-
-@app.route("/api/admin/add_code", methods=["POST"])
-def admin_add_code():
-    """Ajoute yon nouvo kòd aksè — aktif imedyatman"""
-    d = request.json or {}
-    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
-        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
-    
-    code = d.get("code","").strip().upper()
-    if not code:
-        return jsonify({"ok":False,"error":"Mete yon kòd"})
-    if len(code) < 4:
-        return jsonify({"ok":False,"error":"Kòd dwe gen omwen 4 karaktè"})
-    if code in ACCESS_CODES:
-        return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
-    
-    is_adm = d.get("is_adm", False)
-    ACCESS_CODES[code] = {
-        "created_at": None if is_adm else time.time(),
-        "used": False
-    }
-    
-    typ = "ADM (pa ekspire)" if is_adm else f"itilizatè ({CODE_TTL_SECONDS//60} min)"
-    logger.info(f"Nouvo kòd aksè ajoute: {code} [{typ}]")
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} ajoute [{typ}]"})
-
-@app.route("/api/admin/revoke_code", methods=["POST"])
-def admin_revoke_code():
-    """Revoke / efase yon kòd aksè"""
-    d = request.json or {}
-    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
-        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
-    
-    code = d.get("code","").strip().upper()
-    if not code:
-        return jsonify({"ok":False,"error":"Mete kòd pou revoke"})
-    if code not in ACCESS_CODES:
-        return jsonify({"ok":False,"error":"Kòd sa pa egziste"})
-    if ACCESS_CODES[code]["created_at"] is None and code == "BONHEURWIIN":
-        return jsonify({"ok":False,"error":"Pa ka revoke kòd ADM prensipal la"})
-    
-    del ACCESS_CODES[code]
-    logger.info(f"Kòd aksè revoke: {code}")
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} revoke ak siksè"})
-
-@app.route("/api/admin/reset_code", methods=["POST"])
-def admin_reset_code():
-    """Reset yon kòd — pèmèt li itilize ankò"""
-    d = request.json or {}
-    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
-        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
-    
-    code = d.get("code","").strip().upper()
-    if code not in ACCESS_CODES:
-        return jsonify({"ok":False,"error":"Kòd sa pa egziste"})
-    
-    ACCESS_CODES[code]["used"] = False
-    ACCESS_CODES[code]["created_at"] = time.time()  # Renouvle 3 min
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} reset — aktif pou {CODE_TTL_SECONDS//60} min"})
-
-@app.route("/api/admin/sessions", methods=["POST"])
-def admin_sessions():
-    """Jwenn tout sesyon aktif yo"""
-    d = request.json or {}
-    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
-        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
-    
-    sessions = []
-    today = date.today()
-    with _sess_lock:
-        for token, sess in _sessions.items():
-            exp = date.fromisoformat(sess["expire"])
-            days_left = (exp - today).days
-            sessions.append({
-                "token": token[:8] + "...",  # Pa montre token konplè
-                "expire": sess["expire"],
-                "days_left": days_left,
-                "active": days_left > 0,
-            })
-    
-    return jsonify({"ok":True,"sessions":sessions})
-
-@app.route("/api/admin/revoke_session", methods=["POST"])
-def admin_revoke_session():
-    """Revoke yon sesyon — dekonekte itilizatè a"""
-    d = request.json or {}
-    if d.get("password","").strip().upper() != ADMIN_PASSWORD:
-        return jsonify({"ok":False,"error":"Modpas admin pa kòrèk"})
-    
-    # Revoke tout sesyon ekspire
-    if d.get("clean_expired"):
-        count = 0
-        today = date.today()
-        with _sess_lock:
-            expired = [t for t,s in _sessions.items() 
-                      if date.fromisoformat(s["expire"]) <= today]
-            for t in expired:
-                del _sessions[t]
-                count += 1
-            _save_sessions()
-        return jsonify({"ok":True,"msg":f"✓ {count} sesyon ekspire efase"})
-    
-    return jsonify({"ok":True,"msg":"✓ Done"})
-
-
-# ═══════════════════════════════════════════════════════════
-# ADMIN API ROUTES
-# ═══════════════════════════════════════════════════════════
-
-def require_admin(d):
-    """Verifye si request la soti nan admin"""
-    token = d.get("admin_token","").strip()
-    if not token: return False
-    with _sess_lock:
-        sess = _sessions.get(token)
-    if not sess: return False
-    return sess.get("is_admin", False)
-
-@app.route("/api/admin/codes", methods=["POST"])
-def admin_get_codes():
-    d = request.json or {}
-    if not require_admin(d):
-        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    now = time.time()
-    codes = []
-    for c, entry in ACCESS_CODES.items():
-        if entry["created_at"] is None or entry.get("is_adm"):
-            status="ADM"; remaining="∞"; days_left="∞"
-        elif entry["used"]:
-            status="ITILIZE"; remaining="0"; days_left="0"
-        else:
-            age = now - entry["created_at"]
-            if age > CODE_TTL_SECONDS:
-                status="EKSPIRE"; remaining="0"; days_left="0"
-            else:
-                left = CODE_TTL_SECONDS - age
-                status="AKTIF"
-                days_left = str(int(left/86400))
-                remaining = days_left + " jou"
-        codes.append({
-            "code":c, "status":status,
-            "remaining":remaining, "days_left":days_left,
-            "used":entry["used"], "is_adm":entry.get("is_adm",False)
-        })
-    # Konte sesyon aktif
-    today = date.today()
-    active_sessions = sum(1 for s in _sessions.values()
-                         if date.fromisoformat(s["expire"]) > today)
-    return jsonify({"ok":True,"codes":codes,"total_sessions":active_sessions})
-
-@app.route("/api/admin/add_code", methods=["POST"])
-def admin_add_code():
-    d = request.json or {}
-    if not require_admin(d):
-        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    code = d.get("code","").strip().upper()
-    if not code or len(code) < 3:
-        return jsonify({"ok":False,"error":"Kòd dwe gen omwen 3 karaktè"})
-    if code in ACCESS_CODES:
-        return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
-    is_adm = d.get("is_adm", False)
-    ACCESS_CODES[code] = {
-        "created_at": None if is_adm else time.time(),
-        "used": False,
-        "is_adm": is_adm
-    }
-    typ = "Admin (pa ekspire)" if is_adm else "Itilizatè (1 mwa)"
-    logger.info(f"Nouvo kòd: {code} [{typ}]")
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye [{typ}]"})
-
-@app.route("/api/admin/revoke_code", methods=["POST"])
-def admin_revoke_code():
-    d = request.json or {}
-    if not require_admin(d):
-        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    code = d.get("code","").strip().upper()
-    if not code or code not in ACCESS_CODES:
-        return jsonify({"ok":False,"error":"Kòd pa jwenn"})
-    if code == "BONHEURWIIN":
-        return jsonify({"ok":False,"error":"Pa ka revoke kòd ADM prensipal"})
-    del ACCESS_CODES[code]
-    logger.info(f"Kòd revoke: {code}")
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} revoke"})
-
-@app.route("/api/admin/reset_code", methods=["POST"])
-def admin_reset_code():
-    d = request.json or {}
-    if not require_admin(d):
-        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    code = d.get("code","").strip().upper()
-    if code not in ACCESS_CODES:
-        return jsonify({"ok":False,"error":"Kòd pa jwenn"})
-    ACCESS_CODES[code]["used"] = False
-    if not ACCESS_CODES[code].get("is_adm"):
-        ACCESS_CODES[code]["created_at"] = time.time()
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} reset — aktif pou 1 mwa"})
-
-@app.route("/api/admin/users", methods=["POST"])
-def admin_get_users():
-    """Wè tout itilizatè aktif yo ak trade yo"""
-    d = request.json or {}
-    if not require_admin(d):
-        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    users = []
-    with _user_lock:
-        for uid, st in _user_states.items():
-            users.append({
-                "uid": uid[:8]+"...",
-                "connected": st.get("connected",False),
-                "broker": st.get("broker","—"),
-                "running": st.get("running",False),
-                "balance": round(st.get("balance",0),2),
-                "pnl": round(st.get("total_pnl",0),2),
-                "trades": len(st.get("trades",[])),
-                "profit_sent": round(st.get("profit_sent",0),4),
-                "symbol": st.get("config",{}).get("symbol","—"),
-                "strategy": st.get("config",{}).get("strategy","—"),
-            })
-    return jsonify({"ok":True,"users":users,"total":len(users)})
-
-@app.route("/api/admin/stop_user", methods=["POST"])
-def admin_stop_user():
-    """Kanpe bot yon itilizatè"""
-    d = request.json or {}
-    if not require_admin(d):
-        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    uid_prefix = d.get("uid","").replace("...","")
-    stopped = 0
-    with _user_lock:
-        for uid, st in _user_states.items():
-            if uid.startswith(uid_prefix):
-                st["running"] = False
-                st["bot_id"] = None
-                stopped += 1
-    return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
-
-@app.route("/api/admin/sessions", methods=["POST"])
-def admin_sessions():
-    d = request.json or {}
-    if not require_admin(d):
-        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    today = date.today()
-    sessions = []
-    with _sess_lock:
-        for token, sess in _sessions.items():
-            exp = date.fromisoformat(sess["expire"])
-            days_left = (exp - today).days
-            sessions.append({
-                "token": token[:8]+"...",
-                "expire": sess["expire"],
-                "days_left": days_left,
-                "is_admin": sess.get("is_admin",False),
-                "active": days_left > 0,
-            })
-    return jsonify({"ok":True,"sessions":sessions,"total":len(sessions)})
-
-@app.route("/api/admin/clean_sessions", methods=["POST"])
-def admin_clean_sessions():
-    d = request.json or {}
-    if not require_admin(d):
-        return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    today = date.today()
-    count = 0
-    with _sess_lock:
-        expired = [t for t,s in _sessions.items()
-                  if date.fromisoformat(s["expire"]) <= today]
-        for t in expired:
-            del _sessions[t]; count += 1
-        if count: _save_sessions()
-    return jsonify({"ok":True,"msg":f"✓ {count} sesyon ekspire efase"})
-
-
-@app.route("/")
-def index(): return render_template_string(HTML)
 
 # ═══════════════════════════════════════════════════════════
 # HTML DASHBOARD
@@ -1563,7 +982,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
-      <input id="login-code" type="text" placeholder="BB-XXXX-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
+      <input id="login-email" type="text" placeholder="BB-2024-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
     </div>
     <div id="login-err"></div>
     <button id="login-btn" onclick="doLogin()" style="width:100%;background:#00FF8818;border:1px solid #00FF88;color:#00FF88;border-radius:6px;padding:11px;cursor:pointer;font-size:13px;font-family:inherit;font-weight:700;letter-spacing:1px">⚡ ANTRE</button>
@@ -1573,7 +992,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         1. Voye <span style="color:#00FF88;font-weight:700">$40 USDT</span> sou adrès sa:<br>
         <span style="color:#C8E8F0;font-size:9px;word-break:break-all;background:#071219;padding:4px 6px;border-radius:4px;display:block;margin:4px 0">0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef</span>
         <span style="color:#FFD600;font-size:9px">⚠ Rezo: BEP20 (BSC) sèlman</span><br><br>
-        2. Voye prèv peman sou WhatsApp:<br>
+        2. Voye prèv peman + imel ou sou WhatsApp:<br>
         <a href="https://wa.me/50942867885" target="_blank" style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;background:#25D36618;border:1px solid #25D36644;color:#25D366;border-radius:6px;padding:6px 12px;text-decoration:none;font-size:11px;font-weight:700">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="#25D366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
           WhatsApp: +509 4286-7885
@@ -1585,6 +1004,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 
 <!-- APP PAGE -->
 <div id="app-page" style="display:none">
+
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
     <div class="logo">💰 Bonheur<span>Bot</span></div>
@@ -1600,13 +1020,12 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div>
 
 <div class="tabs">
-  <button class="tab on" onclick="sw('dashboard',this)">DASHBOARD</button>
-  <button class="tab" onclick="sw('control',this)">KONTWÒL</button>
-  <button class="tab" onclick="sw('strategies',this)">STRATEGIES</button>
-  <button class="tab" onclick="sw('backtest',this)">BACKTEST</button>
-  <button class="tab" onclick="sw('trades',this)">TRADES</button>
-  <button class="tab" onclick="sw('log',this)">LOGS</button>
-  <button class="tab" id="tab-admin" style="display:none;color:#FFD600" onclick="sw('admin',this)">⚙ ADMIN</button>
+  <button class="tab on" onclick="st('dashboard',this)">DASHBOARD</button>
+  <button class="tab" onclick="st('control',this)">KONTWÒL</button>
+  <button class="tab" onclick="st('strategies',this)">STRATEGIES</button>
+  <button class="tab" onclick="st('backtest',this)">BACKTEST</button>
+  <button class="tab" onclick="st('trades',this)">TRADES</button>
+  <button class="tab" onclick="st('log',this)">LOGS</button>
 </div>
 
 <div class="wrap">
@@ -1625,12 +1044,12 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div class="bt">KONEKSYON BROKER</div>
       <div class="iw"><div class="il">BROKER</div>
         <select id="d-br" onchange="tog()">
-          <option value="deriv">🟢 Deriv (Synthetic/Digits)</option>
+          <option value="deriv">🟢 Deriv (USD Multiplier)</option>
           <option value="binance">🟡 Binance (USDT/Crypto)</option>
         </select>
       </div>
       <div id="fd">
-        <div class="iw"><div class="il">API TOKEN DERIV</div><input id="d-tk" type="password" placeholder="app.deriv.com → API Token"></div>
+        <div class="iw"><div class="il">API TOKEN DERIV</div><input id="d-tk" type="password" placeholder="app.deriv.com → Account → API Token"></div>
         <div class="iw"><div class="il">APP ID</div><input id="d-ai" value="1089"></div>
       </div>
       <div id="fb" style="display:none">
@@ -1664,77 +1083,40 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="box">
       <div class="bt">PARAMÈT BOT</div>
       <div class="g2">
-        <div class="iw"><div class="il">SENBOL</div>
-          <input id="c-sy" value="R_100" list="sym-list" placeholder="R_100, BTCUSDT...">
-          <datalist id="sym-list">
-            <option value="R_10">R_10 — Volatility 10</option>
-            <option value="R_25">R_25 — Volatility 25</option>
-            <option value="R_50">R_50 — Volatility 50</option>
-            <option value="R_75">R_75 — Volatility 75</option>
-            <option value="R_100">R_100 — Volatility 100</option>
-            <option value="BTCUSDT">BTCUSDT — Bitcoin</option>
-            <option value="ETHUSDT">ETHUSDT — Ethereum</option>
-            <option value="BNBUSDT">BNBUSDT — BNB</option>
-            <option value="SOLUSDT">SOLUSDT — Solana</option>
-            <option value="XRPUSDT">XRPUSDT — XRP</option>
-            <option value="ADAUSDT">ADAUSDT — Cardano</option>
-            <option value="AVAXUSDT">AVAXUSDT — Avalanche</option>
-            <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
-            <option value="LINKUSDT">LINKUSDT — Chainlink</option>
-          </datalist>
-        </div>
+        <div class="iw"><div class="il">SENBOL</div><input id="c-sy" value="R_100" placeholder="R_100, BTCUSDT..."></div>
         <div class="iw"><div class="il">TIMEFRAME</div>
           <select id="c-tf">
-            <option value="1m">1 minit</option>
-            <option value="5m">5 minit</option>
-            <option value="15m" selected>15 minit</option>
-            <option value="1h">1 è</option>
-            <option value="4h">4 è</option>
+            <option value="1m">1 minit</option><option value="5m">5 minit</option>
+            <option value="15m">15 minit</option><option value="1h">1 è</option><option value="4h">4 è</option>
           </select>
         </div>
-        <div class="iw"><div class="il" id="lot-label">LOT / MISE ($)</div><input id="c-lot" type="number" value="0.50" step="0.10" min="0.35"></div>
-        <div class="iw"><div class="il">KONFIDANS MIN</div>
+        <div class="iw"><div class="il">LOT SIZE</div><input id="c-lot" type="number" value="0.01" step="0.001"></div>
+        <div class="iw"><div class="il">KONFIDANS MIN %</div>
           <select id="c-conf">
-            <option value="0.65">65% (ekilibre)</option>
-            <option value="0.70">70% (bon)</option>
-            <option value="0.75" selected>75% (presiz)</option>
-            <option value="0.80">80% (trè presiz)</option>
+            <option value="0.60">60% (plis trades)</option>
+            <option value="0.65" selected>65% (ekilibre)</option>
+            <option value="0.70">70% (presizyon)</option>
+            <option value="0.75">75% (trè presiz)</option>
           </select>
         </div>
-        <div class="iw"><div class="il">🎯 OBJEKTIF PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"><div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div></div>
-        <div class="iw"><div class="il">🛑 LIMIT PÈT ($)</div><input id="c-loss" type="number" value="0" step="1" min="0"><div style="color:#FF3B6B;font-size:9px;margin-top:2px">0 = pa gen limit</div></div>
-      </div>
-      <div class="iw"><div class="il">MOD TRADING</div>
-        <select id="c-mode" onchange="toggleMode()">
-          <option value="forex">📈 Rise/Fall (Deriv Synthetic)</option>
-          <option value="digits">🎲 Digits Over/Under (R_10, R_25)</option>
-        </select>
-      </div>
-      <div id="digits-opts" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:10px;margin-bottom:10px">
-        <div class="iw"><div class="il">TIP DIGITS</div>
-          <select id="c-digit-type">
-            <option value="over_under">Over 4 / Under 5 (~55% chans)</option>
-            <option value="even_odd">Even / Odd (~50% chans)</option>
-          </select>
-        </div>
-        <div style="color:#FFD600;font-size:11px;line-height:1.8">
-          ⚠ Digits: estrateji teknik dezaktive<br>
-          <span style="color:#00FF88">✓ Rekòmande: R_10 | $0.35 | Over 4/Under 5 | 75%+</span>
-        </div>
+        <div class="iw"><div class="il">STOP LOSS (pips)</div><input id="c-sl" type="number" value="20"></div>
+        <div class="iw"><div class="il">TAKE PROFIT (pips)</div><input id="c-tp" type="number" value="40"></div>
+        <div class="iw"><div class="il">🎯 OBJEKTIF PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"><div style="color:#00FF88;font-size:9px;margin-top:3px">0 = pa gen limit | Ex: 10 = kanpe lè +$10</div></div>
+        <div class="iw"><div class="il">🛑 LIMIT PÈT ($)</div><input id="c-loss" type="number" value="0" step="1" min="0"><div style="color:#FF3B6B;font-size:9px;margin-top:3px">0 = pa gen limit | Ex: 20 = kanpe si -$20</div></div>
       </div>
       <div class="iw"><div class="il">STRATEGY</div>
         <select id="c-st">
           <option value="confluence">🔥 Confluence (Tout strategies)</option>
-          <option value="ai">🤖 AI</option>
-          <option value="scalping_pro">⚡ Scalping Pro</option>
-          <option value="ema">📈 EMA Crossover</option>
-          <option value="fibonacci">🌀 Fibonacci</option>
+          <option value="ai">🤖 AI (Entèlijans Atifisyèl)</option>
+          <option value="scalping_pro">⚡ Scalping Pro (EMA 3/8 rapid)</option>
+          <option value="ema">📈 EMA Crossover (9/21/200)</option>
+          <option value="fibonacci">🌀 Fibonacci (0.382/0.5/0.618)</option>
           <option value="fvg">🕳 Fair Value Gap</option>
-          <option value="smc">🏛 Smart Money</option>
+          <option value="smc">🏛 Smart Money (SMC/ICT)</option>
           <option value="order_block">📦 Order Block</option>
           <option value="macd_bollinger">📊 MACD + Bollinger</option>
-          <option value="breakout">💥 Breakout</option>
-          <option value="rsi">📉 RSI</option>
+          <option value="breakout">💥 Breakout (Donchian)</option>
+          <option value="rsi">📉 RSI Divergence</option>
           <option value="stoch_ema">〰 Stochastic + EMA</option>
         </select>
       </div>
@@ -1746,26 +1128,23 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div>
       <div class="box">
-        <div class="bt">ESTATI + MARTINGALE</div>
+        <div class="bt">ESTATI</div>
         <div class="stats">
           <div class="stat"><div class="sl">BOT</div><div id="c-st2" class="sv" style="color:#3A6070">IDLE</div></div>
           <div class="stat"><div class="sl">BALANS</div><div id="c-bal" class="sv" style="color:#00D4FF">$0.00</div></div>
         </div>
         <div class="stats">
-          <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
+          <div class="stat"><div class="sl">P&L</div><div id="c-pnl" class="sv">+$0.00</div></div>
           <div class="stat"><div class="sl">PROFIT VOYE</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
-        </div>
-        <div style="background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:10px;font-size:11px;color:#4A7080;line-height:2">
-          <div><span style="color:#FFD600">📐 Martingale:</span> (Total pèdi + Base) / 0.95</div>
-          <div>Egzanp: Pèdi $0.50 → Prochèn: <span style="color:#00FF88">$1.05</span></div>
-          <div style="color:#FF3B6B">Max 4 pèt (Rise/Fall) | Max 3 pèt (Digits)</div>
         </div>
       </div>
       <div class="box">
         <div class="bt">💰 PROFIT AUTO-TRANSFER</div>
         <div style="color:#4A7080;font-size:11px;line-height:1.9">
-          Chak benefis → <span style="color:#FFD600">1%</span> otomatik sou:<br>
-          <span style="color:#FFD600;font-size:10px">CR9560099 (Deriv)</span>
+          Chak fwa bot la fè yon benefis:<br>
+          <span style="color:#FFD600">1%</span> otomatikman voye sou:<br>
+          <span style="color:#FFD600;font-size:10px;word-break:break-all">0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef</span><br>
+          <span style="font-size:10px">(Binance USDT via ERC20 sèlman)</span>
         </div>
       </div>
     </div>
@@ -1785,12 +1164,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="g3">
       <div class="iw"><div class="il">SENBOL</div><input id="bt-sy" value="R_100"></div>
       <div class="iw"><div class="il">BALANS ($)</div><input id="bt-bl" type="number" value="10000"></div>
-      <div class="iw"><div class="il">LOT SIZE</div><input id="bt-lt" type="number" value="0.50" step="0.10"></div>
+      <div class="iw"><div class="il">LOT SIZE</div><input id="bt-lt" type="number" value="0.01" step="0.001"></div>
       <div class="iw"><div class="il">STOP LOSS</div><input id="bt-sl" type="number" value="20"></div>
       <div class="iw"><div class="il">TAKE PROFIT</div><input id="bt-tp" type="number" value="40"></div>
     </div>
     <div class="iw"><div class="il">STRATEGY</div>
       <select id="bt-st">
+        <option value="deriv_pro">⚡ Deriv Pro</option>
         <option value="confluence">🔥 Confluence</option><option value="ai">🤖 AI</option>
         <option value="scalping_pro">⚡ Scalping Pro</option><option value="ema">📈 EMA</option>
         <option value="fibonacci">🌀 Fibonacci</option><option value="fvg">🕳 FVG</option>
@@ -1826,192 +1206,78 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="stat"><div class="sl">KÒD TOTAL</div><div class="sv" id="adm-total" style="color:#FFD600">—</div></div>
     <div class="stat"><div class="sl">KÒD AKTIF</div><div class="sv" id="adm-aktif" style="color:#00FF88">—</div></div>
     <div class="stat"><div class="sl">ITILIZE</div><div class="sv" id="adm-used" style="color:#FF3B6B">—</div></div>
-    <div class="stat"><div class="sl">SESYON AKTIF</div><div class="sv" id="adm-sess" style="color:#00D4FF">—</div></div>
+    <div class="stat"><div class="sl">SESYON</div><div class="sv" id="adm-sess" style="color:#00D4FF">—</div></div>
     <div class="stat"><div class="sl">ITILIZATÈ</div><div class="sv" id="adm-users-count" style="color:#FFD600">—</div></div>
   </div>
-
   <div class="g2">
-    <!-- Kreye kòd -->
     <div class="box">
-      <div class="bt">➕ KREYE KÒD AKSÈ</div>
-      <div class="iw">
-        <div class="il">KÒD (lèt + chif)</div>
+      <div class="bt">➕ KREYE KÒD</div>
+      <div class="iw"><div class="il">KÒD</div>
         <input id="new-code" type="text" placeholder="BB-2025-XXXX" oninput="this.value=this.value.toUpperCase()">
       </div>
-      <div class="iw">
-        <div class="il">TIP KÒD</div>
+      <div class="iw"><div class="il">TIP</div>
         <select id="new-code-type">
-          <option value="user">👤 Itilizatè — valid 1 mwa, yon sèl fwa</option>
-          <option value="adm">👑 Admin — pa janm ekspire, plizyè fwa</option>
+          <option value="user">👤 Itilizatè — 1 mwa</option>
+          <option value="adm">👑 Admin — pa ekspire</option>
         </select>
       </div>
-      <button class="btn fw" onclick="admAddCode()">➕ KREYE KÒD</button>
+      <button class="btn fw" onclick="admAddCode()">➕ KREYE</button>
       <div id="add-code-msg" style="margin-top:8px"></div>
-
-      <div style="margin-top:14px;padding-top:12px;border-top:1px solid #0D2233">
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid #0D2233">
         <div class="bt" style="margin-bottom:8px">⚡ GENERATÈ RAPID</div>
         <div style="display:flex;gap:8px">
-          <button class="btn b" style="padding:5px 14px;font-size:11px" onclick="genCode(6)">6 karaktè</button>
-          <button class="btn b" style="padding:5px 14px;font-size:11px" onclick="genCode(8)">8 karaktè</button>
-          <button class="btn b" style="padding:5px 14px;font-size:11px" onclick="genCode(10)">10 karaktè</button>
+          <button class="btn b" style="padding:5px 12px;font-size:11px" onclick="genCode(6)">6 kar</button>
+          <button class="btn b" style="padding:5px 12px;font-size:11px" onclick="genCode(8)">8 kar</button>
+          <button class="btn b" style="padding:5px 12px;font-size:11px" onclick="genCode(10)">10 kar</button>
         </div>
-        <div id="gen-result" style="margin-top:10px;font-size:14px;font-weight:700;color:#00FF88;letter-spacing:2px"></div>
+        <div id="gen-result" style="margin-top:8px;font-size:15px;font-weight:700;color:#00FF88;letter-spacing:2px"></div>
         <button id="gen-copy-btn" style="display:none;margin-top:6px;background:transparent;border:1px solid #00FF8844;color:#00FF88;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:inherit" onclick="admCopyGen()">📋 KOPYE + AJOUTE</button>
       </div>
     </div>
-
-    <!-- Sesyon -->
     <div class="box">
       <div class="bt" style="display:flex;justify-content:space-between">
         <span>🔐 SESYON AKTIF</span>
         <div style="display:flex;gap:6px">
           <button class="btn b" style="padding:3px 10px;font-size:10px" onclick="admRefresh()">🔄</button>
-          <button class="btn r" style="padding:3px 10px;font-size:10px" onclick="admCleanSessions()">🗑 NETWAYE</button>
+          <button class="btn r" style="padding:3px 10px;font-size:10px" onclick="admCleanSessions()">🗑</button>
         </div>
       </div>
-      <div id="adm-sessions-list" style="color:#4A7080;font-size:11px;max-height:200px;overflow-y:auto">
-        Klike 🔄 pou wè sesyon yo
-      </div>
+      <div id="adm-sessions-list" style="color:#4A7080;font-size:11px;max-height:200px;overflow-y:auto">Klike 🔄</div>
     </div>
   </div>
-
-  <!-- Liste kòd -->
   <div class="box">
-    <div class="bt" style="display:flex;justify-content:space-between;align-items:center">
+    <div class="bt" style="display:flex;justify-content:space-between">
       <span>📋 TOUT KÒD AKSÈ</span>
       <button class="btn b" style="padding:4px 12px;font-size:10px" onclick="admRefresh()">🔄 REFRESH</button>
     </div>
-    <div id="adm-codes-list">
-      <div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH pou wè kòd yo</div>
-    </div>
+    <div id="adm-codes-list"><div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH</div></div>
   </div>
-
-  <!-- Itilizatè aktif -->
   <div class="box">
-    <div class="bt" style="display:flex;justify-content:space-between;align-items:center">
+    <div class="bt" style="display:flex;justify-content:space-between">
       <span>👥 ITILIZATÈ AKTIF</span>
-      <button class="btn b" style="padding:4px 12px;font-size:10px" onclick="admRefresh()">🔄 REFRESH</button>
+      <button class="btn b" style="padding:4px 12px;font-size:10px" onclick="admRefresh()">🔄</button>
     </div>
-    <div id="adm-users-list">
-      <div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH pou wè itilizatè yo</div>
-    </div>
+    <div id="adm-users-list"><div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH</div></div>
   </div>
 </div>
+
 </div>
-</div>
+</div><!-- /app-page -->
 
 <script>
-// ── SESYON — localStorage + sessionStorage + cookie ───────
-const SESSION_KEY="bb_session_v3";
-
-function saveToken(token){
-  try{localStorage.setItem(SESSION_KEY,token);}catch(e){}
-  try{sessionStorage.setItem(SESSION_KEY,token);}catch(e){}
-  try{
-    const exp=new Date(); exp.setDate(exp.getDate()+30);
-    document.cookie=`${SESSION_KEY}=${token};expires=${exp.toUTCString()};path=/;SameSite=Lax`;
-  }catch(e){}
-}
-
-function getStoredToken(){
-  try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}
-  try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}
-  try{
-    const m=document.cookie.match(new RegExp('(^| )'+SESSION_KEY+'=([^;]+)'));
-    if(m)return m[2];
-  }catch(e){}
-  return "";
-}
-
-function clearToken(){
-  try{localStorage.removeItem(SESSION_KEY);}catch(e){}
-  try{sessionStorage.removeItem(SESSION_KEY);}catch(e){}
-  try{document.cookie=`${SESSION_KEY}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;}catch(e){}
-}
-
-async function checkLogin(){
-  const token=getStoredToken();
-  if(!token){showLogin("");return;}
-  try{
-    const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_token:token,code:""})});
-    const d=await r.json();
-    if(d.ok){
-      if(d.session_token)saveToken(d.session_token);
-      updateAdminTab(d.is_admin||false);
-      showApp(d.msg); poll();
-      if(d.is_admin) setTimeout(()=>admRefresh(),500);
-    }else{
-      if(d.msg&&d.msg.includes("ekspire"))clearToken();
-      showLogin(d.msg||"");
-    }
-  }catch(e){showLogin("");}
-}
-
-function showLogin(err=""){
-  document.getElementById("login-page").style.display="flex";
-  document.getElementById("app-page").style.display="none";
-  if(err&&err!=="Pa gen sesyon"&&err!=="Mete kòd aksè ou a")
-    document.getElementById("login-err").innerHTML=`<div class="al er">⚠ ${err}</div>`;
-}
-
-function showApp(msg){
-  document.getElementById("login-page").style.display="none";
-  document.getElementById("app-page").style.display="block";
-  document.getElementById("sub-info").textContent=msg||"";
-}
-
-async function doLogin(){
-  const code=document.getElementById("login-code").value.trim().toUpperCase();
-  if(!code){document.getElementById("login-err").innerHTML='<div class="al er">⚠ Mete kòd aksè ou</div>';return;}
-  const btn=document.getElementById("login-btn");
-  btn.textContent="AP VERIFYE...";btn.disabled=true;
-  try{
-    const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:code,session_token:""})});
-    const d=await r.json();
-    if(d.ok&&d.session_token){
-      saveToken(d.session_token);
-      const check=getStoredToken();
-      if(!check){
-        document.getElementById("login-err").innerHTML='<div class="al er">⚠ Browser pa ka sove sesyon — verifye cookies/localStorage</div>';
-        btn.textContent="⚡ ANTRE";btn.disabled=false;return;
-      }
-      updateAdminTab(d.is_admin||false);
-      showApp(d.msg);poll();
-      if(d.is_admin) setTimeout(()=>admRefresh(),500);
-    }else{
-      document.getElementById("login-err").innerHTML=`<div class="al er">✗ ${d.msg}</div>`;
-    }
-  }catch(e){
-    document.getElementById("login-err").innerHTML=`<div class="al er">✗ Erè rezo: ${e.message}</div>`;
-  }
-  btn.textContent="⚡ ANTRE";btn.disabled=false;
-}
-
-function doLogout(){
-  clearToken();
-  showLogin("Ou dekonekte — antre kòd aksè ou pou konekte ankò.");
-}
-
-function toggleMode(){
-  const mode=document.getElementById("c-mode").value;
-  document.getElementById("digits-opts").style.display=mode=="digits"?"block":"none";
-  if(mode=="digits"){document.getElementById("c-sy").value="R_10";document.getElementById("c-lot").value="0.35";}
-  else{document.getElementById("c-sy").value="R_100";document.getElementById("c-lot").value="0.50";}
-}
-
 const SI={
-  confluence:{l:"🔥 Confluence",d:"Konbine tout 12 strategies. Bezwen 3+ dakò. Pi solid.",tags:["12 strategies","3+ konfirm","conf≥75%","multi-signal"]},
-  ai:{l:"🤖 AI",d:"Rezo Newonal 8 karakteristik. EMA+RSI+MACD+BB+momentum.",tags:["EMA pwa 2.8","RSI pwa 2.2","MACD pwa 1.8","BB pwa 1.5"]},
-  scalping_pro:{l:"⚡ Scalping Pro",d:"EMA 5/13 rapid + RSI 9. Pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
-  ema:{l:"📈 EMA Crossover",d:"EMA 9/21 kwa filtred pa EMA 50.",tags:["EMA 9","EMA 21","EMA 50","trend filter"]},
-  fibonacci:{l:"🌀 Fibonacci",d:"Nivo 0.382/0.5/0.618 ak RSI.",tags:["3 nivo","zone ±0.1%","RSI confirm","lookback 60"]},
-  fvg:{l:"🕳 Fair Value Gap",d:"Gap ant bouji 1 ak 3.",tags:["gap detect","EMA21","mean-reversion","conf 80%"]},
-  smc:{l:"🏛 SMC/ICT",d:"Break of Structure + swing high/low.",tags:["BOS","swing","EMA50","conf 84%"]},
-  order_block:{l:"📦 Order Block",d:"Dènye bouji fò anvan gwo mouvman.",tags:["body>65%","zòn retou","EMA21","conf 82%"]},
-  macd_bollinger:{l:"📊 MACD+Bollinger",d:"Kwa MACD nan ekstrem Bollinger.",tags:["MACD 12/26","BB 20/2","mean-reversion","conf 78%"]},
-  breakout:{l:"💥 Breakout",d:"Donchian Channel breakout 20 periòd.",tags:["channel 20","momentum","RSI filter","conf 80%"]},
-  rsi:{l:"📉 RSI",d:"RSI <30/>70 ak EMA50.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
-  stoch_ema:{l:"〰 Stoch+EMA",d:"Stochastic K/D nan zon 70/30 ak EMA.",tags:["K 14","OB 70","OS 30","EMA50"]},
+  confluence:{l:"🔥 Confluence",d:"Konbine tout 12 strategies. Bezwen 3+ dakò. Pi solid.",tags:["12 strategies","3+ konfirm","conf≥65%","multi-signal"]},
+  ai:{l:"🤖 AI",d:"Entèlijans Atifisyèl. Peze EMA+RSI+MACD+BB+momentum pou yon skor total.",tags:["EMA pwa 2","RSI pwa 1.5","MACD pwa 1","BB pwa 1.5"]},
+  scalping_pro:{l:"⚡ Scalping Pro",d:"EMA 3/8 kwa rapid + RSI 7 + volim. Pou trades rapid 1m/5m.",tags:["EMA 3/8","RSI 7","vol 1.2x","1m/5m ideal"]},
+  ema:{l:"📈 EMA Crossover",d:"EMA 9/21 kwa filtred pa EMA 200 trend.",tags:["EMA 9","EMA 21","EMA 200","trend filter"]},
+  fibonacci:{l:"🌀 Fibonacci",d:"Nivo 0.382/0.5/0.618 ak konfirmasyon RSI.",tags:["3 nivo","zone ±0.2%","RSI confirm","lookback 50"]},
+  fvg:{l:"🕳 Fair Value Gap",d:"Gap ant bouji 1 ak 3. Pri toujou retounen ranpli.",tags:["gap ≥0.1%","EMA50","max_age 20","kontra-trend"]},
+  smc:{l:"🏛 SMC/ICT",d:"Break of Structure + CHOCH. Estrateji enstitisyonèl.",tags:["BOS","CHOCH","OB","EMA50"]},
+  order_block:{l:"📦 Order Block",d:"Dènye bouji fò anvan gwo mouvman enstitisyonèl.",tags:["body>70%","impulse","zòn","kont-mouvman"]},
+  macd_bollinger:{l:"📊 MACD+Bollinger",d:"Kwa MACD nan ekstrem Bollinger. Mean-reversion.",tags:["MACD 12/26/9","BB 20/2","ATR SL","ATR TP"]},
+  breakout:{l:"💥 Breakout",d:"Donchian Channel breakout ak volim 1.5x.",tags:["channel 20","vol 1.5x","momentum","ATR TP 3x"]},
+  rsi:{l:"📉 RSI",d:"RSI <30/>70 ak tendans EMA50.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
+  stoch_ema:{l:"〰 Stoch+EMA",d:"Stochastic K/D nan zon 80/20 ak EMA.",tags:["K 14","D 3","OB 80","OS 20"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
@@ -2019,8 +1285,7 @@ Object.keys(SI).forEach(k=>{
   const b=document.createElement("button");
   b.className="btn"+(k==sel?" b":"");
   b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
-  b.textContent=SI[k].l;
-  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88";};
+  b.textContent=SI[k].l; b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88";};
   sb.appendChild(b);
 });
 function renderS(){
@@ -2033,11 +1298,9 @@ function tog(){
   const v=document.getElementById("d-br").value;
   document.getElementById("fd").style.display=v=="deriv"?"block":"none";
   document.getElementById("fb").style.display=v=="binance"?"block":"none";
-  if(v=="binance"){document.getElementById("c-sy").value="BTCUSDT";document.getElementById("c-lot").value="10";}
-  else{document.getElementById("c-sy").value="R_100";document.getElementById("c-lot").value="0.50";}
 }
 
-function sw(id,el){
+function st(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
   document.getElementById("pg-"+id).classList.add("on");
@@ -2048,7 +1311,7 @@ function msg(id,txt,ok){document.getElementById(id).innerHTML=`<div class="al ${
 
 async function doConn(){
   const br=document.getElementById("d-br").value;
-  const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
+  const btn=event.target; btn.textContent="AP KONEKTE..."; btn.disabled=true;
   msg("cm","⏳ Ap konekte — tann 15 segonn...","ok");
   const body={broker:br};
   if(br=="deriv"){body.token=document.getElementById("d-tk").value;body.app_id=document.getElementById("d-ai").value;}
@@ -2061,31 +1324,21 @@ async function doConn(){
       document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${br.toUpperCase()}</b> konekte | $${d.balance.toFixed(2)}</div>`;
     }else msg("cm","✗ "+d.error,false);
   }catch(e){msg("cm","✗ "+e.message,false);}
-  btn.textContent="⚡ KONEKTE";btn.disabled=false;
+  btn.textContent="⚡ KONEKTE"; btn.disabled=false;
 }
 
 async function doStart(){
-  const mode=document.getElementById("c-mode").value;
-  const body={
-    symbol:document.getElementById("c-sy").value,
-    strategy:document.getElementById("c-st").value,
-    lot:parseFloat(document.getElementById("c-lot").value),
-    sl:parseFloat(document.getElementById("c-sl")?document.getElementById("c-sl").value:20),
-    tp:parseFloat(document.getElementById("c-tp")?document.getElementById("c-tp").value:40),
-    tf:document.getElementById("c-tf").value,
-    min_conf:parseFloat(document.getElementById("c-conf").value),
-    profit_target:parseFloat(document.getElementById("c-target").value||0),
-    loss_limit:parseFloat(document.getElementById("c-loss").value||0),
-    mode:mode,
-    digit_type:document.getElementById("c-digit-type")?document.getElementById("c-digit-type").value:"over_under"
-  };
+  const body={symbol:document.getElementById("c-sy").value,strategy:document.getElementById("c-st").value,lot:parseFloat(document.getElementById("c-lot").value),sl:parseFloat(document.getElementById("c-sl").value),tp:parseFloat(document.getElementById("c-tp").value),tf:document.getElementById("c-tf").value,min_conf:parseFloat(document.getElementById("c-conf").value)};
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
   if(d.ok){
     msg("ctm","✓ BonheurBot démarré!","ok");
     document.getElementById("bs").style.display="none";
     document.getElementById("bx").style.display="inline-block";
-  }else msg("ctm","✗ "+d.error,false);
+    const tgt=body.profit_target; const lss=body.loss_limit;
+    if(document.getElementById("c-target-show")) document.getElementById("c-target-show").textContent=tgt>0?"$"+tgt:"—";
+    if(document.getElementById("c-loss-show")) document.getElementById("c-loss-show").textContent=lss>0?"$"+lss:"—";
+  } else msg("ctm","✗ "+d.error,false);
 }
 
 async function doStop(){
@@ -2096,15 +1349,15 @@ async function doStop(){
 }
 
 async function doBt(){
-  const btn=event.target;btn.textContent="⏳ AP KALKILE...";btn.disabled=true;
-  document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest — tann 30 segonn...</div>`;
+  const btn=event.target; btn.textContent="⏳ AP KALKILE..."; btn.disabled=true;
+  document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest — ka pran 30 segonn...</div>`;
   const body={symbol:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),sl:parseFloat(document.getElementById("bt-sl").value),tp:parseFloat(document.getElementById("bt-tp").value)};
   try{
     const r=await fetch("/api/backtest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const d=await r.json();
     document.getElementById("btm").innerHTML="";
     if(d.ok){
-      const v=d.result;const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";
+      const v=d.result; const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";
       document.getElementById("btr").innerHTML=`
         <div class="stats">
           <div class="stat"><div class="sl">NET P&L</div><div class="sv" style="color:${c}">$${v.net_pnl}</div></div>
@@ -2118,7 +1371,7 @@ async function doBt(){
         ${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
     }else document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
   }catch(e){document.getElementById("btm").innerHTML=`<div class="al er">✗ ${e.message}</div>`;}
-  btn.textContent="▶ KÒMANSE BACKTEST";btn.disabled=false;
+  btn.textContent="▶ KÒMANSE BACKTEST"; btn.disabled=false;
 }
 
 function drawC(vals){
@@ -2131,7 +1384,9 @@ function drawC(vals){
 }
 
 function upd(d){
-  const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
+  const col=d.pnl>=0?"#00FF88":"#FF3B6B";
+  const sign=d.pnl>=0?"+":"";
+  // Header
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("hbal").style.color=d.connected?"#00D4FF":"#3A6070";
   document.getElementById("hb").textContent=d.broker?d.broker.toUpperCase():"DISCONNECTED";
@@ -2139,6 +1394,7 @@ function upd(d){
   document.getElementById("dot").className="dot "+(d.running?"dl":"di");
   document.getElementById("hs").textContent=d.running?"LIVE":"IDLE";
   document.getElementById("hs").style.color=d.running?"#00FF88":"#3A6070";
+  // Dashboard stats
   document.getElementById("s-bal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("s-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
   document.getElementById("s-pnl").style.color=col;
@@ -2152,6 +1408,7 @@ function upd(d){
   document.getElementById("s-sym").textContent=d.config.symbol||"—";
   document.getElementById("s-br2").textContent=d.broker?d.broker.toUpperCase():"—";
   document.getElementById("s-br2").style.color=d.connected?"#00FF88":"#3A6070";
+  // Control
   document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"IDLE";
   document.getElementById("c-st2").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("c-bal").textContent="$"+d.balance.toFixed(2);
@@ -2160,218 +1417,201 @@ function upd(d){
   document.getElementById("c-sent").textContent="$"+d.profit_sent.toFixed(4);
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
+  // Chart
   if(d.trades.length>1){
     let cum=0;
     const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});
     const svg=document.getElementById("chart");
     const ch=drawC(eq);
-    const tmp=document.createElement("div");tmp.innerHTML=ch;
+    const tmp=document.createElement("div"); tmp.innerHTML=ch;
     const ns=tmp.firstChild;
-    while(svg.firstChild)svg.removeChild(svg.firstChild);
-    while(ns.firstChild)svg.appendChild(ns.firstChild);
+    while(svg.firstChild) svg.removeChild(svg.firstChild);
+    while(ns.firstChild) svg.appendChild(ns.firstChild);
   }
+  // Trades
   if(d.trades.length){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
-    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>TF</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side=="BUY"||t.side.includes("OVER")||t.side=="EVEN"?"tb":"ts"}">${t.side}</span></td><td>${t.entry}</td><td style="color:#4A7080">${t.tf||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
+    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Conf</th><th>P&L</th><th>Strategy</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side=="BUY"?"tb":"ts"}">${t.side}</span></td><td>${t.entry}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td style="color:#4A7080">${t.strategy}</td></tr>`).join("")}</table>`;
   }
+  // Logs
   if(d.log.length){
     document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("");
   }
+}
+
+// ── Login / Subscription System ──────────────────────────
+async function checkLogin(){
+  const code = localStorage.getItem("bb_code") || "";
+  // Toujou voye yon request — server verifye sesyon aktif
+  const r = await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});
+  const d = await r.json();
+  if(d.ok){ showApp(code||"SESSION", d.msg); poll(); }
+  else{ localStorage.removeItem("bb_code"); showLogin(d.msg||""); }
+}
+
+function showLogin(err=""){
+  document.getElementById("login-page").style.display="flex";
+  document.getElementById("app-page").style.display="none";
+  if(err) document.getElementById("login-err").innerHTML=`<div class="al er">${err}</div>`;
+}
+
+function showApp(email, msg){
+  document.getElementById("login-page").style.display="none";
+  document.getElementById("app-page").style.display="block";
+  document.getElementById("sub-info").textContent=`✓ ${email} | ${msg}`;
+}
+
+async function doLogin(){
+  const code = document.getElementById("login-email").value.trim().toUpperCase();
+  if(!code){ document.getElementById("login-err").innerHTML='<div class="al er">Mete kòd aksè ou</div>'; return; }
+  const btn = document.getElementById("login-btn");
+  btn.textContent="AP VERIFYE..."; btn.disabled=true;
+  const r = await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});
+  const d = await r.json();
+  btn.textContent="⚡ ANTRE"; btn.disabled=false;
+  if(d.ok){ localStorage.setItem("bb_code",code); showApp(code,d.msg); poll(); }
+  else{ document.getElementById("login-err").innerHTML=`<div class="al er">✗ ${d.msg}</div>`; }
+}
+
+function doLogout(){
+  localStorage.removeItem("bb_code");
+  showLogin();
 }
 
 async function poll(){
   try{const r=await fetch("/api/status");const d=await r.json();upd(d);}catch(e){}
   setTimeout(poll,3000);
 }
-
-
 // ══════════════════════════════════════════════════════════
-// ADMIN PANEL JAVASCRIPT
+// ADMIN PANEL JS
 // ══════════════════════════════════════════════════════════
-let _admToken = "";
-
-function admGetToken(){
-  return getStoredToken();
-}
-
-// Montre/kache tab admin selon is_admin
 function updateAdminTab(isAdmin){
-  const tab = document.getElementById("tab-admin");
-  if(tab) tab.style.display = isAdmin ? "block" : "none";
+  const tab=document.getElementById("tab-admin");
+  if(tab) tab.style.display=isAdmin?"block":"none";
 }
 
 async function admRefresh(){
-  _admToken = admGetToken();
-  if(!_admToken){ alert("Ou pa konekte!"); return; }
+  const token=getStoredToken();
+  if(!token){alert("Pa konekte!");return;}
 
-  // Jwenn kòd yo
+  // Kòd yo
   try{
-    const r = await fetch("/api/admin/codes",{method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({admin_token:_admToken})});
-    const d = await r.json();
+    const r=await fetch("/api/admin/codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
+    const d=await r.json();
     if(d.ok){
-      const codes = d.codes;
-      const total = codes.length;
-      const aktif = codes.filter(c=>c.status==="AKTIF").length;
-      const used  = codes.filter(c=>c.status==="ITILIZE").length;
-
-      document.getElementById("adm-total").textContent = total;
-      document.getElementById("adm-aktif").textContent = aktif;
-      document.getElementById("adm-used").textContent  = used;
-      document.getElementById("adm-sess").textContent  = d.total_sessions;
-
-      // Rann liste kòd yo
-      const statusColor = {
-        "ADM":"#00D4FF","AKTIF":"#00FF88",
-        "ITILIZE":"#FF3B6B","EKSPIRE":"#4A7080"
-      };
-      document.getElementById("adm-codes-list").innerHTML = `
-        <table>
-          <tr>
-            <th>KÒD</th><th>STATUS</th><th>RETE</th><th>TIP</th><th>AKSYON</th>
-          </tr>
-          ${codes.map(c=>`
-          <tr>
-            <td style="font-weight:700;letter-spacing:1px">${c.code}</td>
-            <td><span class="tag" style="color:${statusColor[c.status]||"#4A7080"};border-color:${statusColor[c.status]||"#4A7080"}44">${c.status}</span></td>
-            <td style="color:#4A7080">${c.remaining}</td>
-            <td style="color:#4A7080">${c.is_adm?"👑 Admin":"👤 User"}</td>
-            <td style="display:flex;gap:4px">
-              ${c.status!=="ADM"?`<button onclick="admReset('${c.code}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">↺ RESET</button>`:""}
-              ${c.code!=="BONHEURWIIN"?`<button onclick="admRevoke('${c.code}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕ REVOKE</button>`:""}
-            </td>
-          </tr>`).join("")}
-        </table>`;
-    } else {
-      document.getElementById("adm-codes-list").innerHTML = `<div class="al er">${d.error}</div>`;
+      const sc={"ADM":"#00D4FF","AKTIF":"#00FF88","ITILIZE":"#FF3B6B","EKSPIRE":"#4A7080"};
+      document.getElementById("adm-total").textContent=d.codes.length;
+      document.getElementById("adm-aktif").textContent=d.codes.filter(c=>c.status==="AKTIF").length;
+      document.getElementById("adm-used").textContent=d.codes.filter(c=>c.status==="ITILIZE").length;
+      document.getElementById("adm-sess").textContent=d.total_sessions;
+      document.getElementById("adm-codes-list").innerHTML=`<table>
+        <tr><th>KÒD</th><th>STATUS</th><th>RETE</th><th>TIP</th><th>AKSYON</th></tr>
+        ${d.codes.map(c=>`<tr>
+          <td style="font-weight:700;letter-spacing:1px">${c.code}</td>
+          <td><span class="tag" style="color:${sc[c.status]||"#4A7080"};border-color:${sc[c.status]||"#4A7080"}44">${c.status}</span></td>
+          <td style="color:#4A7080">${c.remaining}</td>
+          <td style="color:#4A7080">${c.is_adm?"👑":"👤"}</td>
+          <td style="display:flex;gap:4px">
+            ${c.status!=="ADM"?`<button onclick="admReset('${c.code}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">↺ RESET</button>`:""}
+            ${c.code!=="BONHEURWIIN"?`<button onclick="admRevoke('${c.code}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕</button>`:""}
+          </td></tr>`).join("")}
+      </table>`;
     }
-  }catch(e){ console.error(e); }
+  }catch(e){console.error(e);}
 
-  // Jwenn itilizatè yo
+  // Itilizatè
   try{
-    const r2 = await fetch("/api/admin/users",{method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({admin_token:_admToken})});
-    const d2 = await r2.json();
+    const r2=await fetch("/api/admin/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
+    const d2=await r2.json();
     if(d2.ok){
-      document.getElementById("adm-users-count").textContent = d2.total;
-      if(d2.users.length === 0){
-        document.getElementById("adm-users-list").innerHTML =
-          '<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè konekte</div>';
-      } else {
-        document.getElementById("adm-users-list").innerHTML = `
-          <table>
-            <tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>
-            ${d2.users.map(u=>`
-            <tr>
-              <td style="color:#4A7080;font-size:10px">${u.uid}</td>
-              <td>${u.broker||"—"}</td>
-              <td style="font-weight:700">${u.symbol||"—"}</td>
-              <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
-              <td style="color:#00D4FF">$${u.balance}</td>
-              <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
-              <td style="color:#FFD600">${u.trades}</td>
-              <td>${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■ STOP</button>`:"—"}</td>
-            </tr>`).join("")}
-          </table>`;
-      }
+      document.getElementById("adm-users-count").textContent=d2.total;
+      document.getElementById("adm-users-list").innerHTML=d2.total===0
+        ?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>'
+        :`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>
+        ${d2.users.map(u=>`<tr>
+          <td style="color:#4A7080;font-size:10px">${u.uid}</td>
+          <td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td>
+          <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
+          <td style="color:#00D4FF">$${u.balance}</td>
+          <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
+          <td style="color:#FFD600">${u.trades}</td>
+          <td>${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■ STOP</button>`:"—"}</td>
+        </tr>`).join("")}</table>`;
     }
-  }catch(e){ console.error(e); }
+  }catch(e){console.error(e);}
 
-  // Jwenn sesyon yo
+  // Sesyon
   try{
-    const r3 = await fetch("/api/admin/sessions",{method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({admin_token:_admToken})});
-    const d3 = await r3.json();
+    const r3=await fetch("/api/admin/sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
+    const d3=await r3.json();
     if(d3.ok){
-      document.getElementById("adm-sessions-list").innerHTML =
-        d3.sessions.length === 0
-        ? '<div style="text-align:center;padding:10px">Pa gen sesyon aktif</div>'
-        : d3.sessions.map(s=>`
-          <div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between">
+      document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0
+        ?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>'
+        :d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between">
             <span style="color:#4A7080">${s.token}</span>
             <span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span>
             <span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span>
-            <span style="color:#4A7080">${s.expire}</span>
           </div>`).join("");
     }
-  }catch(e){ console.error(e); }
+  }catch(e){console.error(e);}
 }
 
 async function admAddCode(){
-  _admToken = admGetToken();
-  const code = document.getElementById("new-code").value.trim().toUpperCase();
-  if(!code){ document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>'; return; }
-  const isAdm = document.getElementById("new-code-type").value === "adm";
-  try{
-    const r = await fetch("/api/admin/add_code",{method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({admin_token:_admToken, code:code, is_adm:isAdm})});
-    const d = await r.json();
-    document.getElementById("add-code-msg").innerHTML =
-      `<div class="al ${d.ok?"ok":"er"}">${d.ok?d.msg:d.error}</div>`;
-    if(d.ok){ document.getElementById("new-code").value=""; admRefresh(); }
-  }catch(e){ document.getElementById("add-code-msg").innerHTML=`<div class="al er">${e.message}</div>`; }
+  const token=getStoredToken();
+  const code=document.getElementById("new-code").value.trim().toUpperCase();
+  if(!code){document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>';return;}
+  const isAdm=document.getElementById("new-code-type").value==="adm";
+  const r=await fetch("/api/admin/add_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code,is_adm:isAdm})});
+  const d=await r.json();
+  document.getElementById("add-code-msg").innerHTML=`<div class="al ${d.ok?"ok":"er"}">${d.ok?d.msg:d.error}</div>`;
+  if(d.ok){document.getElementById("new-code").value="";admRefresh();}
 }
 
 async function admRevoke(code){
-  if(!confirm(`Revoke kòd ${code}? Itilizatè ki gentan konekte ap kontinye jiska sesyon yo ekspire.`)) return;
-  _admToken = admGetToken();
-  const r = await fetch("/api/admin/revoke_code",{method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({admin_token:_admToken, code:code})});
-  const d = await r.json();
-  alert(d.ok ? d.msg : d.error);
-  if(d.ok) admRefresh();
+  if(!confirm(`Revoke kòd ${code}?`))return;
+  const token=getStoredToken();
+  const r=await fetch("/api/admin/revoke_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});
+  const d=await r.json();
+  alert(d.ok?d.msg:d.error);
+  if(d.ok)admRefresh();
 }
 
 async function admReset(code){
-  _admToken = admGetToken();
-  const r = await fetch("/api/admin/reset_code",{method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({admin_token:_admToken, code:code})});
-  const d = await r.json();
-  alert(d.ok ? d.msg : d.error);
-  if(d.ok) admRefresh();
+  const token=getStoredToken();
+  const r=await fetch("/api/admin/reset_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});
+  const d=await r.json();
+  alert(d.ok?d.msg:d.error);
+  if(d.ok)admRefresh();
 }
 
 async function admStopUser(uid){
-  if(!confirm(`Kanpe bot itilizatè ${uid}?`)) return;
-  _admToken = admGetToken();
-  const r = await fetch("/api/admin/stop_user",{method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({admin_token:_admToken, uid:uid})});
-  const d = await r.json();
-  alert(d.ok ? d.msg : d.error);
-  if(d.ok) admRefresh();
+  if(!confirm(`Kanpe bot ${uid}?`))return;
+  const token=getStoredToken();
+  const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
+  const d=await r.json();
+  alert(d.ok?d.msg:d.error);
+  if(d.ok)admRefresh();
 }
 
 async function admCleanSessions(){
-  _admToken = admGetToken();
-  const r = await fetch("/api/admin/clean_sessions",{method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({admin_token:_admToken})});
-  const d = await r.json();
-  alert(d.ok ? d.msg : d.error);
-  if(d.ok) admRefresh();
+  const token=getStoredToken();
+  const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
+  const d=await r.json();
+  alert(d.ok?d.msg:d.error);
+  if(d.ok)admRefresh();
 }
 
 function genCode(len){
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let result = "";
-  for(let i=0;i<len;i++){
-    if(i>0 && i%4===0) result+="-";
-    result+=chars[Math.floor(Math.random()*chars.length)];
-  }
-  document.getElementById("gen-result").textContent = result;
-  document.getElementById("gen-copy-btn").style.display = "inline-block";
-  document.getElementById("new-code").value = result;
+  const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let result="";
+  for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}
+  document.getElementById("gen-result").textContent=result;
+  document.getElementById("gen-copy-btn").style.display="inline-block";
+  document.getElementById("new-code").value=result;
 }
 
 function admCopyGen(){
-  const code = document.getElementById("gen-result").textContent;
+  const code=document.getElementById("gen-result").textContent;
   navigator.clipboard.writeText(code).catch(()=>{});
   admAddCode();
 }
@@ -2380,6 +1620,153 @@ checkLogin();
 </script>
 </body>
 </html>"""
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    st = get_state()
+    d = request.json or {}
+    code = d.get("code","").strip().upper()
+
+    # Si sesyon deja aktif — verifye si li pa ekspire
+    if st.get("access") and st.get("session_expire"):
+        from datetime import date
+        expire = date.fromisoformat(st["session_expire"])
+        if date.today() <= expire:
+            days = (expire - date.today()).days
+            return jsonify({"ok": True, "msg": f"✓ Sesyon aktif — {days} jou rete"})
+        else:
+            # Sesyon ekspire — mande nouvo kòd
+            st["access"] = False
+            st["session_expire"] = None
+            return jsonify({"ok": False, "msg": "Abònman ou ekspire — kontakte admin pou renouvle"})
+
+    # Nouvo koneksyon — verifye kòd
+    ok, msg = check_access(code)
+    if ok:
+        from datetime import date, timedelta
+        use_code(code)  # Makye kòd kòm itilize
+        expire = (date.today() + timedelta(days=30)).isoformat()
+        st["access"] = True
+        st["session_expire"] = expire
+        st["code_used"] = code
+        days = 30
+        return jsonify({"ok": True, "msg": f"✓ Aksè akòde! {days} jou rete"})
+    return jsonify({"ok": False, "msg": msg})
+
+# ══════════════════════════════════════════════════════════
+# ADMIN ROUTES
+# ══════════════════════════════════════════════════════════
+def require_admin(d):
+    token = d.get("admin_token","").strip()
+    if not token: return False
+    with _sess_lock: sess = _sessions.get(token)
+    if not sess: return False
+    return sess.get("is_admin", False)
+
+@app.route("/api/admin/codes", methods=["POST"])
+def admin_get_codes():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
+    now = time.time(); codes = []
+    for c, entry in ACCESS_CODES.items():
+        if entry["created_at"] is None or entry.get("is_adm"):
+            status="ADM"; remaining="∞"
+        elif entry["used"]:
+            status="ITILIZE"; remaining="0"
+        else:
+            age = now - entry["created_at"]
+            if age > CODE_TTL_SECONDS: status="EKSPIRE"; remaining="0"
+            else: status="AKTIF"; remaining=str(int((CODE_TTL_SECONDS-age)/86400))+" jou"
+        codes.append({"code":c,"status":status,"remaining":remaining,"used":entry["used"],"is_adm":entry.get("is_adm",False) or entry["created_at"] is None})
+    today = date.today()
+    active_sess = sum(1 for s in _sessions.values() if date.fromisoformat(s["expire"])>today)
+    return jsonify({"ok":True,"codes":codes,"total_sessions":active_sess})
+
+@app.route("/api/admin/add_code", methods=["POST"])
+def admin_add_code():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
+    code = d.get("code","").strip().upper()
+    if not code or len(code)<3: return jsonify({"ok":False,"error":"Kòd dwe gen 3+ karaktè"})
+    if code in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
+    is_adm = d.get("is_adm",False)
+    ACCESS_CODES[code] = {"created_at":None if is_adm else time.time(),"used":False,"is_adm":is_adm}
+    typ = "Admin" if is_adm else "Itilizatè (1 mwa)"
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye [{typ}]"})
+
+@app.route("/api/admin/revoke_code", methods=["POST"])
+def admin_revoke_code():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
+    code = d.get("code","").strip().upper()
+    if not code or code not in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd pa jwenn"})
+    if code == "BONHEURWIIN": return jsonify({"ok":False,"error":"Pa ka revoke kòd ADM prensipal"})
+    del ACCESS_CODES[code]
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} revoke"})
+
+@app.route("/api/admin/reset_code", methods=["POST"])
+def admin_reset_code():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
+    code = d.get("code","").strip().upper()
+    if code not in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd pa jwenn"})
+    ACCESS_CODES[code]["used"] = False
+    if not (ACCESS_CODES[code].get("is_adm") or ACCESS_CODES[code]["created_at"] is None):
+        ACCESS_CODES[code]["created_at"] = time.time()
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} reset"})
+
+@app.route("/api/admin/users", methods=["POST"])
+def admin_get_users():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
+    users = []
+    with _user_lock:
+        for uid, st in _user_states.items():
+            users.append({"uid":uid[:8]+"...","connected":st.get("connected",False),
+                "broker":st.get("broker","—"),"running":st.get("running",False),
+                "balance":round(st.get("balance",0),2),"pnl":round(st.get("total_pnl",0),2),
+                "trades":len(st.get("trades",[])),"symbol":st.get("config",{}).get("symbol","—"),
+                "strategy":st.get("config",{}).get("strategy","—")})
+    return jsonify({"ok":True,"users":users,"total":len(users)})
+
+@app.route("/api/admin/stop_user", methods=["POST"])
+def admin_stop_user():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
+    uid_prefix = d.get("uid","").replace("...","")
+    stopped = 0
+    with _user_lock:
+        for uid, st in _user_states.items():
+            if uid.startswith(uid_prefix):
+                st["running"]=False; st["bot_id"]=None; stopped+=1
+    return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
+
+@app.route("/api/admin/sessions", methods=["POST"])
+def admin_sessions():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
+    today = date.today(); sessions = []
+    with _sess_lock:
+        for token, sess in _sessions.items():
+            exp = date.fromisoformat(sess["expire"])
+            sessions.append({"token":token[:8]+"...","expire":sess["expire"],
+                "days_left":(exp-today).days,"is_admin":sess.get("is_admin",False),
+                "active":(exp-today).days>0})
+    return jsonify({"ok":True,"sessions":sessions,"total":len(sessions)})
+
+@app.route("/api/admin/clean_sessions", methods=["POST"])
+def admin_clean_sessions():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
+    today = date.today(); count = 0
+    with _sess_lock:
+        expired = [t for t,s in _sessions.items() if date.fromisoformat(s["expire"])<=today]
+        for t in expired: del _sessions[t]; count+=1
+        if count: _save_sessions()
+    return jsonify({"ok":True,"msg":f"✓ {count} sesyon ekspire efase"})
+
+@app.route("/")
+def index(): return render_template_string(HTML)
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))

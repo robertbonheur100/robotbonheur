@@ -344,8 +344,63 @@ def strat_confluence(c):
         return "SELL",min(0.94,max(0.74,sell_score/(sell_cnt*1.4)))
     return "NONE",0
 
+
+def strat_deriv_pro(c):
+    """Deriv Pro — EMA50/200 + RSI + ATR + ADX + Breakout. Pi bon pou 15m/1h."""
+    if len(c)<200: return "NONE",0
+    cl=[x["close"] for x in c]
+    hi=[x["high"] for x in c]
+    lo_=[x["low"] for x in c]
+
+    e50=ema(cl,50); e200=ema(cl,200)
+    if not e50 or not e200: return "NONE",0
+
+    r=rsi(cl); at=atr(c)
+    if at==0: return "NONE",0
+
+    # ADX senplifi
+    def calc_adx(candles,p=14):
+        if len(candles)<p+2: return 0
+        trs=[]; pdms=[]; mdms=[]
+        for i in range(1,len(candles)):
+            h=candles[i]["high"]; l=candles[i]["low"]
+            ph=candles[i-1]["high"]; pl=candles[i-1]["low"]; pc=candles[i-1]["close"]
+            tr=max(h-l,abs(h-pc),abs(l-pc))
+            up=h-ph; dn=pl-l
+            pdms.append(up if up>dn and up>0 else 0)
+            mdms.append(dn if dn>up and dn>0 else 0)
+            trs.append(tr)
+        atr_v=sum(trs[-p:])/p if sum(trs[-p:])>0 else 1
+        pdi=100*sum(pdms[-p:])/(p*atr_v)
+        mdi=100*sum(mdms[-p:])/(p*atr_v)
+        return 100*abs(pdi-mdi)/(pdi+mdi+0.001)
+
+    adx=calc_adx(c)
+
+    # Breakout HIGH/LOW 20 bouji
+    hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
+
+    # Filtre volatilite — ATR dwe ase wo
+    avg_move=sum(abs(cl[-i]-cl[-i-1]) for i in range(1,6))/5
+    if at < avg_move*0.7: return "NONE",0
+
+    # BUY — trend monte + breakout + konfirmasyon
+    if (e50[-1]>e200[-1] and cl[-1]>hi20 and cl[-2]<=hi20
+            and 45<r<78 and adx>20):
+        conf=min(0.92, 0.76+(adx/300)+(0.02 if r<65 else 0))
+        return "BUY", round(conf,2)
+
+    # SELL — trend desann + breakout + konfirmasyon
+    if (e50[-1]<e200[-1] and cl[-1]<lo20 and cl[-2]>=lo20
+            and 22<r<55 and adx>20):
+        conf=min(0.92, 0.76+(adx/300)+(0.02 if r>35 else 0))
+        return "SELL", round(conf,2)
+
+    return "NONE",0
+
 STRATEGIES={
     "confluence":strat_confluence,"ai":strat_ai,
+    "deriv_pro":strat_deriv_pro,
     "ema":strat_ema,"fibonacci":strat_fibonacci,
     "fvg":strat_fvg,"rsi":strat_rsi,
     "macd_bollinger":strat_macd,"breakout":strat_breakout,
@@ -850,7 +905,10 @@ def trading_loop(st, bot_id=None):
     fn=STRATEGIES.get(strategy,strat_confluence)
 
     wait_after=tf+45
+    base_lot=round(max(0.5,lot),2); current_lot=base_lot
+    consec_losses=0; total_lost=0.0
     add_log(st,f"🚀 BonheurBot | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
+    add_log(st,f"🎯 Martingale aktif | Base:${base_lot} | Max 6 pèt")
 
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id:
@@ -897,17 +955,21 @@ def trading_loop(st, bot_id=None):
                 add_log(st,f"⏭ Siyal fèb ({conf:.0%}) — tann pwochen bouji...")
                 time.sleep(tf); continue
 
+            if st["balance"]<current_lot:
+                add_log(st,f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
+                current_lot=base_lot; consec_losses=0; total_lost=0.0
+
             entry=candles[-1]["close"]
-            add_log(st,f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | Mise:${lot:.2f} | {tf//60}min")
+            add_log(st,f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | Mise:${current_lot:.2f} | {tf//60}min")
 
             bal_before=st["balance"]; pnl=0.0; ok=False
 
             if broker=="deriv" and st.get("deriv_api"):
                 try:
-                    r=st["deriv_api"].place_trade(symbol,sig,max(0.5,lot),duration_secs=tf)
+                    r=st["deriv_api"].place_trade(symbol,sig,max(0.5,current_lot),duration_secs=tf)
                     if r.get("contract_id"):
                         cid=r["contract_id"]
-                        bal_open=float(r.get("balance_after",bal_before-lot))
+                        bal_open=float(r.get("balance_after",bal_before-current_lot))
                         st["balance"]=bal_open; ok=True
                         add_log(st,f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
                         time.sleep(wait_after)
@@ -926,7 +988,8 @@ def trading_loop(st, bot_id=None):
                                 time.sleep(15)
 
                         if bal_close:
-                            st["balance"]=bal_close; pnl=bal_close-bal_open
+                            st["balance"]=bal_close
+                            pnl=bal_close-bal_before  # PNL reyèl = chanjman balans total
                             if pnl>0: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
                             elif pnl<-0.01: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
                             else:
@@ -951,13 +1014,23 @@ def trading_loop(st, bot_id=None):
 
             if ok:
                 if pnl>0:
-                    add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
+                    add_log(st,f"💰 Net:+${pnl:.2f} | Rekipere:${total_lost:.2f} | Bal:${st['balance']:.2f}","SUCCESS")
+                    current_lot=base_lot; consec_losses=0; total_lost=0.0
                 else:
-                    add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${st['balance']:.2f}","WARN")
+                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot
+                    total_lost+=loss; consec_losses+=1
+                    if consec_losses<=6:
+                        next_lot=round((total_lost+base_lot)/0.95,2)
+                        current_lot=max(0.5,next_lot)
+                        add_log(st,f"⚠ Pèt #{consec_losses}/6 | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
+                    else:
+                        add_log(st,f"🔄 Reset apre 6 pèt | Pèdi:${total_lost:.2f} | Tann 5 min...","WARN")
+                        current_lot=base_lot; consec_losses=0; total_lost=0.0
+                        time.sleep(300)
 
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
                     "symbol":symbol,"side":sig,"entry":round(entry,5),"conf":f"{conf:.0%}",
-                    "strategy":strategy,"tf":f"{tf//60}min","stake":round(lot,2),
+                    "strategy":strategy,"tf":f"{tf//60}min","stake":round(current_lot,2),
                     "pnl":round(pnl,2),"status":"won" if pnl>0 else "lost"}
                 st["trades"].insert(0,trade); st["total_pnl"]+=pnl
 
@@ -1456,6 +1529,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <option value="breakout">💥 Breakout</option>
           <option value="rsi">📉 RSI</option>
           <option value="stoch_ema">〰 Stochastic + EMA</option>
+          <option value="deriv_pro">🚀 Deriv Pro (EMA+ATR+ADX)</option>
         </select>
       </div>
       <div id="ctm"></div>
@@ -1473,13 +1547,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
         <div class="stats">
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
-          <div class="stat"><div class="sl">PROFIT </div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
+          <div class="stat"><div class="sl">PROFIT VOYE</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
         </div>
       </div>
       <div class="box">
-        <div class="bt">💰 PROFIT AUT</div>
+        <div class="bt">💰 PROFIT AUTO-TRANSFER</div>
         <div style="color:#4A7080;font-size:11px;line-height:1.9">
-           → <span style="color:#FFD600">1%</span> otomatik sou:<br>
+          Chak benefis → <span style="color:#FFD600">1%</span> otomatik sou:<br>
           <span style="color:#FFD600;font-size:10px">CR9560099 (Deriv)</span>
         </div>
       </div>
@@ -1682,6 +1756,7 @@ const SI={
   breakout:{l:"💥 Breakout",d:"Donchian Channel breakout 20 periòd.",tags:["channel 20","momentum","RSI filter","conf 80%"]},
   rsi:{l:"📉 RSI",d:"RSI <30/>70 ak EMA50.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
   stoch_ema:{l:"〰 Stoch+EMA",d:"Stochastic K/D nan zon 70/30 ak EMA.",tags:["K 14","OB 70","OS 30","EMA50"]},
+  deriv_pro:{l:"🚀 Deriv Pro",d:"EMA50/200 + RSI + ATR + ADX + Breakout. Pi bon pou 15m/1h.",tags:["EMA 50/200","ATR filtre","ADX>20","breakout"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");

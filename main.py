@@ -22,8 +22,7 @@ ACCESS_CODES = {
     # Kòd itilizatè — expire apre 30 jou (1 mwa), yon sèl fwa
     "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adm": False},
     "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
-    "GJKY":        {"created_at": time.time(), "used": False, "is_adm": False},
-    "EHJI":        {"created_at": time.time(), "used": False, "is_adm": False},
+    
 }
 
 CODE_TTL_SECONDS = 2592000  # 30 jou (1 mwa)
@@ -327,6 +326,9 @@ def strat_scalping(c):
         if not e50 or cl[-1]<e50[-1]*1.003: return "SELL", 0.74
     return "NONE",0
 
+# ═══════════════════════════════════════════════════════════
+# MODIFIKASYON 4: Confluence — bezwen 5 strategies konfime
+# ═══════════════════════════════════════════════════════════
 def strat_confluence(c):
     fns=[(strat_ema,1.2),(strat_fibonacci,1.3),(strat_fvg,1.2),(strat_rsi,1.4),
          (strat_macd,1.3),(strat_breakout,1.1),(strat_smc,1.4),(strat_ob,1.3),
@@ -338,9 +340,10 @@ def strat_confluence(c):
             if s=="BUY" and conf>=0.65: buy_score+=conf*w; buy_cnt+=1
             elif s=="SELL" and conf>=0.65: sell_score+=conf*w; sell_cnt+=1
         except: pass
-    if buy_cnt>=3 and buy_score>sell_score*1.2:
+    # MODIFYE: bezwen 5 strategies konfime (pa 3)
+    if buy_cnt>=5 and buy_score>sell_score*1.2:
         return "BUY",min(0.94,max(0.74,buy_score/(buy_cnt*1.4)))
-    if sell_cnt>=3 and sell_score>buy_score*1.2:
+    if sell_cnt>=5 and sell_score>buy_score*1.2:
         return "SELL",min(0.94,max(0.74,sell_score/(sell_cnt*1.4)))
     return "NONE",0
 
@@ -358,7 +361,6 @@ def strat_deriv_pro(c):
     r=rsi(cl); at=atr(c)
     if at==0: return "NONE",0
 
-    # ADX senplifi
     def calc_adx(candles,p=14):
         if len(candles)<p+2: return 0
         trs=[]; pdms=[]; mdms=[]
@@ -377,20 +379,16 @@ def strat_deriv_pro(c):
 
     adx=calc_adx(c)
 
-    # Breakout HIGH/LOW 20 bouji
     hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
 
-    # Filtre volatilite — ATR dwe ase wo
     avg_move=sum(abs(cl[-i]-cl[-i-1]) for i in range(1,6))/5
     if at < avg_move*0.7: return "NONE",0
 
-    # BUY — trend monte + breakout + konfirmasyon
     if (e50[-1]>e200[-1] and cl[-1]>hi20 and cl[-2]<=hi20
             and 45<r<78 and adx>20):
         conf=min(0.92, 0.76+(adx/300)+(0.02 if r<65 else 0))
         return "BUY", round(conf,2)
 
-    # SELL — trend desann + breakout + konfirmasyon
     if (e50[-1]<e200[-1] and cl[-1]<lo20 and cl[-2]>=lo20
             and 22<r<55 and adx>20):
         conf=min(0.92, 0.76+(adx/300)+(0.02 if r>35 else 0))
@@ -776,7 +774,6 @@ def digits_trading_loop(st, bot_id=None):
         if bot_id and st.get("bot_id")!=bot_id:
             add_log(st,"⏹ Digits bot anile","WARN"); return
 
-        # FIX 3: Verifye limit profit ak pèt
         _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
             add_log(st,f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!","SUCCESS")
@@ -891,7 +888,7 @@ def digits_trading_loop(st, bot_id=None):
     add_log(st,"⏹ Digits Bot arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# TRADING LOOP — FIX 2: PAS MARTINGALE + FIX 3: LIMIT PROFIT/PET
+# TRADING LOOP
 # ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -914,7 +911,6 @@ def trading_loop(st, bot_id=None):
         if bot_id and st.get("bot_id")!=bot_id:
             add_log(st,"⏹ Bot anile","WARN"); return
 
-        # FIX 3: Verifye objektif profit ak limit pèt
         _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
             add_log(st,f"🎯 OBJEKTIF ${_target:.2f} RIVE! +${st['total_pnl']:.2f} | Bot kanpe!","SUCCESS")
@@ -989,7 +985,7 @@ def trading_loop(st, bot_id=None):
 
                         if bal_close:
                             st["balance"]=bal_close
-                            pnl=bal_close-bal_before  # PNL reyèl = chanjman balans total
+                            pnl=bal_close-bal_before
                             if pnl>0: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
                             elif pnl<-0.01: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
                             else:
@@ -1143,7 +1139,6 @@ def api_backtest():
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)})
 
-# ── FIX 1: LOGIN — is_admin pou BONHEURWIIN ──────────────
 @app.route("/api/login", methods=["POST"])
 def api_login():
     st=get_state()
@@ -1179,7 +1174,7 @@ def api_login():
     return jsonify({"ok":False,"msg":msg_text,"need_code":True})
 
 # ═══════════════════════════════════════════════════════════
-# ADMIN ROUTES (menm jan ak doc 10)
+# ADMIN ROUTES
 # ═══════════════════════════════════════════════════════════
 def require_admin(d):
     token = d.get("admin_token","").strip()
@@ -1459,6 +1454,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div class="g2">
         <div class="iw"><div class="il">SENBOL</div>
           <input id="c-sy" value="R_100" list="sym-list" placeholder="R_100, BTCUSDT...">
+          <!-- MODIFIKASYON 1: Ajoute senbol Binance kripto -->
           <datalist id="sym-list">
             <option value="R_10">R_10 — Volatility 10</option>
             <option value="R_25">R_25 — Volatility 25</option>
@@ -1474,6 +1470,22 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
             <option value="AVAXUSDT">AVAXUSDT — Avalanche</option>
             <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
             <option value="LINKUSDT">LINKUSDT — Chainlink</option>
+            <option value="DOTUSDT">DOTUSDT — Polkadot</option>
+            <option value="MATICUSDT">MATICUSDT — Polygon</option>
+            <option value="LTCUSDT">LTCUSDT — Litecoin</option>
+            <option value="UNIUSDT">UNIUSDT — Uniswap</option>
+            <option value="ATOMUSDT">ATOMUSDT — Cosmos</option>
+            <option value="NEARUSDT">NEARUSDT — NEAR</option>
+            <option value="APTUSDT">APTUSDT — Aptos</option>
+            <option value="ARBUSDT">ARBUSDT — Arbitrum</option>
+            <option value="OPUSDT">OPUSDT — Optimism</option>
+            <option value="INJUSDT">INJUSDT — Injective</option>
+            <option value="SUIUSDT">SUIUSDT — Sui</option>
+            <option value="SEIUSDT">SEIUSDT — Sei</option>
+            <option value="TIAUSDT">TIAUSDT — Celestia</option>
+            <option value="WLDUSDT">WLDUSDT — Worldcoin</option>
+            <option value="FETUSDT">FETUSDT — Fetch.ai</option>
+            <option value="RNDRUSDT">RNDRUSDT — Render</option>
           </datalist>
         </div>
         <div class="iw"><div class="il">TIMEFRAME</div>
@@ -1486,12 +1498,14 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </select>
         </div>
         <div class="iw"><div class="il" id="lot-label">LOT / MISE ($)</div><input id="c-lot" type="number" value="0.50" step="0.10" min="0.35"></div>
+        <!-- MODIFIKASYON 2: Ajoute 60% ak 90% nan konfidans -->
         <div class="iw"><div class="il">KONFIDANS MIN</div>
           <select id="c-conf">
-            <option value="0.65">65% (ekilibre)</option>
+            <option value="0.60">60% (agresif)</option>
             <option value="0.70">70% (bon)</option>
             <option value="0.75" selected>75% (presiz)</option>
             <option value="0.80">80% (trè presiz)</option>
+            <option value="0.90">90% (ekstrèm presiz)</option>
           </select>
         </div>
         <div class="iw"><div class="il">🎯 OBJEKTIF PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"><div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div></div>
@@ -1501,6 +1515,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <select id="c-mode" onchange="toggleMode()">
           <option value="forex">📈 Rise/Fall (Deriv Synthetic)</option>
           <option value="digits">🎲 Digits Over/Under (R_10, R_25)</option>
+          <!-- MODIFIKASYON 1: Ajoute mod Binance Crypto -->
+          <option value="binance_crypto">🪙 Binance Crypto (USDT pairs)</option>
         </select>
       </div>
       <div id="digits-opts" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:10px;margin-bottom:10px">
@@ -1515,9 +1531,55 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <span style="color:#00FF88">✓ Rekòmande: R_10 | $0.35 | Over 4/Under 5 | 75%+</span>
         </div>
       </div>
+      <!-- MODIFIKASYON 1: Panèl Binance Crypto -->
+      <div id="binance-crypto-opts" style="display:none;background:#FFD60010;border:1px solid #00D4FF33;border-radius:6px;padding:10px;margin-bottom:10px">
+        <div class="iw"><div class="il">SENBOL KRIPTO BINANCE</div>
+          <select id="c-crypto-sym" onchange="document.getElementById('c-sy').value=this.value">
+            <optgroup label="🔥 Popilè">
+              <option value="BTCUSDT">BTCUSDT — Bitcoin</option>
+              <option value="ETHUSDT">ETHUSDT — Ethereum</option>
+              <option value="BNBUSDT">BNBUSDT — BNB</option>
+              <option value="SOLUSDT">SOLUSDT — Solana</option>
+              <option value="XRPUSDT">XRPUSDT — XRP</option>
+            </optgroup>
+            <optgroup label="🌟 Layer 1">
+              <option value="ADAUSDT">ADAUSDT — Cardano</option>
+              <option value="AVAXUSDT">AVAXUSDT — Avalanche</option>
+              <option value="DOTUSDT">DOTUSDT — Polkadot</option>
+              <option value="NEARUSDT">NEARUSDT — NEAR</option>
+              <option value="ATOMUSDT">ATOMUSDT — Cosmos</option>
+              <option value="APTUSDT">APTUSDT — Aptos</option>
+              <option value="SUIUSDT">SUIUSDT — Sui</option>
+              <option value="SEIUSDT">SEIUSDT — Sei</option>
+            </optgroup>
+            <optgroup label="⚡ Layer 2">
+              <option value="MATICUSDT">MATICUSDT — Polygon</option>
+              <option value="ARBUSDT">ARBUSDT — Arbitrum</option>
+              <option value="OPUSDT">OPUSDT — Optimism</option>
+            </optgroup>
+            <optgroup label="🤖 AI / DeFi">
+              <option value="FETUSDT">FETUSDT — Fetch.ai</option>
+              <option value="RNDRUSDT">RNDRUSDT — Render</option>
+              <option value="WLDUSDT">WLDUSDT — Worldcoin</option>
+              <option value="INJUSDT">INJUSDT — Injective</option>
+              <option value="UNIUSDT">UNIUSDT — Uniswap</option>
+            </optgroup>
+            <optgroup label="🐶 Meme / Autres">
+              <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
+              <option value="LTCUSDT">LTCUSDT — Litecoin</option>
+              <option value="LINKUSDT">LINKUSDT — Chainlink</option>
+              <option value="TIAUSDT">TIAUSDT — Celestia</option>
+            </optgroup>
+          </select>
+        </div>
+        <div style="color:#00D4FF;font-size:11px;line-height:1.8">
+          🪙 Binance Crypto: spot trading USDT pairs<br>
+          <span style="color:#00FF88">✓ Rekòmande: BTCUSDT | $10+ | 75%+ | 15min</span>
+        </div>
+      </div>
       <div class="iw"><div class="il">STRATEGY</div>
         <select id="c-st">
-          <option value="confluence">🔥 Confluence (Tout strategies)</option>
+          <option value="confluence">🔥 Confluence (5+ strategies konfime)</option>
           <option value="ai">🤖 AI</option>
           <option value="scalping_pro">⚡ Scalping Pro</option>
           <option value="ema">📈 EMA Crossover</option>
@@ -1533,6 +1595,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </select>
       </div>
       <div id="ctm"></div>
+      <!-- MODIFIKASYON 3: Bouton Start/Stop wè eta reyèl -->
       <div style="display:flex;gap:10px">
         <button class="btn" id="bs" onclick="doStart()">▶ START BOT</button>
         <button class="btn r" id="bx" onclick="doStop()" style="display:none">■ STOP BOT</button>
@@ -1736,15 +1799,27 @@ function doLogout(){
   showLogin("Ou dekonekte — antre kòd aksè ou pou konekte ankò.");
 }
 
+// MODIFIKASYON 1: toggleMode pou Binance Crypto
 function toggleMode(){
   const mode=document.getElementById("c-mode").value;
   document.getElementById("digits-opts").style.display=mode=="digits"?"block":"none";
-  if(mode=="digits"){document.getElementById("c-sy").value="R_10";document.getElementById("c-lot").value="0.35";}
-  else{document.getElementById("c-sy").value="R_100";document.getElementById("c-lot").value="0.50";}
+  document.getElementById("binance-crypto-opts").style.display=mode=="binance_crypto"?"block":"none";
+  if(mode=="digits"){
+    document.getElementById("c-sy").value="R_10";
+    document.getElementById("c-lot").value="0.35";
+  } else if(mode=="binance_crypto"){
+    const cryptoSym=document.getElementById("c-crypto-sym").value||"BTCUSDT";
+    document.getElementById("c-sy").value=cryptoSym;
+    document.getElementById("c-lot").value="10";
+    document.getElementById("c-st").value="confluence";
+  } else {
+    document.getElementById("c-sy").value="R_100";
+    document.getElementById("c-lot").value="0.50";
+  }
 }
 
 const SI={
-  confluence:{l:"🔥 Confluence",d:"Konbine tout 12 strategies. Bezwen 3+ dakò. Pi solid.",tags:["12 strategies","3+ konfirm","conf≥75%","multi-signal"]},
+  confluence:{l:"🔥 Confluence",d:"Konbine tout 12 strategies. Bezwen 5+ dakò (pi solid ak presiz). Evite fo siyal.",tags:["12 strategies","5+ konfirm","conf≥75%","multi-signal"]},
   ai:{l:"🤖 AI",d:"Rezo Newonal 8 karakteristik. EMA+RSI+MACD+BB+momentum.",tags:["EMA pwa 2.8","RSI pwa 2.2","MACD pwa 1.8","BB pwa 1.5"]},
   scalping_pro:{l:"⚡ Scalping Pro",d:"EMA 5/13 rapid + RSI 9. Pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
   ema:{l:"📈 EMA Crossover",d:"EMA 9/21 kwa filtred pa EMA 50.",tags:["EMA 9","EMA 21","EMA 50","trend filter"]},
@@ -1811,23 +1886,25 @@ async function doConn(){
 
 async function doStart(){
   const mode=document.getElementById("c-mode").value;
+  // Si mod se binance_crypto, itilize "forex" pou backend (Binance trade klasik)
+  const backendMode = mode=="binance_crypto" ? "forex" : mode;
   const body={
     symbol:document.getElementById("c-sy").value,
     strategy:document.getElementById("c-st").value,
     lot:parseFloat(document.getElementById("c-lot").value),
-    sl:parseFloat(document.getElementById("c-sl")?document.getElementById("c-sl").value:20),
-    tp:parseFloat(document.getElementById("c-tp")?document.getElementById("c-tp").value:40),
+    sl:20,
+    tp:40,
     tf:document.getElementById("c-tf").value,
     min_conf:parseFloat(document.getElementById("c-conf").value),
     profit_target:parseFloat(document.getElementById("c-target").value||0),
     loss_limit:parseFloat(document.getElementById("c-loss").value||0),
-    mode:mode,
+    mode:backendMode,
     digit_type:document.getElementById("c-digit-type")?document.getElementById("c-digit-type").value:"over_under"
   };
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
   if(d.ok){
-    msg("ctm","✓ BonheurBot démarré!","ok");
+    msg("ctm","✓ BonheurBot démarre!","ok");
     document.getElementById("bs").style.display="none";
     document.getElementById("bx").style.display="inline-block";
   }else msg("ctm","✗ "+d.error,false);
@@ -1875,6 +1952,7 @@ function drawC(vals){
   return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${area}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
 }
 
+// MODIFIKASYON 3: upd() — bouton Start/Stop reflete eta reyèl sèvè a
 function upd(d){
   const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
@@ -1903,8 +1981,18 @@ function upd(d){
   document.getElementById("c-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
   document.getElementById("c-pnl").style.color=col;
   document.getElementById("c-sent").textContent="$"+d.profit_sent.toFixed(4);
-  if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
-  else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
+
+  // MODIFIKASYON 3: Bouton toujou reflete eta reyèl — menm apre reloaj telefon
+  const btnStart=document.getElementById("bs");
+  const btnStop=document.getElementById("bx");
+  if(d.running){
+    btnStart.style.display="none";
+    btnStop.style.display="inline-block";
+  } else {
+    btnStart.style.display="inline-block";
+    btnStop.style.display="none";
+  }
+
   if(d.trades.length>1){
     let cum=0;
     const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});

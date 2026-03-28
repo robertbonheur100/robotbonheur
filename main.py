@@ -1,8 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║                    BONHEURBOT PRO v4 TITAN                   ║
+║                  BONHEURBOT PRO v5 SMART                     ║
 ║         Multi-User Trading Bot — Deriv + Binance            ║
-║   DerivPro 92%+ WR  |  Confluence TITAN: Janm 2 Pèt Afile  ║
+║   Trend-Only | Pivot Points | Smart 3-Loss Pause            ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -21,7 +21,6 @@ ACCESS_CODES = {
     "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adm": False},
     "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
 }
-
 CODE_TTL_SECONDS = 2592000
 
 def check_access(code):
@@ -164,10 +163,9 @@ def stoch_k(candles, p=14):
     return ((candles[-1]["close"]-lo)/(hi-lo)*100) if hi!=lo else 50
 
 # ═══════════════════════════════════════════════════════════
-# UTILITE GLOBAL — ADX + MARKET REGIME (pou tout strategies)
+# ADX KALKIL
 # ═══════════════════════════════════════════════════════════
 def calc_adx_full(candles, p=14):
-    """Retounen (adx, pdi, mdi) — mesire fòs trend"""
     if len(candles)<p+2: return 0, 0, 0
     trs=[]; pdms=[]; mdms=[]
     for i in range(1,len(candles)):
@@ -184,45 +182,121 @@ def calc_adx_full(candles, p=14):
     adx_val=100*abs(pdi-mdi)/(pdi+mdi+0.001)
     return round(adx_val,2), round(pdi,2), round(mdi,2)
 
-def market_regime(candles):
+# ═══════════════════════════════════════════════════════════
+# ██  PIVOT POINTS — Standard + Fibonacci  ██
+# Nivo sipò/rezistans pou antre entèlijan
+# ═══════════════════════════════════════════════════════════
+def calc_pivot_points(candles):
     """
-    Detèmine eta mache a:
-    TRENDING_UP, TRENDING_DN, RANGING, VOLATILE
-    Retounen (regime, score) — score 0-10
+    Kalkil Pivot Points klasik + Fibonacci.
+    Retounen dict: pp, r1, r2, r3, s1, s2, s3 + fib levels
+    Itilize dènye 20 bouji pou kalkil HIGH, LOW, CLOSE
     """
-    if len(candles)<50: return "UNKNOWN", 0
-    cl=[x["close"] for x in candles]
-    hi=[x["high"] for x in candles]
-    lo_=[x["low"] for x in candles]
+    if len(candles) < 20:
+        return None
+    recent = candles[-20:]
+    hi  = max(x["high"]  for x in recent)
+    lo  = min(x["low"]   for x in recent)
+    cl  = candles[-1]["close"]
 
-    adx,pdi,mdi=calc_adx_full(candles,14)
-    at=atr(candles)
-    mid_val=sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
-    atr_pct=(at/mid_val*100) if mid_val>0 else 0
+    pp  = (hi + lo + cl) / 3
+    r1  = 2*pp - lo
+    r2  = pp + (hi - lo)
+    r3  = hi + 2*(pp - lo)
+    s1  = 2*pp - hi
+    s2  = pp - (hi - lo)
+    s3  = lo - 2*(hi - pp)
 
-    e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else None
-    r=rsi(cl)
+    rng = hi - lo
+    fib_r1 = pp + 0.382*rng
+    fib_r2 = pp + 0.618*rng
+    fib_r3 = pp + 1.000*rng
+    fib_s1 = pp - 0.382*rng
+    fib_s2 = pp - 0.618*rng
+    fib_s3 = pp - 1.000*rng
 
-    # === Detect regime ===
-    score=0
-    if adx>30 and pdi>mdi+5:   # Trend monte fò
-        regime="TRENDING_UP"; score=min(10, adx/5)
-    elif adx>30 and mdi>pdi+5: # Trend desann fò
-        regime="TRENDING_DN"; score=min(10, adx/5)
-    elif atr_pct>2.5:           # Volatilite ekstrèm
-        regime="VOLATILE"; score=3
-    else:                       # Mache kole
-        regime="RANGING"; score=2
+    return {
+        "pp":pp, "r1":r1, "r2":r2, "r3":r3,
+        "s1":s1, "s2":s2, "s3":s3,
+        "fib_r1":fib_r1, "fib_r2":fib_r2, "fib_r3":fib_r3,
+        "fib_s1":fib_s1, "fib_s2":fib_s2, "fib_s3":fib_s3,
+    }
 
-    # Bonus pou EMA alignment
-    if e50 and e200:
-        if cl[-1]>e50[-1]>e200[-1] and regime=="TRENDING_UP": score=min(10,score+2)
-        if cl[-1]<e50[-1]<e200[-1] and regime=="TRENDING_DN": score=min(10,score+2)
+def pivot_signal(candles, trend):
+    """
+    Verifye si pri prè yon nivo Pivot enpòtan.
+    Si TRENDING_UP → chèche rebond sou S1/S2/fib_s1/fib_s2 pou BUY
+    Si TRENDING_DN → chèche rejè sou R1/R2/fib_r1/fib_r2 pou SELL
+    Retounen (bool: nan_zòn_pivot, konfidans_bonus)
+    """
+    pv = calc_pivot_points(candles)
+    if not pv: return False, 0.0
 
-    return regime, round(score,1)
+    price = candles[-1]["close"]
+    tol   = 0.003  # 0.3% tolerans
+
+    if trend == "TRENDING_UP":
+        # Rebond sou nivo sipò → BUY
+        support_levels = [pv["s1"], pv["s2"], pv["fib_s1"], pv["fib_s2"], pv["pp"]]
+        for lvl in support_levels:
+            if abs(price - lvl) / max(lvl, 0.0001) < tol:
+                # Pi prè PP = plis konfidans
+                if lvl == pv["pp"]:  return True, 0.05
+                if lvl in (pv["s1"], pv["fib_s1"]): return True, 0.07
+                return True, 0.04
+        return False, 0.0
+
+    elif trend == "TRENDING_DN":
+        # Rejè sou nivo rezistans → SELL
+        resist_levels = [pv["r1"], pv["r2"], pv["fib_r1"], pv["fib_r2"], pv["pp"]]
+        for lvl in resist_levels:
+            if abs(price - lvl) / max(lvl, 0.0001) < tol:
+                if lvl == pv["pp"]:  return True, 0.05
+                if lvl in (pv["r1"], pv["fib_r1"]): return True, 0.07
+                return True, 0.04
+        return False, 0.0
+
+    return False, 0.0
 
 # ═══════════════════════════════════════════════════════════
-# STRATEGIES INDIVIDUÈL
+# ██  MARKET REGIME — Redui sèyil ADX pou plis siyal  ██
+# ADX > 18 ase pou detekte trend (pa 30 kòm anvan)
+# ═══════════════════════════════════════════════════════════
+def market_regime(candles):
+    """
+    Detèmine eta mache:
+    TRENDING_UP, TRENDING_DN, RANGING, VOLATILE
+    ADX sèyil redui a 18 pou jwenn plis siyal trend valid
+    """
+    if len(candles)<20: return "UNKNOWN", 0
+    cl  = [x["close"] for x in candles]
+    adx, pdi, mdi = calc_adx_full(candles, 14)
+    at  = atr(candles)
+    mid_val = sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
+    atr_pct = (at/mid_val*100) if mid_val>0 else 0
+
+    e20 = ema(cl, 20)
+    e50 = ema(cl, 50) if len(cl)>=50 else None
+
+    # ADX > 18 = ase pou trend (redui depi 30)
+    if adx > 18 and pdi > mdi + 2:
+        regime = "TRENDING_UP"; score = min(10, adx/3.5)
+    elif adx > 18 and mdi > pdi + 2:
+        regime = "TRENDING_DN"; score = min(10, adx/3.5)
+    elif atr_pct > 3.5:
+        regime = "VOLATILE";    score = 2
+    else:
+        regime = "RANGING";     score = 1
+
+    # Bonus EMA alignment
+    if e50:
+        if cl[-1] > e50[-1] and regime == "TRENDING_UP":  score = min(10, score+1.5)
+        if cl[-1] < e50[-1] and regime == "TRENDING_DN":  score = min(10, score+1.5)
+
+    return regime, round(score, 1)
+
+# ═══════════════════════════════════════════════════════════
+# STRATEGIES INDIVIDUÈL (pa chanje — menm kòm anvan)
 # ═══════════════════════════════════════════════════════════
 def strat_ema(c):
     cl=[x["close"] for x in c]
@@ -389,106 +463,83 @@ def strat_scalping(c):
     return "NONE",0
 
 # ═══════════════════════════════════════════════════════════
-# ██████  CONFLUENCE TITAN v3 — JANM 2 PÈT AFILE  ██████
-# Sistèm adaptif: apre 1 pèt, egzijans monte dramatikman
-# OBJEKTIF: Konfidans si wo ke 2 pèt afile = prèske enposib
+# ██████  CONFLUENCE SMART v5 — TREND-ONLY + PIVOT  ██████
+# GWO CHANJMAN:
+# 1. ADX sèyil redui: 18 (pa 25) → plis siyal
+# 2. Min strats redui: 4 (pa 7) → plis siyal
+# 3. Trend-only: SÈLMAN BUY si TRENDING_UP, SELL si TRENDING_DN
+# 4. Pivot Points: bonus konfidans si prè nivo enpòtan
+# 5. Ratio dominans redui: 1.2x (pa 1.4x) → plis siyal
 # ═══════════════════════════════════════════════════════════
-def strat_confluence(c, min_strats=7, min_per_conf=0.72):
+def strat_confluence(c, min_strats=4, min_per_conf=0.65):
     """
-    CONFLUENCE TITAN v3
-    ─────────────────────────────────────────────────────
-    NIVEAU DEBAZ (0 pèt):
-    • ADX > 25 — trend konfime
-    • 7+ strategies dakò (pa 4 kòm anvan)
-    • Chak strategy ≥72% konfidans
-    • Ratio dominans 1.40x minimum
-    • Mwayen konfidans ≥80%
-    • EMA50/200 alignment + trend regime
+    CONFLUENCE SMART v5 — Trend-Following + Pivot Points
+    ──────────────────────────────────────────────────────
+    NIVO DEBAZ (0 pèt):
+    • ADX > 18 — trend detekte (redui depi 25)
+    • 4+ strategies dakò (redui depi 7)
+    • Chak strategy ≥65% konfidans
+    • Ratio dominans 1.20x minimum
+    • Trend-ONLY: BUY si UP, SELL si DN
+    • Pivot bonus si prè nivo enpòtan
 
-    NIVEAU 1 (apre 1 pèt):
-    • ADX > 35 — trend SOLID egzije
-    • 9+ strategies dakò
-    • Chak strategy ≥78% konfidans
-    • Ratio dominans 1.60x minimum
-    • Mwayen konfidans ≥85%
-    • Regime mache: TRENDING sèlman
+    NIVO 1 (apre 1-2 pèt):
+    • ADX > 22 — trend pi solid
+    • 5+ strategies dakò
+    • Ratio 1.35x
 
-    NIVEAU 2+ (pou matingal nivo ≥2):
-    • ADX > 40 — trend EKSTRÈM
-    • 10+ strategies dakò
-    • Chak strategy ≥82% konfidans
-    • Ratio dominans 2.0x minimum
-    • Mwayen konfidans ≥88%
-    ─────────────────────────────────────────────────────
-    Rezilta: Prèske enposib pou pedi 2 nivo afile
+    NIVO 2+ (apre 3 pèt → Sispann + tann mache bon):
+    • Bot sispann otomatikman pou 3 pèt afile
+    • Reprann sèlman si ADX > 25 + Trending
+    ──────────────────────────────────────────────────────
     """
-    if len(c)<80: return "NONE",0
-    cl=[x["close"] for x in c]
-    at=atr(c)
-    if at==0: return "NONE",0
+    if len(c) < 30: return "NONE", 0
+    cl  = [x["close"] for x in c]
+    at  = atr(c)
+    if at == 0: return "NONE", 0
 
-    # ── FILTRE 1: Volatilite minimòm ──────────────────
-    mid_price=sum(cl[-20:])/20
-    atr_pct=(at/mid_price*100) if mid_price>0 else 0
-    if atr_pct < 0.04: return "NONE",0
+    # Filtre volatilite minimòm (trè ba — pèmèt plis siyal)
+    mid_price = sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
+    atr_pct   = (at/mid_price*100) if mid_price>0 else 0
+    if atr_pct < 0.01: return "NONE", 0  # Sèlman si mache twò mò anpil
 
-    # ── Kalkil ADX pou filtre regime ──────────────────
-    adx,pdi,mdi=calc_adx_full(c,14)
+    adx, pdi, mdi = calc_adx_full(c, 14)
 
-    # ── Sèyil adaptif selon min_strats transmèt ───────
-    # min_strats=7  → nivo 0 debaz
-    # min_strats=9  → nivo 1 (apre 1 pèt)
-    # min_strats=10 → nivo 2+ (apre 2+ pèt)
-    if min_strats<=7:
-        adx_req=25; dom_ratio=1.40; avg_conf_req=0.80; min_c=min_per_conf
-    elif min_strats<=9:
-        adx_req=35; dom_ratio=1.60; avg_conf_req=0.85; min_c=0.78
+    # Sèyil selon nivo pèt
+    if min_strats <= 4:
+        adx_req   = 18;   dom_ratio = 1.20; min_c = min_per_conf
+    elif min_strats <= 5:
+        adx_req   = 22;   dom_ratio = 1.35; min_c = 0.67
     else:
-        adx_req=40; dom_ratio=2.00; avg_conf_req=0.88; min_c=0.82
+        adx_req   = 25;   dom_ratio = 1.50; min_c = 0.70
 
-    if adx < adx_req: return "NONE",0
+    if adx < adx_req: return "NONE", 0
 
-    # ── FILTRE 2: EMA trend alignment ─────────────────
-    e21=ema(cl,21); e50=ema(cl,50) if len(cl)>=50 else None
-    e100=ema(cl,100) if len(cl)>=100 else None
-    e200=ema(cl,200) if len(cl)>=200 else None
+    # ── TREND DIRECTION — pi liberal (sèlman EMA20 + ADX) ──
+    e20  = ema(cl, 20)
+    e50  = ema(cl, 50) if len(cl)>=50 else None
+    e200 = ema(cl, 200) if len(cl)>=200 else None
 
-    main_trend="NONE"; trend_strength=0; trend_quality=0
+    main_trend = "NONE"
 
-    if e50 and e200:
-        # Alignment parfè — tout EMA nan lòd
-        if cl[-1]>e50[-1]>e200[-1] and pdi>mdi:
-            if e100 and e50[-1]>e100[-1]>e200[-1]:
-                main_trend="BUY"; trend_strength=3; trend_quality=2
-            else:
-                main_trend="BUY"; trend_strength=2; trend_quality=1
-        elif cl[-1]<e50[-1]<e200[-1] and mdi>pdi:
-            if e100 and e50[-1]<e100[-1]<e200[-1]:
-                main_trend="SELL"; trend_strength=3; trend_quality=2
-            else:
-                main_trend="SELL"; trend_strength=2; trend_quality=1
-    elif e50:
-        r_v=rsi(cl)
-        if cl[-1]>e50[-1] and pdi>mdi+10 and r_v<72:
-            main_trend="BUY"; trend_strength=1; trend_quality=0
-        elif cl[-1]<e50[-1] and mdi>pdi+10 and r_v>28:
-            main_trend="SELL"; trend_strength=1; trend_quality=0
+    # Kondisyon BUY (TRENDING_UP)
+    if pdi > mdi + 2:
+        if e20 and cl[-1] > e20[-1]:           # Pri anlè EMA20
+            main_trend = "BUY"
+        elif e50 and cl[-1] > e50[-1]:          # Oswa anlè EMA50
+            main_trend = "BUY"
 
-    # Pou nivo 1+ (apre pèt), bezwen trend_strength≥2
-    if min_strats>=9 and trend_strength<2: return "NONE",0
-    # Pou nivo 2+ (apre 2 pèt), bezwen trend_strength=3
-    if min_strats>=10 and trend_strength<3: return "NONE",0
+    # Kondisyon SELL (TRENDING_DN)
+    if mdi > pdi + 2:
+        if e20 and cl[-1] < e20[-1]:            # Pri anba EMA20
+            main_trend = "SELL"
+        elif e50 and cl[-1] < e50[-1]:           # Oswa anba EMA50
+            main_trend = "SELL"
 
-    if main_trend=="NONE": return "NONE",0
+    if main_trend == "NONE": return "NONE", 0
 
-    # ── FILTRE 3: Verifye konvèjans multi-periòd ──────
-    # Asire EMA pi kout aliye ak trend
-    if e21:
-        if main_trend=="BUY"  and e21[-1]<(e50[-1] if e50 else cl[-1])*0.997: return "NONE",0
-        if main_trend=="SELL" and e21[-1]>(e50[-1] if e50 else cl[-1])*1.003: return "NONE",0
-
-    # ── FILTRE 4: Kouri tout 11 strategies ────────────
-    fns=[
+    # ── Kouri 11 strategies ──────────────────────────────
+    fns = [
         (strat_ema,       1.5),
         (strat_fibonacci, 1.6),
         (strat_fvg,       1.4),
@@ -498,7 +549,7 @@ def strat_confluence(c, min_strats=7, min_per_conf=0.72):
         (strat_smc,       1.8),
         (strat_ob,        1.7),
         (strat_stoch,     1.5),
-        (strat_ai,        2.0),   # Pwa pi wo — plis fibilite
+        (strat_ai,        2.0),
         (strat_scalping,  1.3),
     ]
 
@@ -506,321 +557,209 @@ def strat_confluence(c, min_strats=7, min_per_conf=0.72):
     buy_cnt=sell_cnt=0
     buy_confs=[]; sell_confs=[]
 
-    for fn,w in fns:
+    for fn, w in fns:
         try:
-            s,conf=fn(c)
+            s, conf = fn(c)
             if s=="BUY" and conf>=min_c:
                 buy_score+=conf*w; buy_cnt+=1; buy_confs.append(conf)
             elif s=="SELL" and conf>=min_c:
                 sell_score+=conf*w; sell_cnt+=1; sell_confs.append(conf)
         except: pass
 
-    # ── FILTRE 5: Sèyil adaptif strategies ────────────
-    if buy_cnt>=min_strats and main_trend=="BUY":
-        if buy_score > sell_score*dom_ratio:
-            avg_c=sum(buy_confs)/len(buy_confs)
-            min_c_actual=min(buy_confs)
-            if avg_c>=avg_conf_req and min_c_actual>=min_c:
-                # ── Score final ak bonus kimilatif ────
-                bonus=0.0
-                bonus+=0.015*trend_strength          # +1.5% pati nivo trend
-                bonus+=0.010*trend_quality           # +1.0% kalite trend
-                bonus+=0.005 if adx>45 else 0.0
-                bonus+=0.005 if adx>55 else 0.0
-                bonus+=0.005 if adx>65 else 0.0
-                bonus+=0.003 if buy_cnt>=10 else 0.0  # Bonus si 10+ strategies
-                bonus+=0.003 if buy_cnt>=11 else 0.0  # Bonus si 11/11
-                # Konfidans debaz selon nivo
-                base_conf = 0.84 if min_strats<=7 else (0.88 if min_strats<=9 else 0.91)
-                final=min(0.97, base_conf + (buy_score/(buy_cnt*1.5))*0.10 + bonus)
-                return "BUY", round(max(base_conf, final), 3)
+    # ── TREND-ONLY: Sèlman pran direksyon trend la ────────
+    # Si mache monte → BUY sèlman; si desann → SELL sèlman
+    if main_trend == "BUY" and buy_cnt >= min_strats:
+        if buy_score > sell_score * dom_ratio:
+            avg_c = sum(buy_confs)/len(buy_confs) if buy_confs else 0
 
-    if sell_cnt>=min_strats and main_trend=="SELL":
-        if sell_score > buy_score*dom_ratio:
-            avg_c=sum(sell_confs)/len(sell_confs)
-            min_c_actual=min(sell_confs)
-            if avg_c>=avg_conf_req and min_c_actual>=min_c:
-                bonus=0.0
-                bonus+=0.015*trend_strength
-                bonus+=0.010*trend_quality
-                bonus+=0.005 if adx>45 else 0.0
-                bonus+=0.005 if adx>55 else 0.0
-                bonus+=0.005 if adx>65 else 0.0
-                bonus+=0.003 if sell_cnt>=10 else 0.0
-                bonus+=0.003 if sell_cnt>=11 else 0.0
-                base_conf = 0.84 if min_strats<=7 else (0.88 if min_strats<=9 else 0.91)
-                final=min(0.97, base_conf + (sell_score/(sell_cnt*1.5))*0.10 + bonus)
-                return "SELL", round(max(base_conf, final), 3)
+            # Pivot Points bonus
+            in_pivot, piv_bonus = pivot_signal(c, "TRENDING_UP")
 
-    return "NONE",0
+            # Konfidans final
+            base = 0.72
+            final = min(0.95, base + (buy_score/(max(buy_cnt,1)*1.5))*0.15 + piv_bonus)
+            pivot_txt = " +PIVOT" if in_pivot else ""
+            return "BUY", round(final, 3)
+
+    if main_trend == "SELL" and sell_cnt >= min_strats:
+        if sell_score > buy_score * dom_ratio:
+            avg_c = sum(sell_confs)/len(sell_confs) if sell_confs else 0
+
+            in_pivot, piv_bonus = pivot_signal(c, "TRENDING_DN")
+
+            base = 0.72
+            final = min(0.95, base + (sell_score/(max(sell_cnt,1)*1.5))*0.15 + piv_bonus)
+            return "SELL", round(final, 3)
+
+    return "NONE", 0
 
 # ═══════════════════════════════════════════════════════════
-# ██████  DERIV PRO DIAMANT v3 — OBJEKTIF 92%+ WIN  ██████
-# 10 faktè obligatwa + score 9.0/10 minimum
-# ADX>35 + EMA 4nivo + konfirmasyon multi-periòd
+# DERIV PRO — Redui sèyil pou plis siyal
 # ═══════════════════════════════════════════════════════════
 def strat_deriv_pro(c):
     """
-    DERIV PRO DIAMANT v3 — 92%+ Win Rate
-    ─────────────────────────────────────────────────────
-    EGZIJANS EKSTRÈM (trade ra, men prèske toujou genyen):
-    • EMA 9/21/50/200 TOUT aliye + separasyon minimòm
-    • ADX > 35 — SÈLMAN trend fò, pa mache mwayen
-    • EMA 9 ak 21 Monte/Desann 3 bouji konsekitif
-    • RSI SÈLMAN nan zòn ideyèl (pa tro cho, pa tro fwa)
-    • MACD histogramm ap monte/desann 2 bouji afile
-    • Stochastic nan zòn parfè + kap tounen
-    • Bollinger — pri EKZAKTEMAN sou zòn rebond
-    • Breakout 20+10 periòd konfime ANSANM
-    • Rate of change pozitif 3 peryòd diferan
-    • Corps bouji ≥70% — bouji konviksyon
-    • Score kimilatif ≥ 9.0 sou 15.0
-    ─────────────────────────────────────────────────────
-    Rezilta: Raman trade, men ≥92% nan tout trade yo
+    DERIV PRO v5 — Redui sèyil pou jwenn plis siyal
+    Score 6.0/15 (pa 9.0) + ADX>20 (pa 35) + Trend-Only
     """
-    if len(c)<250: return "NONE",0
+    if len(c)<100: return "NONE",0
     cl=[x["close"] for x in c]
     hi=[x["high"] for x in c]
     lo_=[x["low"] for x in c]
 
-    # ── Calcul tout indikatè ───────────────────────────
     e9=ema(cl,9); e21=ema(cl,21)
-    e50=ema(cl,50); e200=ema(cl,200)
-    if not e9 or not e21 or not e50 or not e200: return "NONE",0
-    if len(e9)<5 or len(e21)<5: return "NONE",0
+    e50=ema(cl,50) if len(cl)>=50 else None
+    e200=ema(cl,200) if len(cl)>=200 else e50
+    if not e9 or not e21: return "NONE",0
+    if len(e9)<3 or len(e21)<3: return "NONE",0
 
-    r=rsi(cl,14); r5=rsi(cl[-20:],5) if len(cl)>=20 else r
-    at=atr(c); at_slow=atr(c[:-5]) if len(c)>5 else at
-    m,sig_=macd(cl); macd_hist=m-sig_
-    # Histogramm anvan pou tès momentum
-    m_prev,sig_prev=macd(cl[:-1]); macd_hist_prev=m_prev-sig_prev
-    m_prev2,sig_prev2=macd(cl[:-2]); macd_hist_prev2=m_prev2-sig_prev2
+    r=rsi(cl,14)
+    at=atr(c)
+    m,sig_=macd(cl)
+    macd_hist=m-sig_
+    if len(cl)>=2:
+        m_prev,sig_prev=macd(cl[:-1])
+        macd_hist_prev=m_prev-sig_prev
+    else:
+        macd_hist_prev=0
     up_bb,mid_bb,lo_bb=bb(cl,20,2.0)
-    up_bb2,mid_bb2,lo_bb2=bb(cl,20,2.5)  # BB élarji pou filtre ekstrèm
     k=stoch_k(c,14)
     kp=stoch_k(c[:-2]) if len(c)>2 else k
-    kp2=stoch_k(c[:-4]) if len(c)>4 else kp
 
     if at==0 or not mid_bb: return "NONE",0
 
-    # ── FILTRE 1: ATR zòn OPTIMAL EKSTRÈM ────────────
+    # ATR filtre — redui (0.02 pa 0.05)
     atr_pct=at/mid_bb*100
-    if atr_pct < 0.05: return "NONE",0   # Mache twò mò (pa gen mouv)
-    if atr_pct > 3.0:  return "NONE",0   # Mache twò chwit (news, ekstrèm)
-    # ATR dwe estab (pa exploze)
-    if at_slow>0 and at/at_slow>2.5: return "NONE",0   # Volatilite eksplose
+    if atr_pct < 0.02: return "NONE",0
+    if atr_pct > 4.0:  return "NONE",0
 
-    # ── FILTRE 2: ADX ≥ 35 — TREND FÒ SÈLMAN ────────
+    # ADX sèyil redui a 20 (pa 35)
     adx,pdi,mdi=calc_adx_full(c,14)
-    if adx < 35: return "NONE",0   # Sèyil elve — 92% rate egzije trend solid
+    if adx < 20: return "NONE",0
 
-    # ── FILTRE 3: EMA alignment PARFÈ + SEPARASYON ───
-    trend_up   = (e9[-1]>e21[-1]  and e21[-1]>e50[-1]  and e50[-1]>e200[-1])
-    trend_down = (e9[-1]<e21[-1]  and e21[-1]<e50[-1]  and e50[-1]<e200[-1])
+    # EMA trend (plis liberal — sèlman e9>e21 ase)
+    trend_up   = (e9[-1]>e21[-1])
+    trend_down = (e9[-1]<e21[-1])
+    if e50:
+        trend_up   = trend_up   and cl[-1]>e50[-1]
+        trend_down = trend_down and cl[-1]<e50[-1]
     if not trend_up and not trend_down: return "NONE",0
 
-    # EMA separasyon minimòm (trend pa twò kole)
+    # EMA monte/desann (sèlman 2 bouji, pa 3)
     if trend_up:
-        sep_9_21  = (e9[-1]-e21[-1]) /max(e21[-1],0.001)*100
-        sep_21_50 = (e21[-1]-e50[-1])/max(e50[-1],0.001)*100
-        sep_50_200= (e50[-1]-e200[-1])/max(e200[-1],0.001)*100
-        if sep_9_21<0.015 or sep_21_50<0.01 or sep_50_200<0.005: return "NONE",0
+        if not (e9[-1]>e9[-2] and e21[-1]>e21[-2]): return "NONE",0
     if trend_down:
-        sep_9_21  = (e21[-1]-e9[-1]) /max(e21[-1],0.001)*100
-        sep_21_50 = (e50[-1]-e21[-1])/max(e50[-1],0.001)*100
-        sep_50_200= (e200[-1]-e50[-1])/max(e200[-1],0.001)*100
-        if sep_9_21<0.015 or sep_21_50<0.01 or sep_50_200<0.005: return "NONE",0
+        if not (e9[-1]<e9[-2] and e21[-1]<e21[-2]): return "NONE",0
 
-    # ── FILTRE 4: EMA 9 ak 21 kap monte/desann afile ─
-    if trend_up:
-        ema9_rising  = e9[-1]>e9[-2]>e9[-3]     # EMA9 monte 3 bouji
-        ema21_rising = e21[-1]>e21[-2]>e21[-3]  # EMA21 monte 3 bouji
-        if not ema9_rising or not ema21_rising: return "NONE",0
-    if trend_down:
-        ema9_falling  = e9[-1]<e9[-2]<e9[-3]
-        ema21_falling = e21[-1]<e21[-2]<e21[-3]
-        if not ema9_falling or not ema21_falling: return "NONE",0
-
-    # ── FILTRE 5: Mouvman mwayen solide ──────────────
-    avg_move=sum(abs(cl[-i]-cl[-i-1]) for i in range(1,10))/9
-    if at < avg_move*0.7: return "NONE",0
-
-    # ── Breakout zones ────────────────────────────────
     hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
     hi10=max(hi[-11:-1]); lo10=min(lo_[-11:-1])
-    hi5 =max(hi[-6:-1]);  lo5 =min(lo_[-6:-1])
 
-    # ── Rate of change multi-periòd ───────────────────
-    roc3 =(cl[-1]-cl[-4]) /max(abs(cl[-4]) ,0.001)*100 if len(cl)>=4  else 0
-    roc5v=(cl[-1]-cl[-6]) /max(abs(cl[-6]) ,0.001)*100 if len(cl)>=6  else 0
-    roc10=(cl[-1]-cl[-11])/max(abs(cl[-11]),0.001)*100 if len(cl)>=11 else 0
+    roc3=(cl[-1]-cl[-4])/max(abs(cl[-4]),0.001)*100 if len(cl)>=4 else 0
+    roc5v=(cl[-1]-cl[-6])/max(abs(cl[-6]),0.001)*100 if len(cl)>=6 else 0
 
-    # ── Corps bouji kalkil ────────────────────────────
-    last_body =abs(cl[-1]-c[-1]["open"])
+    last_body=abs(cl[-1]-c[-1]["open"])
     last_range=max(c[-1]["high"]-c[-1]["low"],0.00001)
     body_ratio=last_body/last_range
 
-    prev_body =abs(cl[-2]-c[-2]["open"])
-    prev_range=max(c[-2]["high"]-c[-2]["low"],0.00001)
-    prev_body_ratio=prev_body/prev_range
-
-    # ═══════════════════════════════════════════════════
-    # ▲ BUY SCORING — MAX 15.0 pts, bezwen ≥9.0
-    # ═══════════════════════════════════════════════════
+    # BUY SCORING — bezwen 6.0/15 (pa 9.0)
     if trend_up:
-        score=0.0; max_score=15.0
+        score=0.0
 
-        # 1. Breakout konfirmasyon triple (+0→3.5)
         bo_score=0.0
-        if cl[-1]>hi20 and cl[-2]<=hi20:  bo_score+=2.0   # Breakout 20-per FRE
-        elif cl[-1]>hi20*0.997:            bo_score+=0.5
-        if cl[-1]>hi10 and cl[-2]<=hi10:  bo_score+=1.0   # Breakout 10-per
-        elif cl[-1]>hi10*0.998:            bo_score+=0.3
-        if cl[-1]>hi5 and cl[-2]<=hi5:    bo_score+=0.5   # Breakout 5-per
+        if cl[-1]>hi20 and cl[-2]<=hi20:  bo_score+=2.0
+        elif cl[-1]>hi20*0.997:            bo_score+=0.8
+        if cl[-1]>hi10 and cl[-2]<=hi10:  bo_score+=1.0
+        elif cl[-1]>hi10*0.998:            bo_score+=0.4
         score+=min(3.5, bo_score)
 
-        # 2. RSI EKZAKTEMAN nan zòn optimal (+0→3.0)
-        # Pou BUY: RSI dwe fèb-mwayen (momentum ap bati)
-        if 25<=r<=38:     score+=3.0   # Zòn OR — oversold ki ap tounen
-        elif 38<r<=50:    score+=2.2   # Rebond mwayen
-        elif 50<r<=62:    score+=1.4   # Trend mitan — ok si ADX>45
-        elif r<25:        score+=2.0   # Trop OS — bon men risk revèsman
-        # RSI>62 = 0 pts nan scoring (trend cho = risk)
+        if 25<=r<=45:       score+=3.0
+        elif 45<r<=55:      score+=2.0
+        elif 55<r<=65:      score+=1.2
+        elif r<25:          score+=2.5
 
-        # 3. MACD — histogramm monte 2 bouji afile (+0→2.5)
-        macd_ok = (m>sig_ and macd_hist>macd_hist_prev>0)
-        macd_ok2= (m>sig_ and macd_hist>0 and macd_hist>macd_hist_prev)
-        if macd_ok and m>0:      score+=2.5   # MACD parfè — tout kondisyon
-        elif macd_ok:            score+=2.0   # Histogramm monte 2x
-        elif macd_ok2:           score+=1.3   # Kwa + monte yon fwa
-        elif m>sig_:             score+=0.7   # Sèlman kwa
+        macd_ok=(m>sig_ and macd_hist>macd_hist_prev)
+        if macd_ok and m>0: score+=2.5
+        elif macd_ok:       score+=1.8
+        elif m>sig_:        score+=1.0
 
-        # 4. Stochastic — zòn parfè + tounen (+0→2.5)
-        if k<20 and k>kp and kp<kp2:  score+=2.5  # OS + ap monte 2 bouji
-        elif k<25 and k>kp:            score+=2.0  # OS + tounen
-        elif k<35 and k>kp:            score+=1.3  # Fèb + tounen
-        elif k>kp:                     score+=0.6  # Ap monte sèlman
+        if k<25 and k>kp:   score+=2.5
+        elif k<35 and k>kp: score+=1.5
+        elif k>kp:          score+=0.8
 
-        # 5. Bollinger EKZAKTEMAN sou bando (+0→2.5)
-        if lo_bb2 and cl[-1]<=lo_bb2*1.001:  score+=2.5  # Sou BB 2.5σ — très rare
-        elif lo_bb and cl[-1]<=lo_bb*1.001:  score+=2.0  # Sou BB 2.0σ
-        elif lo_bb and cl[-1]<=lo_bb*1.008:  score+=1.3  # Prè BB ba
-        elif mid_bb and cl[-1]<mid_bb*0.998: score+=0.7  # Anba mwayèn
+        if lo_bb and cl[-1]<=lo_bb*1.005:  score+=2.0
+        elif mid_bb and cl[-1]<mid_bb:     score+=0.8
 
-        # 6. Rate of change 3 peryòd (+0→1.5)
-        if roc3>0 and roc5v>0 and roc10>0: score+=1.5   # Momentum 3 échèl
-        elif roc3>0 and roc5v>0:            score+=1.0
-        elif roc3>0:                        score+=0.5
+        if roc3>0 and roc5v>0: score+=1.5
+        elif roc3>0:           score+=0.7
 
-        # 7. Corps bouji fò (+0→1.5)
-        if body_ratio>=0.70 and cl[-1]>c[-1]["open"]:
-            score+=1.5   # Bouji ble fò
-            if prev_body_ratio>=0.60 and cl[-2]>c[-2]["open"]:
-                score+=0.3  # Bonus: 2 bouji ble afile
-        elif body_ratio>=0.50 and cl[-1]>c[-1]["open"]: score+=0.8
+        if body_ratio>=0.60 and cl[-1]>c[-1]["open"]: score+=1.5
+        elif body_ratio>=0.40 and cl[-1]>c[-1]["open"]: score+=0.8
 
-        # 8. ADX bonus fort (+0→2.0)
-        if adx>=60:   score+=2.0   # Trend ekstrèmman pwisan
-        elif adx>=50: score+=1.5
-        elif adx>=45: score+=1.0
-        elif adx>=40: score+=0.6
+        if adx>=45:   score+=2.0
+        elif adx>=35: score+=1.5
+        elif adx>=25: score+=0.8
 
-        # 9. EMA separasyon bonus (+0→1.0)
-        if trend_up and sep_9_21>0.08 and sep_21_50>0.05: score+=1.0
-        elif trend_up and sep_9_21>0.04:                   score+=0.5
+        # Pivot bonus
+        in_piv, piv_b = pivot_signal(c, "TRENDING_UP")
+        if in_piv: score += 1.5
 
-        # 10. Kontwòl RSI rapid (r5) pou timing (+0→0.5)
-        if r5<40: score+=0.5   # RSI kout-tèm fèb = bon entry
+        # SÈYIL REDUI: 6.0 (pa 9.0)
+        if score >= 6.0:
+            pct = score/15.0
+            conf = min(0.95, 0.76 + pct*0.25)
+            if adx>=50: conf=min(0.95,conf+0.02)
+            return "BUY", round(conf, 3)
 
-        # ─────────────────────────────────────────────
-        # SÈYIL: bezwen ≥9.0 sou 15.0 pou aksepte trade
-        # (Prèske 60% max score — sèyil ekstrèmman wo)
-        # ─────────────────────────────────────────────
-        if score>=9.0:
-            pct=score/max_score
-            conf=min(0.97, 0.88+(pct-0.60)*0.225)
-            # Bonus ADX ekstrèm
-            if adx>=55: conf=min(0.97,conf+0.01)
-            if adx>=65: conf=min(0.97,conf+0.01)
-            return "BUY", round(conf,3)
-
-    # ═══════════════════════════════════════════════════
-    # ▼ SELL SCORING — MAX 15.0 pts, bezwen ≥9.0
-    # ═══════════════════════════════════════════════════
+    # SELL SCORING — bezwen 6.0/15
     if trend_down:
-        score=0.0; max_score=15.0
+        score=0.0
 
-        # 1. Breakdown konfirmasyon triple
         bo_score=0.0
         if cl[-1]<lo20 and cl[-2]>=lo20:  bo_score+=2.0
-        elif cl[-1]<lo20*1.003:            bo_score+=0.5
+        elif cl[-1]<lo20*1.003:            bo_score+=0.8
         if cl[-1]<lo10 and cl[-2]>=lo10:  bo_score+=1.0
-        elif cl[-1]<lo10*1.002:            bo_score+=0.3
-        if cl[-1]<lo5 and cl[-2]>=lo5:    bo_score+=0.5
+        elif cl[-1]<lo10*1.002:            bo_score+=0.4
         score+=min(3.5, bo_score)
 
-        # 2. RSI EKZAKTEMAN nan zòn optimal
-        if 62<=r<=75:     score+=3.0
-        elif 50<=r<62:    score+=2.2
-        elif 38<=r<50:    score+=1.4
-        elif r>75:        score+=2.0
+        if 55<=r<=75:       score+=3.0
+        elif 45<=r<55:      score+=2.0
+        elif 35<=r<45:      score+=1.2
+        elif r>75:          score+=2.5
 
-        # 3. MACD histogramm desann 2 bouji afile
-        macd_ok = (m<sig_ and macd_hist<macd_hist_prev<0)
-        macd_ok2= (m<sig_ and macd_hist<0 and macd_hist<macd_hist_prev)
-        if macd_ok and m<0:      score+=2.5
-        elif macd_ok:            score+=2.0
-        elif macd_ok2:           score+=1.3
-        elif m<sig_:             score+=0.7
+        macd_ok=(m<sig_ and macd_hist<macd_hist_prev)
+        if macd_ok and m<0: score+=2.5
+        elif macd_ok:       score+=1.8
+        elif m<sig_:        score+=1.0
 
-        # 4. Stochastic
-        if k>80 and k<kp and kp>kp2:  score+=2.5
-        elif k>75 and k<kp:            score+=2.0
-        elif k>65 and k<kp:            score+=1.3
-        elif k<kp:                     score+=0.6
+        if k>75 and k<kp:   score+=2.5
+        elif k>65 and k<kp: score+=1.5
+        elif k<kp:          score+=0.8
 
-        # 5. Bollinger
-        if up_bb2 and cl[-1]>=up_bb2*0.999:  score+=2.5
-        elif up_bb and cl[-1]>=up_bb*0.999:  score+=2.0
-        elif up_bb and cl[-1]>=up_bb*0.992:  score+=1.3
-        elif mid_bb and cl[-1]>mid_bb*1.002: score+=0.7
+        if up_bb and cl[-1]>=up_bb*0.995:  score+=2.0
+        elif mid_bb and cl[-1]>mid_bb:     score+=0.8
 
-        # 6. Rate of change
-        if roc3<0 and roc5v<0 and roc10<0: score+=1.5
-        elif roc3<0 and roc5v<0:            score+=1.0
-        elif roc3<0:                        score+=0.5
+        if roc3<0 and roc5v<0: score+=1.5
+        elif roc3<0:           score+=0.7
 
-        # 7. Corps bouji fò
-        if body_ratio>=0.70 and cl[-1]<c[-1]["open"]:
-            score+=1.5
-            if prev_body_ratio>=0.60 and cl[-2]<c[-2]["open"]:
-                score+=0.3
-        elif body_ratio>=0.50 and cl[-1]<c[-1]["open"]: score+=0.8
+        if body_ratio>=0.60 and cl[-1]<c[-1]["open"]: score+=1.5
+        elif body_ratio>=0.40 and cl[-1]<c[-1]["open"]: score+=0.8
 
-        # 8. ADX bonus
-        if adx>=60:   score+=2.0
-        elif adx>=50: score+=1.5
-        elif adx>=45: score+=1.0
-        elif adx>=40: score+=0.6
+        if adx>=45:   score+=2.0
+        elif adx>=35: score+=1.5
+        elif adx>=25: score+=0.8
 
-        # 9. EMA separasyon bonus
-        if trend_down and sep_9_21>0.08 and sep_21_50>0.05: score+=1.0
-        elif trend_down and sep_9_21>0.04:                   score+=0.5
+        in_piv, piv_b = pivot_signal(c, "TRENDING_DN")
+        if in_piv: score += 1.5
 
-        # 10. RSI rapid timing
-        if r5>60: score+=0.5
+        if score >= 6.0:
+            pct = score/15.0
+            conf = min(0.95, 0.76 + pct*0.25)
+            if adx>=50: conf=min(0.95,conf+0.02)
+            return "SELL", round(conf, 3)
 
-        if score>=9.0:
-            pct=score/max_score
-            conf=min(0.97, 0.88+(pct-0.60)*0.225)
-            if adx>=55: conf=min(0.97,conf+0.01)
-            if adx>=65: conf=min(0.97,conf+0.01)
-            return "SELL", round(conf,3)
-
-    return "NONE",0
+    return "NONE", 0
 
 # ═══════════════════════════════════════════════════════════
-# STRATEGY ESPESYAL BINANCE — XAU/USD, BTC, ETH etc.
+# STRATEGY ESPESYAL BINANCE (pa chanje)
 # ═══════════════════════════════════════════════════════════
 def strat_binance_gold(c):
     if len(c)<60: return "NONE",0
@@ -964,6 +903,9 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
         "equity":equity[-50:],
     }
 
+# ═══════════════════════════════════════════════════════════
+# CLIENTS BROKER (pa chanje)
+# ═══════════════════════════════════════════════════════════
 class DerivClient:
     def __init__(self, token, app_id="1089"):
         self.token=token; self.app_id=app_id; self._bal=0.0
@@ -1274,7 +1216,7 @@ class BinanceClient:
             logger.error(f"Profit transfer: {e}"); return None
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS — Analiz Ticks reyèl
+# DIGITS — Analiz Ticks reyèl (pa chanje)
 # ═══════════════════════════════════════════════════════════
 def get_last_digit(price):
     s=f"{price:.5f}".replace('.','')
@@ -1322,7 +1264,7 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS TRADING LOOP
+# DIGITS TRADING LOOP (pa chanje)
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1475,7 +1417,7 @@ def digits_trading_loop(st, bot_id=None):
     add_log(st,"⏹ Digits Bot arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# BINANCE TRADING LOOP
+# BINANCE TRADING LOOP (pa chanje)
 # ═══════════════════════════════════════════════════════════
 def binance_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1605,232 +1547,273 @@ def binance_trading_loop(st, bot_id=None):
     add_log(st,"⏹ Binance Bot arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# ██████  DERIV TRADING LOOP — MACHIN MANAJ ULTRA  ██████
-# Matingal Entèlijan: Apre chak pèt, konfidans monte
-# OBJEKTIF: Pa janm pedi 2 nivo matingal afile
+# ██████  DERIV TRADING LOOP v5 — SMART 3-LOSS PAUSE  ██████
+#
+# NOUVO LOJIK:
+# • Apre 3 pèt afile → PAUSE + tann mache bon (TRENDING)
+# • Pandan poz: Kontinye verifye mache chak TF
+# • Si mache tounen TRENDING + ADX>20 → Reprann avèk menm
+#   matingal (pa reset mise) pou rekipere pèt yo
+# • Trend-Only: BUY si UP, SELL si DN — janm kontrèt
+# • Pivot Points: antre prè nivo sipò/rezistans
 # ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
-    cfg=st["config"]
-    broker=cfg.get("broker","deriv")
-    symbol=cfg.get("symbol","R_100")
-    strategy=cfg.get("strategy","confluence")
-    lot=float(cfg.get("lot",0.5))
-    tf=int(cfg.get("tf_secs",60))
-    min_conf=float(cfg.get("min_conf",0.75))
+    cfg    = st["config"]
+    symbol   = cfg.get("symbol","R_100")
+    strategy = cfg.get("strategy","confluence")
+    lot      = float(cfg.get("lot",0.5))
+    tf       = int(cfg.get("tf_secs",60))
+    min_conf = float(cfg.get("min_conf",0.65))
 
-    # ── Chwazi fonksyon estrateji ──────────────────────
-    fn=STRATEGIES.get(strategy,strat_confluence)
+    fn = STRATEGIES.get(strategy, strat_confluence)
 
-    wait_after=tf+45
-    base_lot=round(max(0.5,lot),2); current_lot=base_lot
-    consec_losses=0; total_lost=0.0
+    wait_after  = tf + 45
+    base_lot    = round(max(0.5, lot), 2)
+    current_lot = base_lot
+    consec_losses = 0
+    total_lost    = 0.0
 
-    # ── Machin Manaj: Paramèt adaptif TITAN ──────────
-    # Sistèm ENTÈLIJAN: konfidans + strategies monte apre chak pèt
-    # Rezulta: Prèske enposib pou pedi 2 nivo afile
-    BASE_MIN_CONF       = min_conf      # Konfidans debaz
-    EXTRA_CONF_LOSS1    = 0.05          # +5% apre 1yè pèt
-    EXTRA_CONF_LOSS2P   = 0.08          # +8% apre 2yèm pèt+
-    EXTRA_WAIT_LOSS1    = 60            # +60sek apre 1yè pèt
-    EXTRA_WAIT_LOSS2P   = 120           # +2min apre 2yèm pèt+
+    # ── SMART 3-LOSS PAUSE PARAMS ──────────────────────
+    MAX_LOSSES_BEFORE_PAUSE = 3   # Sispann apre 3 pèt
+    PAUSE_WAIT_SECS         = 60  # Tann 60sek ant chak verifye pandan poz
 
-    # Sèyil strategies pou Confluence selon nivo pèt
-    # Nivo 0 → 7 strat, nivo 1 → 9 strat, nivo 2+ → 10 strat
-    CONF_STRATS_LEVELS = {0:7, 1:9, 2:10, 3:10, 4:10, 5:10, 6:10}
-
-    add_log(st,f"🚀 BonheurBot TITAN | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st,f"🛡 TITAN: Apre 1pèt→+5%conf+9strat | Apre 2pèt→+8%conf+10strat")
+    add_log(st, f"🚀 BonheurBot SMART v5 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
+    add_log(st, f"📌 TREND-ONLY | Pivot Points | Pause apre 3 pèt afile")
 
     while st["running"]:
-        if bot_id and st.get("bot_id")!=bot_id:
-            add_log(st,"⏹ Bot anile","WARN"); return
+        if bot_id and st.get("bot_id") != bot_id:
+            add_log(st, "⏹ Bot anile","WARN"); return
 
         # ── Limit profit/loss ──────────────────────────
-        _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
+        _target = float(cfg.get("profit_target",0))
+        _loss   = float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
-            add_log(st,f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!","SUCCESS")
+            add_log(st, f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!","SUCCESS")
             st["running"]=False; break
         if _loss>0 and st["total_pnl"]<=-abs(_loss):
-            add_log(st,f"🛑 LIMIT PÈT ${_loss:.2f} RIVE! Bot kanpe!","ERROR")
+            add_log(st, f"🛑 LIMIT PÈT ${_loss:.2f} RIVE! Bot kanpe!","ERROR")
             st["running"]=False; break
 
         try:
-            api=st.get("deriv_api")
+            api = st.get("deriv_api")
             if not api:
-                add_log(st,"Broker pa konekte — STOP","ERROR")
+                add_log(st, "Broker pa konekte — STOP","ERROR")
                 st["running"]=False; break
 
+            # Refresh balans
             try:
-                b=api.get_balance_sync()
+                b = api.get_balance_sync()
                 if b and b>0: st["balance"]=b
             except:
-                add_log(st,"⚠ Koneksyon pèdi — tann...","WARN")
+                add_log(st, "⚠ Koneksyon pèdi — tann...","WARN")
                 time.sleep(15); continue
 
-            # ── Kalil konfidans adaptif TITAN ─────────
-            if consec_losses==0:
-                adaptive_conf = BASE_MIN_CONF
-                wait_extra    = 0
-            elif consec_losses==1:
-                adaptive_conf = min(0.96, BASE_MIN_CONF + EXTRA_CONF_LOSS1)
-                wait_extra    = EXTRA_WAIT_LOSS1
-            else:
-                adaptive_conf = min(0.97, BASE_MIN_CONF + EXTRA_CONF_LOSS2P)
-                wait_extra    = EXTRA_WAIT_LOSS2P
-
-            # ── Detèmine nivo strategies pou Confluence ─
-            required_strats = CONF_STRATS_LEVELS.get(consec_losses, 10)
-
-            # Apre pèt: tann ekstra + poz pou mache chanje
-            if consec_losses > 0:
-                add_log(st,
-                    f"🔍 NIVO {consec_losses} | "
-                    f"Conf:{adaptive_conf:.0%} | "
-                    f"Strat:{required_strats} req | "
-                    f"Tann {wait_extra}sek...",
-                    "WARN")
-                time.sleep(wait_extra)
-
             # ── Pran bouji ────────────────────────────
-            candles=api.get_candles(symbol,200,tf)
-            if len(candles)<10:
-                add_log(st,"Pa ase done — tann...","WARN")
+            candles = api.get_candles(symbol, 200, tf)
+            if len(candles) < 15:
+                add_log(st, "Pa ase done — tann...","WARN")
                 time.sleep(30); continue
 
-            # ── Verifye regime mache TITAN ────────────
-            regime,regime_score=market_regime(candles)
-            add_log(st,f"📡 {len(candles)} bouji | {symbol} | Mache:{regime}(ADX:{calc_adx_full(candles,14)[0]:.0f})")
+            # ── Detèmine regime mache ─────────────────
+            regime, regime_score = market_regime(candles)
+            adx_val, pdi_val, mdi_val = calc_adx_full(candles, 14)
+            add_log(st, f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | PDI:{pdi_val:.0f}/MDI:{mdi_val:.0f}")
 
-            # Apre pèt, rejte mache ki pa bon
-            if consec_losses>=1 and regime in ("RANGING","VOLATILE","UNKNOWN"):
-                add_log(st,f"⏸ Mache {regime} — Reject apre pèt #{consec_losses}. Tann {tf*2}s...","WARN")
-                time.sleep(tf*2); continue
+            # ══════════════════════════════════════════
+            # ██  SMART 3-LOSS PAUSE LOJIK  ██
+            # Apre 3 pèt: TANN jiskaske mache bon
+            # Reprann avèk menm mise (pa reset) pou rekipere
+            # ══════════════════════════════════════════
+            if consec_losses >= MAX_LOSSES_BEFORE_PAUSE:
+                # Verifye si mache bon ankò
+                mache_bon = regime in ("TRENDING_UP","TRENDING_DN") and adx_val >= 20
 
-            # Apre 2 pèt, sèlman TRENDING_UP/DN aksepte
-            if consec_losses>=2 and regime not in ("TRENDING_UP","TRENDING_DN"):
-                add_log(st,f"⏸ Nivo 2 — Bezwen TRENDING. Mache:{regime}. Tann {tf}s...","WARN")
+                if not mache_bon:
+                    add_log(st,
+                        f"⏸ PÒZ APRE {consec_losses} PÈT | "
+                        f"Mache:{regime}(ADX:{adx_val:.0f}) — "
+                        f"Ap tann trend solid... ({PAUSE_WAIT_SECS}sek)",
+                        "WARN")
+                    time.sleep(PAUSE_WAIT_SECS)
+                    continue
+                else:
+                    add_log(st,
+                        f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | "
+                        f"Reprann avèk ${current_lot:.2f} (matingal kontinye)",
+                        "SUCCESS")
+                    # Pa reset consec_losses — kontinye matingal pou rekipere
+
+            # ══════════════════════════════════════════
+            # ██  FILTRE TREND-ONLY  ██
+            # Debaz: Pa trade si mache pa trending
+            # Pa strict — ADX>18 ase
+            # ══════════════════════════════════════════
+            if regime == "VOLATILE":
+                add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {tf}sek...","WARN")
                 time.sleep(tf); continue
 
-            # ── Kouri estrateji avèk paramèt TITAN ───
+            # Si 0-2 pèt: trading nòmal (menm si RANGING)
+            # Si 3+ pèt: sèlman TRENDING (déjà gerè anwo)
+            if consec_losses == 0 and regime == "RANGING":
+                # Pandan mache nòmal, kite pase RANGING si konfidans wo
+                pass  # Lese strategy deside
+
+            # ── Kouri estrateji ────────────────────────
             if strategy == "confluence":
-                sig,conf = strat_confluence(
-                    candles,
-                    min_strats=required_strats,
-                    min_per_conf=0.72 if consec_losses==0 else (0.78 if consec_losses==1 else 0.82)
-                )
-                add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Confluence({required_strats}strat req)")
+                # Niveau selon pèt: 0→4strat, 1-2→5strat, 3+→6strat
+                req_strats = 4 if consec_losses==0 else (5 if consec_losses<=2 else 6)
+                sig, conf = strat_confluence(candles, min_strats=req_strats, min_per_conf=0.65)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Confluence({req_strats}strat)")
             else:
-                sig,conf = fn(candles)
-                add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
+                sig, conf = fn(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
 
-            # ── Filtre konfidans adaptif ───────────────
-            if sig=="NONE" or conf<adaptive_conf:
-                reason=""
-                if sig=="NONE": reason="Pa gen siyal"
-                else: reason=f"Conf {conf:.0%} < {adaptive_conf:.0%} requis"
-                add_log(st,f"⏭ {reason} — tann pwochen bouji...")
+            # ══════════════════════════════════════════
+            # ██  TREND-ONLY CHECK  ██
+            # BUY sèlman si TRENDING_UP
+            # SELL sèlman si TRENDING_DN
+            # Si siyal kontrèt trend → rejte
+            # ══════════════════════════════════════════
+            if sig == "BUY" and regime == "TRENDING_DN":
+                add_log(st, f"⛔ REJTE BUY — Mache ap DESANN (TRENDING_DN). Pa kontrèt trend!","WARN")
                 time.sleep(tf); continue
 
-            # ── Verifye balans ─────────────────────────
-            if st["balance"]<current_lot:
-                add_log(st,f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
+            if sig == "SELL" and regime == "TRENDING_UP":
+                add_log(st, f"⛔ REJTE SELL — Mache ap MONTE (TRENDING_UP). Pa kontrèt trend!","WARN")
+                time.sleep(tf); continue
+
+            # Filtre konfidans
+            adaptive_conf = min_conf + (0.03 if consec_losses==1 else (0.05 if consec_losses>=2 else 0))
+            if sig == "NONE" or conf < adaptive_conf:
+                reason = "Pa gen siyal" if sig=="NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
+                add_log(st, f"⏭ {reason} — tann pwochen bouji...")
+                time.sleep(tf); continue
+
+            # ── Pivot Points info ─────────────────────
+            pv_sig_dir = "TRENDING_UP" if sig=="BUY" else "TRENDING_DN"
+            in_pivot, piv_bonus = pivot_signal(candles, pv_sig_dir)
+            pivot_info = " 🎯+PIVOT" if in_pivot else ""
+
+            # Verifye balans
+            if st["balance"] < current_lot:
+                add_log(st, f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
                 current_lot=base_lot; consec_losses=0; total_lost=0.0
 
-            entry=candles[-1]["close"]
-            adx_val,_,_=calc_adx_full(candles,14)
-            add_log(st,f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | Mise:${current_lot:.2f} | {tf//60}min")
+            entry = candles[-1]["close"]
+            add_log(st,
+                f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | "
+                f"Mise:${current_lot:.2f} | {tf//60}min{pivot_info}")
 
-            bal_before=st["balance"]; pnl=0.0; ok=False
+            bal_before = st["balance"]
+            pnl=0.0; ok=False
 
             try:
-                r=api.place_trade(symbol,sig,max(0.5,current_lot),duration_secs=tf)
+                r = api.place_trade(symbol, sig, max(0.5,current_lot), duration_secs=tf)
                 if r.get("contract_id"):
-                    cid=r["contract_id"]
-                    bal_open=float(r.get("balance_after",bal_before-current_lot))
-                    st["balance"]=bal_open; ok=True
-                    add_log(st,f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
+                    cid = r["contract_id"]
+                    bal_open = float(r.get("balance_after", bal_before-current_lot))
+                    st["balance"] = bal_open; ok=True
+                    add_log(st, f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
                     time.sleep(wait_after)
 
-                    bal_close=None
+                    bal_close = None
                     for attempt in range(3):
                         try:
-                            nb=api.get_balance_sync()
+                            nb = api.get_balance_sync()
                             if nb and nb>0 and abs(nb-bal_open)>0.01:
                                 bal_close=nb; break
-                            time.sleep(max(20,tf//4))
+                            time.sleep(max(20, tf//4))
                         except: time.sleep(15)
 
                     if bal_close:
-                        st["balance"]=bal_close
-                        pnl=bal_close-bal_before
-                        if pnl>0: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
-                        else: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
+                        st["balance"] = bal_close
+                        pnl = bal_close - bal_before
+                        if pnl>0: add_log(st, f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
+                        else: add_log(st, f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
                     else:
-                        pnl=-(bal_before-bal_open)
-                        add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
+                        pnl = -(bal_before - bal_open)
+                        add_log(st, f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
             except Exception as e:
-                add_log(st,f"Trade echwe: {e}","ERROR")
+                add_log(st, f"Trade echwe: {e}","ERROR")
 
-            # ── MACHIN MANAJ: Update apre trade ───────
+            # ══════════════════════════════════════════
+            # ██  MACHIN MANAJ — MATINGAL SMART  ██
+            # Apre chak pèt: Monte mise pou rekipere
+            # Apre 3 pèt: PÒZE (gerè anwo ak regime check)
+            # Reprann avèk menm mise — pa reset
+            # ══════════════════════════════════════════
             if ok:
-                if pnl>0:
-                    # ✅ GENYEN — Reset tout ak mesaj detaye
-                    prev_losses=consec_losses
-                    current_lot=base_lot; consec_losses=0; total_lost=0.0
-                    if prev_losses>0:
-                        add_log(st,f"🏆 REKIPERE nivo {prev_losses} avèk siyal TITAN! ← ${base_lot:.2f}","SUCCESS")
+                if pnl > 0:
+                    prev_losses = consec_losses
+                    current_lot = base_lot  # Reset mise apre genyen
+                    consec_losses = 0; total_lost = 0.0
+                    if prev_losses > 0:
+                        add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}","SUCCESS")
                     else:
-                        add_log(st,f"✅ Genyen nivo debaz +${pnl:.2f}","SUCCESS")
+                        add_log(st, f"✅ Genyen +${pnl:.2f}","SUCCESS")
                 else:
-                    # ❌ PÈDI — Matingal TITAN entèlijan
-                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot
-                    total_lost+=loss; consec_losses+=1
+                    loss = abs(pnl) if abs(pnl)>0.01 else current_lot
+                    total_lost += loss
+                    consec_losses += 1
 
-                    if consec_losses<=6:
-                        next_lot=round((total_lost+base_lot)/0.95,2)
-                        current_lot=max(0.5,next_lot)
-                        nxt_conf=min(0.97,BASE_MIN_CONF+(EXTRA_CONF_LOSS1 if consec_losses==1 else EXTRA_CONF_LOSS2P))
-                        nxt_strat=CONF_STRATS_LEVELS.get(consec_losses,10)
+                    if consec_losses < MAX_LOSSES_BEFORE_PAUSE:
+                        # Matingal nòmal — monte mise
+                        next_lot = round((total_lost + base_lot) / 0.95, 2)
+                        current_lot = max(0.5, min(next_lot, 100.0))
                         add_log(st,
-                            f"⚠ MATINGAL Nivo {consec_losses}/6 | "
-                            f"Total pèdi:${total_lost:.2f} | "
+                            f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
+                            f"Total:${total_lost:.2f} | "
                             f"Prochèn:${current_lot:.2f} | "
-                            f"Conf req:{nxt_conf:.0%} | "
-                            f"Strat req:{nxt_strat}",
+                            f"Conf req:{adaptive_conf+0.03:.0%}",
                             "WARN")
                     else:
+                        # 3yèm pèt → PÒZE (handled anwo nan boucle)
+                        next_lot = round((total_lost + base_lot) / 0.95, 2)
+                        current_lot = max(0.5, min(next_lot, 100.0))
                         add_log(st,
-                            f"🔄 RESET TITAN apre 6 pèt | "
-                            f"Total pèdi:${total_lost:.2f} | "
-                            f"Tann 5 min...",
+                            f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | "
+                            f"Total:${total_lost:.2f} | "
+                            f"Mise rekipere prèt:${current_lot:.2f} | "
+                            f"Ap tann trend solid...",
                             "WARN")
-                        current_lot=base_lot; consec_losses=0; total_lost=0.0
-                        time.sleep(300)
 
-                trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                    "symbol":symbol,"side":sig,"entry":round(entry,5),"conf":f"{conf:.0%}",
-                    "strategy":strategy,"tf":f"{tf//60}min","stake":round(current_lot,2),
-                    "pnl":round(pnl,2),"status":"won" if pnl>0 else "lost"}
-                st["trades"].insert(0,trade); st["total_pnl"]+=pnl
+                # Anrejistre trade
+                trade = {
+                    "id": len(st["trades"])+1,
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "symbol": symbol, "side": sig,
+                    "entry": round(entry, 5),
+                    "conf": f"{conf:.0%}",
+                    "strategy": strategy,
+                    "tf": f"{tf//60}min",
+                    "stake": round(current_lot, 2),
+                    "pnl": round(pnl, 2),
+                    "status": "won" if pnl>0 else "lost",
+                    "regime": regime,
+                }
+                st["trades"].insert(0, trade)
+                st["total_pnl"] += pnl
 
-                if pnl>0:
-                    ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
-                    if ps>=0.5:
+                # Voye 1% profit
+                if pnl > 0:
+                    ps = round(pnl * PROFIT_PCT, 2)
+                    st["profit_sent"] += ps
+                    if ps >= 0.5:
                         try:
-                            api.transfer_to_account("CR9560099",ps)
-                            add_log(st,f"💸 1%:${ps} → CR9560099","PROFIT")
+                            api.transfer_to_account("CR9560099", ps)
+                            add_log(st, f"💸 1%:${ps} → CR9560099","PROFIT")
                         except Exception as e:
-                            add_log(st,f"Transfer echwe: {e}","ERROR")
+                            add_log(st, f"Transfer echwe: {e}","ERROR")
 
         except Exception as e:
-            add_log(st,f"Erè: {e}","ERROR")
+            add_log(st, f"Erè: {e}","ERROR")
         time.sleep(tf)
 
-    add_log(st,"⏹ BonheurBot TITAN arrêté")
+    add_log(st, "⏹ BonheurBot SMART v5 arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# API ROUTES
+# API ROUTES (pa chanje)
 # ═══════════════════════════════════════════════════════════
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
@@ -1870,7 +1853,7 @@ def api_start():
         "strategy":d.get("strategy","confluence"),
         "lot":d.get("lot",0.5),
         "tf_secs":tf_map.get(d.get("tf","15m"),900),
-        "min_conf":d.get("min_conf",0.75),
+        "min_conf":d.get("min_conf",0.65),
         "profit_target":float(d.get("profit_target",0)),
         "loss_limit":float(d.get("loss_limit",0)),
         "mode":d.get("mode","forex"),
@@ -2070,7 +2053,7 @@ HTML=r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>💰 BonheurBot Pro v4 TITAN</title>
+<title>💰 BonheurBot v5 SMART</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;900&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2128,7 +2111,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl v4 TITAN</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl v5 SMART</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
       <input id="login-code" type="text" placeholder="BB-XXXX-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
@@ -2143,8 +2126,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <span style="color:#FFD600;font-size:9px">⚠ Rezo: BEP20 (BSC) sèlman</span><br><br>
         2. Voye prèv peman sou WhatsApp:<br>
         <a href="https://wa.me/50942867885" target="_blank" style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;background:#25D36618;border:1px solid #25D36644;color:#25D366;border-radius:6px;padding:6px 12px;text-decoration:none;font-size:11px;font-weight:700">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="#25D366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
-          WhatsApp: +509 4286-7885
+          📱 WhatsApp: +509 4286-7885
         </a>
       </div>
     </div>
@@ -2154,7 +2136,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
-    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">TITAN</span></div>
+    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">SMART v5</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
   </div>
@@ -2191,8 +2173,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div class="bt">KONEKSYON BROKER</div>
       <div class="iw"><div class="il">BROKER</div>
         <select id="d-br" onchange="tog()">
-          <option value="deriv">🟢 Deriv (Synthetic/Digits)</option>
-          <option value="binance">🟡 Binance (Crypto/Gold)</option>
+          <option value="deriv">Deriv (Synthetic/Digits)</option>
+          <option value="binance"> Binance (Crypto/Gold)</option>
         </select>
       </div>
       <div id="fd">
@@ -2222,34 +2204,39 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
     </div>
   </div>
-  <!-- TITAN Info Panel -->
   <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-    <div class="bt" style="color:#00FF88">🛡 SISTÈM TITAN — FONKSYONMAN KONPLÈ</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.8">
+    <div class="bt" style="color:#00FF88">🧠 SISTÈM SMART v5 — KI NOUVO</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
       <div>
-        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">Confluence TITAN v3</div>
-        Nivo 0: 7+ strat, ADX&gt;25, conf≥72%<br>
-        Nivo 1: 9+ strat, ADX&gt;35, conf≥78%<br>
-        Nivo 2+: 10+ strat, ADX&gt;40, conf≥82%<br>
-        Ratio dominans: 1.4x→1.6x→2.0x<br>
-        <span style="color:#00FF88">→ Prèske enposib 2 pèt afile</span>
+        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 Plis Siyal (Filtre Redui)</div>
+        ADX sèyil: <span style="color:#00FF88">18</span> (pa 25/35)<br>
+        Min strategies: <span style="color:#00FF88">4</span> (pa 7/9)<br>
+        Konfidans min: <span style="color:#00FF88">65%</span> (pa 75%)<br>
+        Ratio dominans: <span style="color:#00FF88">1.2x</span> (pa 1.4x)<br>
+        <span style="color:#00FF88">→ Plis trade, plis profit</span>
       </div>
       <div>
-        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">Deriv Pro DIAMANT v3</div>
-        EMA 9/21/50/200 — separation req<br>
-        ADX &gt; 35 obligatwa (pa 25)<br>
-        EMA monte/desann 3 bouji afile<br>
-        Score 9.0/15 minimum (60%)<br>
-        <span style="color:#FFD600">→ Vize ≥92% win rate</span>
+        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">🎯 Pivot Points</div>
+        Kalkil PP, R1/R2/R3, S1/S2/S3<br>
+        Fibonacci: 38.2%, 61.8%, 100%<br>
+        BUY prè S1/S2 (sipò) ← Bon<br>
+        SELL prè R1/R2 (rezistans) ← Bon<br>
+        <span style="color:#FFD600">→ Antre pi presiz</span>
       </div>
       <div>
-        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">Matingal TITAN</div>
-        Apre 1 pèt: +5% conf / +2strat<br>
-        Apre 2 pèt: +8% conf / +3strat<br>
-        Reject mache ranging apre pèt<br>
-        TRENDING sèlman apre 2 pèt<br>
-        <span style="color:#00D4FF">→ 6 nivo matingal proteje</span>
+        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🛡 3-Pèt Smart Pause</div>
+        Apre <span style="color:#FF3B6B">3 pèt afile</span>: PÒZE otomatik<br>
+        Verifye mache chak 60sek<br>
+        Reprann si ADX>20 + Trending<br>
+        Mise garde: pa reset (rekipere)<br>
+        <span style="color:#00D4FF">→ Pwoteksyon entèlijan</span>
       </div>
+    </div>
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid #00FF8820;font-size:11px;color:#4A7080;line-height:1.8">
+      <span style="color:#FF3B6B;font-weight:700">⛔ TREND-ONLY:</span>
+      BUY <span style="color:#00FF88">SÈLMAN si mache ap MONTE</span> (TRENDING_UP) |
+      SELL <span style="color:#FF3B6B">SÈLMAN si mache ap DESANN</span> (TRENDING_DN) |
+      <span style="color:#FFD600">Pa janm trade kontrèt trend la — sa pwoteje kont ou</span>
     </div>
   </div>
 </div>
@@ -2257,7 +2244,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
-      <div class="bt">PARAMÈT BOT</div>
+      <div class="bt">PARAMÈT BOT SMART v5</div>
       <div class="iw"><div class="il">MOD TRADING</div>
         <select id="c-mode" onchange="toggleMode()">
           <option value="forex">📈 Rise/Fall — Deriv Synthetic</option>
@@ -2280,9 +2267,9 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="iw"><div class="il">TIMEFRAME</div>
             <select id="c-tf">
               <option value="1m">1 minit</option>
-              <option value="5m">5 minit</option>
-              <option value="15m" selected>15 minit ★</option>
-              <option value="1h">1 è ★★</option>
+              <option value="5m">5 minit ★</option>
+              <option value="15m" selected>15 minit ★★</option>
+              <option value="1h">1 è ★★★</option>
               <option value="4h">4 è</option>
             </select>
           </div>
@@ -2291,8 +2278,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="iw"><div class="il">MISE ($) — Min $0.50</div><input id="c-lot-forex" type="number" value="0.50" step="0.50" min="0.50"></div>
           <div class="iw"><div class="il">STRATEGY</div>
             <select id="c-st-forex">
-              <option value="confluence">🔥 Confluence ULTRA (6 konfirm)</option>
-              <option value="deriv_pro">🚀 Deriv Pro ULTRA (85%+)</option>
+              <option value="confluence">🔥 Confluence SMART (4+ strat)</option>
+              <option value="deriv_pro">🚀 Deriv Pro SMART (6/15 score)</option>
               <option value="ai">🤖 AI Score</option>
               <option value="smc">🏛 Smart Money</option>
               <option value="scalping_pro">⚡ Scalping Pro</option>
@@ -2304,8 +2291,9 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </div>
         </div>
         <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:10px;font-size:10px;color:#4A7080;line-height:1.8">
-          ★ Pi bon TF: <span style="color:#00FF88">15min</span> oswa <span style="color:#00FF88">1h</span> pou Confluence/Deriv Pro<br>
-          💡 Deriv Pro bezwen 200+ bouji — rekòmande 1h timeframe
+          ★★★ Pi bon: <span style="color:#00FF88">1h timeframe</span> + <span style="color:#00FF88">Confluence SMART</span><br>
+          ★★ Bon: <span style="color:#FFD600">15min</span> + <span style="color:#FFD600">Deriv Pro SMART</span><br>
+          💡 Confluence: ADX&gt;18 + 4 strat → siyal souvan + plis lajan
         </div>
       </div>
       <div id="opts-digits" style="display:none">
@@ -2347,7 +2335,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               </select>
             </div>
           </div>
-          <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-gold" type="number" value="11" step="1" min="11"></div>
+          <div class="iw"><div class="il">MISE USDT — Min $1</div><input id="c-lot-gold" type="number" value="11" step="1" min="11"></div>
         </div>
       </div>
       <div id="opts-crypto" style="display:none">
@@ -2356,36 +2344,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="g2">
             <div class="iw"><div class="il">SENBOL KRIPTO</div>
               <select id="c-sy-crypto">
-                <optgroup label="🔥 Popilè">
-                  <option value="BTCUSDT" selected>BTCUSDT — Bitcoin</option>
-                  <option value="ETHUSDT">ETHUSDT — Ethereum</option>
-                  <option value="BNBUSDT">BNBUSDT — BNB</option>
-                  <option value="SOLUSDT">SOLUSDT — Solana</option>
-                  <option value="XRPUSDT">XRPUSDT — XRP</option>
-                </optgroup>
-                <optgroup label="🌟 Layer 1">
-                  <option value="ADAUSDT">ADAUSDT — Cardano</option>
-                  <option value="AVAXUSDT">AVAXUSDT — Avalanche</option>
-                  <option value="DOTUSDT">DOTUSDT — Polkadot</option>
-                  <option value="NEARUSDT">NEARUSDT — NEAR</option>
-                  <option value="APTUSDT">APTUSDT — Aptos</option>
-                </optgroup>
-                <optgroup label="⚡ Layer 2">
-                  <option value="MATICUSDT">MATICUSDT — Polygon</option>
-                  <option value="ARBUSDT">ARBUSDT — Arbitrum</option>
-                  <option value="OPUSDT">OPUSDT — Optimism</option>
-                </optgroup>
-                <optgroup label="🤖 AI/DeFi">
-                  <option value="FETUSDT">FETUSDT — Fetch.ai</option>
-                  <option value="INJUSDT">INJUSDT — Injective</option>
-                  <option value="UNIUSDT">UNIUSDT — Uniswap</option>
-                  <option value="LINKUSDT">LINKUSDT — Chainlink</option>
-                </optgroup>
-                <optgroup label="🐶 Autres">
-                  <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
-                  <option value="LTCUSDT">LTCUSDT — Litecoin</option>
-                  <option value="ATOMUSDT">ATOMUSDT — Cosmos</option>
-                </optgroup>
+                <option value="BTCUSDT" selected>BTCUSDT — Bitcoin</option>
+                <option value="ETHUSDT">ETHUSDT — Ethereum</option>
+                <option value="BNBUSDT">BNBUSDT — BNB</option>
+                <option value="SOLUSDT">SOLUSDT — Solana</option>
+                <option value="XRPUSDT">XRPUSDT — XRP</option>
+                <option value="ADAUSDT">ADAUSDT — Cardano</option>
+                <option value="AVAXUSDT">AVAXUSDT — Avalanche</option>
+                <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
+                <option value="MATICUSDT">MATICUSDT — Polygon</option>
+                <option value="LINKUSDT">LINKUSDT — Chainlink</option>
               </select>
             </div>
             <div class="iw"><div class="il">TIMEFRAME</div>
@@ -2397,16 +2365,18 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               </select>
             </div>
           </div>
-          <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-crypto" type="number" value="11" step="1" min="11"></div>
+          <div class="iw"><div class="il">MISE USDT — Min $1</div><input id="c-lot-crypto" type="number" value="11" step="1" min="11"></div>
         </div>
       </div>
       <div class="g2">
-        <div class="iw"><div class="il">KONFIDANS DEBAZ MIN</div>
+        <div class="iw"><div class="il">KONFIDANS MIN (REDUI = PLIS SIYAL)</div>
           <select id="c-conf">
-            <option value="0.70">70% (modere)</option>
-            <option value="0.75" selected>75% (bon ★)</option>
-            <option value="0.80">80% (presiz ★★)</option>
-            <option value="0.85">85% (ekstrèm)</option>
+            <option value="0.60">60% (maksimòm siyal)</option>
+            <option value="0.65" selected>65% (rekòmande ★)</option>
+            <option value="0.70">70% (balans)</option>
+            <option value="0.75">75% (konsèvatif)</option>
+             <option value="0.80">80% (konsèvatif)</option>
+              <option value="0.90">92% (presiz)</option>
           </select>
         </div>
         <div class="iw"><div class="il">🎯 OBJEKTIF PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"><div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div></div>
@@ -2427,24 +2397,25 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
         <div class="stats">
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
-          <div class="stat"><div class="sl">PROFIT VOYE</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
+          <div class="stat"><div class="sl">PROFIT </div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
         </div>
       </div>
       <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">🛡 TITAN AKTIF — NIVO ADAPTIF</div>
-        <div style="color:#4A7080;font-size:10px;line-height:2.0">
-          Nivo 0 (debaz): Conf <span style="color:#00FF88">≥75%</span>, 7 strat, ADX>25<br>
-          Nivo 1 (1 pèt): Conf <span style="color:#FFD600">≥80%</span>, 9 strat, ADX>35, +60sek<br>
-          Nivo 2 (2 pèt): Conf <span style="color:#FF3B6B">≥83%</span>, 10 strat, ADX>40, +120sek<br>
-          Nivo 3-6: Conf <span style="color:#FF3B6B">≥83%</span>, 10 strat, Trending sèlman<br>
-          <span style="color:#00FF88">✓ 2 pèt afile = prèske enposib!</span>
+        <div class="bt" style="color:#00FF88">🧠 SMART v5 — LOJIK</div>
+        <div style="color:#4A7080;font-size:10px;line-height:2.1">
+          <span style="color:#00FF88">✓ Siyal:</span> ADX>18, 4+strat, conf≥65%<br>
+          <span style="color:#00FF88">✓ Trend:</span> BUY=UP sèlman, SELL=DN sèlman<br>
+          <span style="color:#00FF88">✓ Pivot:</span> Antre prè S1/S2 pou BUY, R1/R2 pou SELL<br>
+          <span style="color:#FFD600">⚠ 1 pèt:</span> Conf+3%, mise monte (matingal)<br>
+          <span style="color:#FFD600">⚠ 2 pèt:</span> Conf+5%, mise monte (matingal)<br>
+          <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann mache trending<br>
+          <span style="color:#00FF88">▶ Reprann:</span> Mise garde pou rekipere
         </div>
       </div>
       <div class="box">
-        <div class="bt">💰 PROFIT </div>
+        <div class="bt">💰 PROFIT 1%</div>
         <div style="color:#4A7080;font-size:11px;line-height:1.9">
-           → <span style="color:#FFD600">1%</span> otomatik sou:<br>
-          <span style="color:#FFD600;font-size:10px">CR9560099 (Deriv)</span>
+          1% otomatik → <span style="color:#FFD600">CR9560099 (Deriv)</span>
         </div>
       </div>
     </div>
@@ -2468,8 +2439,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div class="iw"><div class="il">STRATEGY</div>
       <select id="bt-st">
-        <option value="confluence">🔥 Confluence ULTRA (6 konfirm)</option>
-        <option value="deriv_pro">🚀 Deriv Pro ULTRA (85%+)</option>
+        <option value="confluence">🔥 Confluence SMART</option>
+        <option value="deriv_pro">🚀 Deriv Pro SMART</option>
         <option value="ai">🤖 AI Score</option>
         <option value="binance_gold">🥇 Gold Strategy</option>
         <option value="binance_crypto">🪙 Crypto Strategy</option>
@@ -2565,11 +2536,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div>
 
 <script>
-const SESSION_KEY="bb_session_v3";
+const SESSION_KEY="bb_session_v5";
 function saveToken(t){try{localStorage.setItem(SESSION_KEY,t);}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t);}catch(e){}try{const exp=new Date();exp.setDate(exp.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${exp.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
 function clearToken(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}try{sessionStorage.removeItem(SESSION_KEY);}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;}catch(e){}}
-
 function updateAdminTab(isAdmin){const tab=document.getElementById("tab-admin");if(tab)tab.style.display=isAdmin?"block":"none";}
 
 async function checkLogin(){
@@ -2589,7 +2559,6 @@ function showLogin(err=""){
   if(err&&err!=="Pa gen sesyon"&&err!=="Mete kòd aksè ou a")
     document.getElementById("login-err").innerHTML=`<div class="al er">⚠ ${err}</div>`;
 }
-
 function showApp(msg){
   document.getElementById("login-page").style.display="none";
   document.getElementById("app-page").style.display="block";
@@ -2608,7 +2577,6 @@ async function doLogin(){
   }catch(e){document.getElementById("login-err").innerHTML=`<div class="al er">✗ Erè: ${e.message}</div>`;}
   btn.textContent="⚡ ANTRE";btn.disabled=false;
 }
-
 function doLogout(){clearToken();showLogin("Ou dekonekte.");}
 
 function toggleMode(){
@@ -2646,10 +2614,10 @@ function getStartParams(){
 }
 
 const SI={
-  confluence:{l:"🔥 Confluence TITAN",d:"Sistèm adaptif 3 nivo. Nivo 0: 7+strat ADX>25. Nivo 1(apre 1pèt): 9+strat ADX>35 conf≥78%. Nivo 2+(apre 2pèt): 10+strat ADX>40 conf≥82% ratio 2.0x. Prèske enposib pou pedi 2 nivo afile.",tags:["7→9→10 strat","ADX 25→35→40","conf 72→78→82%","ratio 1.4→2.0x","TITAN"]},
-  deriv_pro:{l:"🚀 Deriv Pro DIAMANT",d:"EMA 9/21/50/200 TOUT aliye + separasyon req. ADX>35. EMA monte 3 bouji afile. Score 9.0/15 (60%). 10 faktè. MACD histogramm monte 2x. Stoch+BB+RoC triple. Vize ≥92% win rate.",tags:["EMA 4nivo+sep","ADX>35","score 9/15","10 faktè","≥92% win"]},
-  ai:{l:"🤖 AI Score",d:"Rezo Newonal 8 karakteristik ak pwa. EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["EMA pwa 2.8","RSI 2.2","MACD 1.8","8 faktè","score norm"]},
-  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: Trend EMA+RSI+MACD+BB+Stoch. 6+ pts konfirmasyon requis.",tags:["EMA 20/50/200","RSI+Stoch","BB extrem","S/R 20-per"]},
+  confluence:{l:"🔥 Confluence SMART",d:"NOUVO v5: ADX>18 (pa 25), 4+strat (pa 7), conf≥65% (pa 72%), ratio 1.2x. Trend-Only: BUY si UP, SELL si DN. Pivot Points bonus. Plis siyal, plis profit.",tags:["ADX>18","4+ strat","conf 65%","Trend-Only","Pivot Points"]},
+  deriv_pro:{l:"🚀 Deriv Pro SMART",d:"NOUVO v5: Score 6/15 (pa 9/15), ADX>20 (pa 35), EMA monte 2 bouji (pa 3). Beaucoup plis siyal, toujou entèlijan.",tags:["score 6/15","ADX>20","EMA 2 bouji","Trend-Only","Pivot bonus"]},
+  ai:{l:"🤖 AI Score",d:"Rezo Newonal 8 karakteristik ak pwa. EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["8 faktè","pwa lajman","score nòmalize","Trend-Only"]},
+  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA+RSI+MACD+BB+Stoch. 6+ pts konfirmasyon.",tags:["EMA 20/50/200","RSI+Stoch","BB extrem","6+ pts"]},
   binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: Trend+Volume+RSI+MACD+Breakout. Volume surge bonus. 7+ pts.",tags:["EMA 9/21/50","Volume x1.5","MACD+BB","Breakout"]},
   smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre.",tags:["BOS","swing","EMA50","conf 84%"]},
   scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
@@ -2678,14 +2646,12 @@ function tog(){
   document.getElementById("fd").style.display=v=="deriv"?"block":"none";
   document.getElementById("fb").style.display=v=="binance"?"block":"none";
 }
-
 function sw(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
   document.getElementById("pg-"+id).classList.add("on");
   el.classList.add("on");
 }
-
 function msg(id,txt,ok){document.getElementById(id).innerHTML=`<div class="al ${ok?"ok":"er"}">${txt}</div>`;}
 
 async function doConn(){
@@ -2708,10 +2674,9 @@ async function doStart(){
   const body=getStartParams();
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
-  if(d.ok){msg("ctm","✓ BonheurBot ULTRA démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
+  if(d.ok){msg("ctm","✓ BonheurBot SMART v5 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else msg("ctm","✗ "+d.error,false);
 }
-
 async function doStop(){
   await fetch("/api/stop",{method:"POST"});
   msg("ctm","✓ Bot arrêté","ok");
@@ -2791,7 +2756,7 @@ function upd(d){
   }
   if(d.trades.length){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
-    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>TF</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side=="BUY"||t.side.includes("OVER")||t.side=="EVEN"?"tb":"ts"}">${t.side}</span></td><td>${t.entry}</td><td style="color:#4A7080">${t.tf||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
+    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side=="BUY"||t.side.includes("OVER")||t.side=="EVEN"?"tb":"ts"}">${t.side}</span></td><td>${t.entry}</td><td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
   }
   if(d.log.length){document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("");}
 }
@@ -2836,12 +2801,10 @@ async function admAddCode(){
   document.getElementById("add-code-msg").innerHTML=`<div class="al ${d.ok?"ok":"er"}">${d.ok?d.msg:d.error}</div>`;
   if(d.ok){document.getElementById("new-code").value="";admRefresh();}
 }
-
 async function admRevoke(code){if(!confirm(`Revoke ${code}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/revoke_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admReset(code){const token=getStoredToken();const r=await fetch("/api/admin/reset_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
 function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}
 
@@ -2852,5 +2815,5 @@ checkLogin();
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))
-    logger.info(f"BonheurBot Pro v4 TITAN starting on port {port}")
+    logger.info(f"BonheurBot Pro v5 SMART starting on port {port}")
     app.run(host="0.0.0.0",port=port,debug=False,threaded=True)

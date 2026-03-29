@@ -1,8 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║                  BONHEURBOT PRO v5 SMART                     ║
+║                  BONHEURBOT PRO v6 ELITE                     ║
 ║         Multi-User Trading Bot — Deriv + Binance            ║
-║   Trend-Only | Pivot Points | Smart 3-Loss Pause            ║
+║   Trend + Ranging | Smart Entry | 3-Loss Pause              ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -123,7 +123,7 @@ def get_state():
     return _user_states[uid]
 
 # ═══════════════════════════════════════════════════════════
-# INDIKATÈ TEKNIK
+# INDIKATÈ TEKNIK — Oryajinal + amelyore
 # ═══════════════════════════════════════════════════════════
 def ema(prices, p):
     if len(prices) < p: return []
@@ -162,9 +162,6 @@ def stoch_k(candles, p=14):
     hi=max(x["high"] for x in candles[-p:]); lo=min(x["low"] for x in candles[-p:])
     return ((candles[-1]["close"]-lo)/(hi-lo)*100) if hi!=lo else 50
 
-# ═══════════════════════════════════════════════════════════
-# ADX KALKIL
-# ═══════════════════════════════════════════════════════════
 def calc_adx_full(candles, p=14):
     if len(candles)<p+2: return 0, 0, 0
     trs=[]; pdms=[]; mdms=[]
@@ -183,120 +180,219 @@ def calc_adx_full(candles, p=14):
     return round(adx_val,2), round(pdi,2), round(mdi,2)
 
 # ═══════════════════════════════════════════════════════════
-# ██  PIVOT POINTS — Standard + Fibonacci  ██
-# Nivo sipò/rezistans pou antre entèlijan
+# ██  NOUVO: SUPERTREND INDIKATÈ  ██
+# Plis reliable pou Deriv synthetic — siyal klè
 # ═══════════════════════════════════════════════════════════
-def calc_pivot_points(candles):
+def supertrend(candles, p=10, mult=3.0):
     """
-    Kalkil Pivot Points klasik + Fibonacci.
-    Retounen dict: pp, r1, r2, r3, s1, s2, s3 + fib levels
-    Itilize dènye 20 bouji pou kalkil HIGH, LOW, CLOSE
+    SuperTrend — indikatè ki ba siyal klè UP/DN
+    Trè bon pou Deriv Synthetic (R_10, R_25, R_50, R_100)
+    Retounen: ("BUY", "SELL", oswa "NONE"), konfidans
     """
-    if len(candles) < 20:
-        return None
-    recent = candles[-20:]
-    hi  = max(x["high"]  for x in recent)
-    lo  = min(x["low"]   for x in recent)
-    cl  = candles[-1]["close"]
+    if len(candles) < p+5:
+        return "NONE", 0.0
 
-    pp  = (hi + lo + cl) / 3
-    r1  = 2*pp - lo
-    r2  = pp + (hi - lo)
-    r3  = hi + 2*(pp - lo)
-    s1  = 2*pp - hi
-    s2  = pp - (hi - lo)
-    s3  = lo - 2*(hi - pp)
+    highs  = [c["high"]  for c in candles]
+    lows   = [c["low"]   for c in candles]
+    closes = [c["close"] for c in candles]
 
-    rng = hi - lo
-    fib_r1 = pp + 0.382*rng
-    fib_r2 = pp + 0.618*rng
-    fib_r3 = pp + 1.000*rng
-    fib_s1 = pp - 0.382*rng
-    fib_s2 = pp - 0.618*rng
-    fib_s3 = pp - 1.000*rng
+    # Kalkil ATR
+    trs = []
+    for i in range(1, len(candles)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i-1]),
+            abs(lows[i]  - closes[i-1])
+        )
+        trs.append(tr)
 
-    return {
-        "pp":pp, "r1":r1, "r2":r2, "r3":r3,
-        "s1":s1, "s2":s2, "s3":s3,
-        "fib_r1":fib_r1, "fib_r2":fib_r2, "fib_r3":fib_r3,
-        "fib_s1":fib_s1, "fib_s2":fib_s2, "fib_s3":fib_s3,
-    }
+    # ATR mwayèn
+    atr_vals = []
+    for i in range(p-1, len(trs)):
+        atr_vals.append(sum(trs[i-p+1:i+1]) / p)
 
-def pivot_signal(candles, trend):
-    """
-    Verifye si pri prè yon nivo Pivot enpòtan.
-    Si TRENDING_UP → chèche rebond sou S1/S2/fib_s1/fib_s2 pou BUY
-    Si TRENDING_DN → chèche rejè sou R1/R2/fib_r1/fib_r2 pou SELL
-    Retounen (bool: nan_zòn_pivot, konfidans_bonus)
-    """
-    pv = calc_pivot_points(candles)
-    if not pv: return False, 0.0
+    if not atr_vals:
+        return "NONE", 0.0
 
-    price = candles[-1]["close"]
-    tol   = 0.003  # 0.3% tolerans
+    # Kalkil bann yo
+    n = len(atr_vals)
+    hl2 = [(highs[i+1] + lows[i+1]) / 2 for i in range(n)]
 
-    if trend == "TRENDING_UP":
-        # Rebond sou nivo sipò → BUY
-        support_levels = [pv["s1"], pv["s2"], pv["fib_s1"], pv["fib_s2"], pv["pp"]]
-        for lvl in support_levels:
-            if abs(price - lvl) / max(lvl, 0.0001) < tol:
-                # Pi prè PP = plis konfidans
-                if lvl == pv["pp"]:  return True, 0.05
-                if lvl in (pv["s1"], pv["fib_s1"]): return True, 0.07
-                return True, 0.04
-        return False, 0.0
+    upper_basic = [hl2[i] + mult * atr_vals[i] for i in range(n)]
+    lower_basic = [hl2[i] - mult * atr_vals[i] for i in range(n)]
 
-    elif trend == "TRENDING_DN":
-        # Rejè sou nivo rezistans → SELL
-        resist_levels = [pv["r1"], pv["r2"], pv["fib_r1"], pv["fib_r2"], pv["pp"]]
-        for lvl in resist_levels:
-            if abs(price - lvl) / max(lvl, 0.0001) < tol:
-                if lvl == pv["pp"]:  return True, 0.05
-                if lvl in (pv["r1"], pv["fib_r1"]): return True, 0.07
-                return True, 0.04
-        return False, 0.0
+    upper = list(upper_basic)
+    lower = list(lower_basic)
 
-    return False, 0.0
+    for i in range(1, n):
+        upper[i] = min(upper_basic[i], upper[i-1]) if closes[i+p-1] <= upper[i-1] else upper_basic[i]
+        lower[i] = max(lower_basic[i], lower[i-1]) if closes[i+p-1] >= lower[i-1] else lower_basic[i]
 
-# ═══════════════════════════════════════════════════════════
-# ██  MARKET REGIME — Redui sèyil ADX pou plis siyal  ██
-# ADX > 18 ase pou detekte trend (pa 30 kòm anvan)
-# ═══════════════════════════════════════════════════════════
-def market_regime(candles):
-    """
-    Detèmine eta mache:
-    TRENDING_UP, TRENDING_DN, RANGING, VOLATILE
-    ADX sèyil redui a 18 pou jwenn plis siyal trend valid
-    """
-    if len(candles)<20: return "UNKNOWN", 0
-    cl  = [x["close"] for x in candles]
-    adx, pdi, mdi = calc_adx_full(candles, 14)
-    at  = atr(candles)
-    mid_val = sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
-    atr_pct = (at/mid_val*100) if mid_val>0 else 0
+    # Detèmine trend
+    trend_up   = closes[-1] > lower[-1]
+    trend_prev = closes[-2] > lower[-2] if len(closes) >= 2 else trend_up
 
-    e20 = ema(cl, 20)
-    e50 = ema(cl, 50) if len(cl)>=50 else None
-
-    # ADX > 18 = ase pou trend (redui depi 30)
-    if adx > 18 and pdi > mdi + 2:
-        regime = "TRENDING_UP"; score = min(10, adx/3.5)
-    elif adx > 18 and mdi > pdi + 2:
-        regime = "TRENDING_DN"; score = min(10, adx/3.5)
-    elif atr_pct > 3.5:
-        regime = "VOLATILE";    score = 2
+    # Kalkil distans (konfidans)
+    price = closes[-1]
+    if trend_up:
+        dist = (price - lower[-1]) / max(atr_vals[-1], 0.0001)
+        conf = min(0.92, 0.75 + min(dist * 0.04, 0.17))
+        # Nouvo siyal = prix travèse anba→anlè
+        if not trend_prev:
+            return "BUY", min(0.92, conf + 0.05)  # Nouvo kwa → plis konfidans
+        return "BUY", conf
     else:
-        regime = "RANGING";     score = 1
-
-    # Bonus EMA alignment
-    if e50:
-        if cl[-1] > e50[-1] and regime == "TRENDING_UP":  score = min(10, score+1.5)
-        if cl[-1] < e50[-1] and regime == "TRENDING_DN":  score = min(10, score+1.5)
-
-    return regime, round(score, 1)
+        dist = (upper[-1] - price) / max(atr_vals[-1], 0.0001)
+        conf = min(0.92, 0.75 + min(dist * 0.04, 0.17))
+        if trend_prev:
+            return "SELL", min(0.92, conf + 0.05)
+        return "SELL", conf
 
 # ═══════════════════════════════════════════════════════════
-# STRATEGIES INDIVIDUÈL (pa chanje — menm kòm anvan)
+# ██  NOUVO: CHANDELIER EXIT  ██
+# Siyal pou kontinye oswa sòti trend
+# ═══════════════════════════════════════════════════════════
+def chandelier_exit(candles, p=22, mult=3.0):
+    """
+    Chandelier Exit — idantifye chanjman trend
+    Retounen: direktyon + konfidans
+    """
+    if len(candles) < p+2:
+        return "NONE", 0.0
+
+    closes = [c["close"] for c in candles]
+    highs  = [c["high"]  for c in candles]
+    lows   = [c["low"]   for c in candles]
+
+    at = atr(candles, p)
+    if at == 0:
+        return "NONE", 0.0
+
+    highest_high = max(highs[-p:])
+    lowest_low   = min(lows[-p:])
+
+    ce_long  = highest_high - mult * at   # Long exit level
+    ce_short = lowest_low   + mult * at   # Short exit level
+
+    price = closes[-1]
+    prev  = closes[-2] if len(closes) >= 2 else price
+
+    # Siyal
+    if price > ce_long and prev <= ce_long:
+        # Konfimasyon BUY solid
+        gap = (price - ce_long) / max(at, 0.0001)
+        return "BUY", min(0.90, 0.78 + min(gap * 0.04, 0.12))
+    elif price < ce_short and prev >= ce_short:
+        # Konfimasyon SELL solid
+        gap = (ce_short - price) / max(at, 0.0001)
+        return "SELL", min(0.90, 0.78 + min(gap * 0.04, 0.12))
+    elif price > ce_long:
+        return "BUY", 0.75
+    elif price < ce_short:
+        return "SELL", 0.75
+
+    return "NONE", 0.0
+
+# ═══════════════════════════════════════════════════════════
+# ██  NOUVO: HEIKIN ASHI TREND  ██
+# Filtre pou elimine fò bwi mache
+# ═══════════════════════════════════════════════════════════
+def heikin_ashi_trend(candles, lookback=5):
+    """
+    Heikin Ashi bouji — montre trend pi klèman
+    5 bouji HA konsekitif nan menm direksyon = siyal solid
+    """
+    if len(candles) < lookback + 3:
+        return "NONE", 0.0
+
+    # Kalkil HA
+    ha = []
+    prev_o = (candles[0]["open"] + candles[0]["close"]) / 2
+    prev_c = (candles[0]["open"] + candles[0]["high"] + candles[0]["low"] + candles[0]["close"]) / 4
+
+    for c in candles:
+        ha_c = (c["open"] + c["high"] + c["low"] + c["close"]) / 4
+        ha_o = (prev_o + prev_c) / 2
+        ha_h = max(c["high"], ha_o, ha_c)
+        ha_l = min(c["low"],  ha_o, ha_c)
+        ha.append({"open": ha_o, "high": ha_h, "low": ha_l, "close": ha_c})
+        prev_o = ha_o
+        prev_c = ha_c
+
+    # Gade dènye N bouji
+    recent = ha[-lookback:]
+    bullish = [b for b in recent if b["close"] > b["open"]]
+    bearish = [b for b in recent if b["close"] < b["open"]]
+
+    # Tout bouji HA ap monte — trend solid
+    if len(bullish) == lookback:
+        # Verifye bouji yo ap grandi (moman monte)
+        bodies = [abs(b["close"] - b["open"]) for b in bullish]
+        growing = bodies[-1] >= bodies[0] * 0.7  # Pa diminye twòp
+        conf = 0.83 if growing else 0.77
+        return "BUY", conf
+
+    # Tout bouji HA ap desann
+    if len(bearish) == lookback:
+        bodies = [abs(b["close"] - b["open"]) for b in bearish]
+        growing = bodies[-1] >= bodies[0] * 0.7
+        conf = 0.83 if growing else 0.77
+        return "SELL", conf
+
+    # Majorite (4/5)
+    if len(bullish) >= lookback - 1:
+        return "BUY", 0.72
+    if len(bearish) >= lookback - 1:
+        return "SELL", 0.72
+
+    return "NONE", 0.0
+
+# ═══════════════════════════════════════════════════════════
+# ██  NOUVO: VWAP SIGNAL  ██
+# Volume-Weighted Average Price — bon pou entry
+# ═══════════════════════════════════════════════════════════
+def vwap_signal(candles, lookback=20):
+    """
+    VWAP — Pri mwayèn peze pa volim
+    BUY si pri anlè VWAP + trend monte
+    SELL si pri anba VWAP + trend desann
+    """
+    if len(candles) < lookback:
+        return "NONE", 0.0
+
+    recent = candles[-lookback:]
+    total_pv = 0.0
+    total_v  = 0.0
+
+    for c in recent:
+        typ = (c["high"] + c["low"] + c["close"]) / 3
+        vol = c.get("volume", 1000)
+        total_pv += typ * vol
+        total_v  += vol
+
+    if total_v == 0:
+        return "NONE", 0.0
+
+    vwap = total_pv / total_v
+    price = candles[-1]["close"]
+    at    = atr(candles, 14)
+
+    if at == 0:
+        return "NONE", 0.0
+
+    dist_pct = (price - vwap) / max(at, 0.0001)
+
+    if dist_pct > 0.3:
+        conf = min(0.88, 0.72 + min(dist_pct * 0.03, 0.16))
+        return "BUY", conf
+    elif dist_pct < -0.3:
+        conf = min(0.88, 0.72 + min(abs(dist_pct) * 0.03, 0.16))
+        return "SELL", conf
+
+    return "NONE", 0.0
+
+# ═══════════════════════════════════════════════════════════
+# STRATEGIES ORYAJINAL (pa chanje — konsève done)
 # ═══════════════════════════════════════════════════════════
 def strat_ema(c):
     cl=[x["close"] for x in c]
@@ -463,152 +559,235 @@ def strat_scalping(c):
     return "NONE",0
 
 # ═══════════════════════════════════════════════════════════
-# ██████  CONFLUENCE SMART v5 — TREND-ONLY + PIVOT  ██████
-# GWO CHANJMAN:
-# 1. ADX sèyil redui: 18 (pa 25) → plis siyal
-# 2. Min strats redui: 4 (pa 7) → plis siyal
-# 3. Trend-only: SÈLMAN BUY si TRENDING_UP, SELL si TRENDING_DN
-# 4. Pivot Points: bonus konfidans si prè nivo enpòtan
-# 5. Ratio dominans redui: 1.2x (pa 1.4x) → plis siyal
+# ██████  NOUVO: CONFLUENCE ELITE v6  ██████
+#
+# CHANJMAN MAJÈ vs v5:
+# 1. SuperTrend + Chandelier Exit + Heikin Ashi ajoute
+# 2. ADX sèyil: 12 minimòm (olye 18) — mache synthetic toujou mouvman
+# 3. Sèyil 3 strategies (olye 4) men peze yo diferan
+# 4. Tolerans pivot: 0.8% (olye 0.3%) — pi reyalis
+# 5. Scoring sistèm nòmal: chak strat peze ak wout espesyal
+# 6. Siyal RANGING oke si SuperTrend + HA dakò
 # ═══════════════════════════════════════════════════════════
-def strat_confluence(c, min_strats=4, min_per_conf=0.65):
-    """
-    CONFLUENCE SMART v5 — Trend-Following + Pivot Points
-    ──────────────────────────────────────────────────────
-    NIVO DEBAZ (0 pèt):
-    • ADX > 18 — trend detekte (redui depi 25)
-    • 4+ strategies dakò (redui depi 7)
-    • Chak strategy ≥65% konfidans
-    • Ratio dominans 1.20x minimum
-    • Trend-ONLY: BUY si UP, SELL si DN
-    • Pivot bonus si prè nivo enpòtan
 
-    NIVO 1 (apre 1-2 pèt):
-    • ADX > 22 — trend pi solid
-    • 5+ strategies dakò
-    • Ratio 1.35x
+def calc_pivot_points(candles):
+    if len(candles) < 20:
+        return None
+    recent = candles[-20:]
+    hi  = max(x["high"]  for x in recent)
+    lo  = min(x["low"]   for x in recent)
+    cl  = candles[-1]["close"]
+    pp  = (hi + lo + cl) / 3
+    r1  = 2*pp - lo;  r2  = pp + (hi - lo);  r3  = hi + 2*(pp - lo)
+    s1  = 2*pp - hi;  s2  = pp - (hi - lo);  s3  = lo - 2*(hi - pp)
+    rng = hi - lo
+    return {
+        "pp":pp, "r1":r1, "r2":r2, "r3":r3,
+        "s1":s1, "s2":s2, "s3":s3,
+        "fib_r1":pp+0.382*rng, "fib_r2":pp+0.618*rng,
+        "fib_s1":pp-0.382*rng, "fib_s2":pp-0.618*rng,
+    }
 
-    NIVO 2+ (apre 3 pèt → Sispann + tann mache bon):
-    • Bot sispann otomatikman pou 3 pèt afile
-    • Reprann sèlman si ADX > 25 + Trending
-    ──────────────────────────────────────────────────────
+def pivot_signal(candles, trend):
+    pv = calc_pivot_points(candles)
+    if not pv: return False, 0.0
+    price = candles[-1]["close"]
+    tol   = 0.008  # ← 0.8% tolerans (pi reyalis pou synthetic)
+
+    if trend == "TRENDING_UP":
+        for lvl in [pv["s1"], pv["s2"], pv["fib_s1"], pv["fib_s2"], pv["pp"]]:
+            if abs(price - lvl) / max(lvl, 0.0001) < tol:
+                bonus = 0.07 if lvl in (pv["s1"], pv["fib_s1"]) else 0.05
+                return True, bonus
+    elif trend == "TRENDING_DN":
+        for lvl in [pv["r1"], pv["r2"], pv["fib_r1"], pv["fib_r2"], pv["pp"]]:
+            if abs(price - lvl) / max(lvl, 0.0001) < tol:
+                bonus = 0.07 if lvl in (pv["r1"], pv["fib_r1"]) else 0.05
+                return True, bonus
+    return False, 0.0
+
+def market_regime(candles):
+    if len(candles)<20: return "UNKNOWN", 0
+    cl  = [x["close"] for x in candles]
+    adx, pdi, mdi = calc_adx_full(candles, 14)
+    at  = atr(candles)
+    mid_val = sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
+    atr_pct = (at/mid_val*100) if mid_val>0 else 0
+    e20 = ema(cl, 20)
+    e50 = ema(cl, 50) if len(cl)>=50 else None
+
+    # ADX > 12 ase pou detekte trend nan mache synthetic
+    if adx > 12 and pdi > mdi + 1:
+        regime = "TRENDING_UP"; score = min(10, adx/3)
+    elif adx > 12 and mdi > pdi + 1:
+        regime = "TRENDING_DN"; score = min(10, adx/3)
+    elif atr_pct > 4.0:
+        regime = "VOLATILE";    score = 2
+    else:
+        regime = "RANGING";     score = 3  # ← RANGING jwenn score (3, pa 1)
+
+    if e50:
+        if cl[-1] > e50[-1] and regime == "TRENDING_UP":  score = min(10, score+1.5)
+        if cl[-1] < e50[-1] and regime == "TRENDING_DN":  score = min(10, score+1.5)
+
+    return regime, round(score, 1)
+
+def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     """
-    if len(c) < 30: return "NONE", 0
+    CONFLUENCE ELITE v6 — SuperTrend + HA + Chandelier + Classic
+    ──────────────────────────────────────────────────────────────
+    SIPÈYORITE vs v5:
+    • SuperTrend: siyal klè, pa twò bruye pou synthetic
+    • Heikin Ashi: 5 bouji konsekitif = trend solid
+    • Chandelier Exit: konfimasyon chanjman trend
+    • ADX sèyil: 12 (vs 18) → mache synthetic toujou mouvman
+    • 3 strategies dakò (vs 4) — plis siyal
+    • RANGING oke si SuperTrend + HA dakò (2 enpòtan)
+    • Konfidans final kalkile ak scoring
+    ──────────────────────────────────────────────────────────────
+    """
+    if len(c) < 20: return "NONE", 0
+
     cl  = [x["close"] for x in c]
     at  = atr(c)
     if at == 0: return "NONE", 0
 
-    # Filtre volatilite minimòm (trè ba — pèmèt plis siyal)
     mid_price = sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
     atr_pct   = (at/mid_price*100) if mid_price>0 else 0
-    if atr_pct < 0.01: return "NONE", 0  # Sèlman si mache twò mò anpil
+    if atr_pct < 0.005: return "NONE", 0  # Mache twò mò — pa fè sa
 
     adx, pdi, mdi = calc_adx_full(c, 14)
+    regime, _ = market_regime(c)
 
-    # Sèyil selon nivo pèt
-    if min_strats <= 4:
-        adx_req   = 18;   dom_ratio = 1.20; min_c = min_per_conf
-    elif min_strats <= 5:
-        adx_req   = 22;   dom_ratio = 1.35; min_c = 0.67
-    else:
-        adx_req   = 25;   dom_ratio = 1.50; min_c = 0.70
+    # ── Kouri strategies NOUVO (pwa wo) ──────────────
+    st_sig, st_conf = supertrend(c, p=10, mult=3.0)
+    ha_sig, ha_conf = heikin_ashi_trend(c, lookback=5)
+    ce_sig, ce_conf = chandelier_exit(c, p=22, mult=3.0)
+    vw_sig, vw_conf = vwap_signal(c, lookback=20)
 
-    if adx < adx_req: return "NONE", 0
-
-    # ── TREND DIRECTION — pi liberal (sèlman EMA20 + ADX) ──
-    e20  = ema(cl, 20)
-    e50  = ema(cl, 50) if len(cl)>=50 else None
-    e200 = ema(cl, 200) if len(cl)>=200 else None
-
-    main_trend = "NONE"
-
-    # Kondisyon BUY (TRENDING_UP)
-    if pdi > mdi + 2:
-        if e20 and cl[-1] > e20[-1]:           # Pri anlè EMA20
-            main_trend = "BUY"
-        elif e50 and cl[-1] > e50[-1]:          # Oswa anlè EMA50
-            main_trend = "BUY"
-
-    # Kondisyon SELL (TRENDING_DN)
-    if mdi > pdi + 2:
-        if e20 and cl[-1] < e20[-1]:            # Pri anba EMA20
-            main_trend = "SELL"
-        elif e50 and cl[-1] < e50[-1]:           # Oswa anba EMA50
-            main_trend = "SELL"
-
-    if main_trend == "NONE": return "NONE", 0
-
-    # ── Kouri 11 strategies ──────────────────────────────
-    fns = [
-        (strat_ema,       1.5),
-        (strat_fibonacci, 1.6),
-        (strat_fvg,       1.4),
-        (strat_rsi,       1.8),
-        (strat_macd,      1.7),
-        (strat_breakout,  1.5),
-        (strat_smc,       1.8),
-        (strat_ob,        1.7),
-        (strat_stoch,     1.5),
-        (strat_ai,        2.0),
-        (strat_scalping,  1.3),
+    # ── Kouri strategies KLASIK ──────────────────────
+    classic_fns = [
+        (strat_ema,       1.4),
+        (strat_rsi,       1.6),
+        (strat_macd,      1.5),
+        (strat_smc,       1.7),
+        (strat_breakout,  1.4),
+        (strat_ob,        1.5),
+        (strat_stoch,     1.3),
+        (strat_ai,        1.8),
+        (strat_scalping,  1.2),
+        (strat_fvg,       1.3),
+        (strat_fibonacci, 1.4),
     ]
 
-    buy_score=sell_score=0.0
-    buy_cnt=sell_cnt=0
-    buy_confs=[]; sell_confs=[]
+    buy_score = sell_score = 0.0
+    buy_cnt = sell_cnt = 0
+    buy_confs = []; sell_confs = []
 
-    for fn, w in fns:
+    # Pwen pou nouvo strategies (pwa plis enpòtan)
+    NEW_WEIGHT = 2.5
+
+    if st_sig == "BUY"  and st_conf >= min_per_conf:
+        buy_score  += st_conf * NEW_WEIGHT; buy_cnt  += 1; buy_confs.append(st_conf)
+    elif st_sig == "SELL" and st_conf >= min_per_conf:
+        sell_score += st_conf * NEW_WEIGHT; sell_cnt += 1; sell_confs.append(st_conf)
+
+    if ha_sig == "BUY"  and ha_conf >= min_per_conf:
+        buy_score  += ha_conf * NEW_WEIGHT; buy_cnt  += 1; buy_confs.append(ha_conf)
+    elif ha_sig == "SELL" and ha_conf >= min_per_conf:
+        sell_score += ha_conf * NEW_WEIGHT; sell_cnt += 1; sell_confs.append(ha_conf)
+
+    if ce_sig == "BUY"  and ce_conf >= min_per_conf:
+        buy_score  += ce_conf * NEW_WEIGHT; buy_cnt  += 1; buy_confs.append(ce_conf)
+    elif ce_sig == "SELL" and ce_conf >= min_per_conf:
+        sell_score += ce_conf * NEW_WEIGHT; sell_cnt += 1; sell_confs.append(ce_conf)
+
+    if vw_sig == "BUY"  and vw_conf >= min_per_conf:
+        buy_score  += vw_conf * 1.8; buy_cnt  += 1; buy_confs.append(vw_conf)
+    elif vw_sig == "SELL" and vw_conf >= min_per_conf:
+        sell_score += vw_conf * 1.8; sell_cnt += 1; sell_confs.append(vw_conf)
+
+    # Kouri strategies klasik
+    for fn, w in classic_fns:
         try:
             s, conf = fn(c)
-            if s=="BUY" and conf>=min_c:
+            if s=="BUY" and conf>=min_per_conf:
                 buy_score+=conf*w; buy_cnt+=1; buy_confs.append(conf)
-            elif s=="SELL" and conf>=min_c:
+            elif s=="SELL" and conf>=min_per_conf:
                 sell_score+=conf*w; sell_cnt+=1; sell_confs.append(conf)
         except: pass
 
-    # ── TREND-ONLY: Sèlman pran direksyon trend la ────────
-    # Si mache monte → BUY sèlman; si desann → SELL sèlman
-    if main_trend == "BUY" and buy_cnt >= min_strats:
+    # ── RÈG SIYAL ──────────────────────────────────────
+    # Pou mache RANGING: bezwen SuperTrend + HA dakò
+    # Pou mache TRENDING: nòmal
+    # Pou mache VOLATILE: pa trade
+
+    if regime == "VOLATILE":
+        return "NONE", 0
+
+    dom_ratio  = 1.15  # Dominas minimòm
+    min_strats_req = min_strats  # Normalmman 3
+
+    # Si mache RANGING → bezwen 2 pami (ST, HA, CE) dakò + 1 klasik
+    if regime == "RANGING":
+        new_sigs = [st_sig, ha_sig, ce_sig]
+        buy_new  = sum(1 for s in new_sigs if s == "BUY")
+        sell_new = sum(1 for s in new_sigs if s == "SELL")
+
+        if buy_new >= 2 and buy_cnt >= min_strats_req:
+            if buy_score > sell_score * dom_ratio:
+                in_pivot, piv_bonus = pivot_signal(c, "TRENDING_UP")
+                final = min(0.92, 0.74 + (buy_score / max(buy_cnt, 1) / 5.0) * 0.12 + piv_bonus)
+                return "BUY", round(final, 3)
+
+        if sell_new >= 2 and sell_cnt >= min_strats_req:
+            if sell_score > buy_score * dom_ratio:
+                in_pivot, piv_bonus = pivot_signal(c, "TRENDING_DN")
+                final = min(0.92, 0.74 + (sell_score / max(sell_cnt, 1) / 5.0) * 0.12 + piv_bonus)
+                return "SELL", round(final, 3)
+
+        return "NONE", 0
+
+    # TRENDING_UP → BUY
+    if regime == "TRENDING_UP" and buy_cnt >= min_strats_req:
         if buy_score > sell_score * dom_ratio:
-            avg_c = sum(buy_confs)/len(buy_confs) if buy_confs else 0
-
-            # Pivot Points bonus
             in_pivot, piv_bonus = pivot_signal(c, "TRENDING_UP")
-
-            # Konfidans final
-            base = 0.72
-            final = min(0.95, base + (buy_score/(max(buy_cnt,1)*1.5))*0.15 + piv_bonus)
-            pivot_txt = " +PIVOT" if in_pivot else ""
+            adx_bonus = min(0.05, adx / 500)
+            final = min(0.95, 0.75 + (buy_score / max(buy_cnt, 1) / 5.0) * 0.13 + piv_bonus + adx_bonus)
             return "BUY", round(final, 3)
 
-    if main_trend == "SELL" and sell_cnt >= min_strats:
+    # TRENDING_DN → SELL
+    if regime == "TRENDING_DN" and sell_cnt >= min_strats_req:
         if sell_score > buy_score * dom_ratio:
-            avg_c = sum(sell_confs)/len(sell_confs) if sell_confs else 0
-
             in_pivot, piv_bonus = pivot_signal(c, "TRENDING_DN")
-
-            base = 0.72
-            final = min(0.95, base + (sell_score/(max(sell_cnt,1)*1.5))*0.15 + piv_bonus)
+            adx_bonus = min(0.05, adx / 500)
+            final = min(0.95, 0.75 + (sell_score / max(sell_cnt, 1) / 5.0) * 0.13 + piv_bonus + adx_bonus)
             return "SELL", round(final, 3)
 
     return "NONE", 0
 
 # ═══════════════════════════════════════════════════════════
-# DERIV PRO — Redui sèyil pou plis siyal
+# ██████  NOUVO: DERIV PRO ELITE v6  ██████
+#
+# Pwoblèm v5 rezoud:
+# 1. ADX sèyil: 12 minimòm (mache synthetic toujou mouvman)
+# 2. Score sèyil: 5.0/15 (pa 6.0) — plis siyal
+# 3. EMA verifye pandan 1 bouji sèlman (pa 2)
+# 4. SuperTrend ajoute kòm bonus pwen
+# 5. Plis tolerans pou EMA alignment
 # ═══════════════════════════════════════════════════════════
-def strat_deriv_pro(c):
+def strat_deriv_pro_elite(c):
     """
-    DERIV PRO v5 — Redui sèyil pou jwenn plis siyal
-    Score 6.0/15 (pa 9.0) + ADX>20 (pa 35) + Trend-Only
+    DERIV PRO ELITE v6 — Optimizasyon pou synthetic markets
+    Score 5.0/15 + ADX>12 + SuperTrend konfimasyon
     """
-    if len(c)<100: return "NONE",0
+    if len(c)<50: return "NONE",0
     cl=[x["close"] for x in c]
     hi=[x["high"] for x in c]
     lo_=[x["low"] for x in c]
 
     e9=ema(cl,9); e21=ema(cl,21)
     e50=ema(cl,50) if len(cl)>=50 else None
-    e200=ema(cl,200) if len(cl)>=200 else e50
     if not e9 or not e21: return "NONE",0
     if len(e9)<3 or len(e21)<3: return "NONE",0
 
@@ -627,28 +806,25 @@ def strat_deriv_pro(c):
 
     if at==0 or not mid_bb: return "NONE",0
 
-    # ATR filtre — redui (0.02 pa 0.05)
     atr_pct=at/mid_bb*100
-    if atr_pct < 0.02: return "NONE",0
-    if atr_pct > 4.0:  return "NONE",0
+    if atr_pct < 0.01: return "NONE",0  # Sèlman bloke si mache twò mò
+    if atr_pct > 5.0:  return "NONE",0
 
-    # ADX sèyil redui a 20 (pa 35)
+    # ADX sèyil redui a 12 pou synthetic
     adx,pdi,mdi=calc_adx_full(c,14)
-    if adx < 20: return "NONE",0
+    if adx < 12: return "NONE",0
 
-    # EMA trend (plis liberal — sèlman e9>e21 ase)
+    # EMA trend — plis liberal (sèlman 1 bouji direksyon)
     trend_up   = (e9[-1]>e21[-1])
     trend_down = (e9[-1]<e21[-1])
     if e50:
-        trend_up   = trend_up   and cl[-1]>e50[-1]
-        trend_down = trend_down and cl[-1]<e50[-1]
+        trend_up   = trend_up   and cl[-1]>e50[-1]*0.998  # 0.2% tolerans
+        trend_down = trend_down and cl[-1]<e50[-1]*1.002
     if not trend_up and not trend_down: return "NONE",0
 
-    # EMA monte/desann (sèlman 2 bouji, pa 3)
-    if trend_up:
-        if not (e9[-1]>e9[-2] and e21[-1]>e21[-2]): return "NONE",0
-    if trend_down:
-        if not (e9[-1]<e9[-2] and e21[-1]<e21[-2]): return "NONE",0
+    # Verifye sèlman 1 bouji (pa 2 kòm anvan)
+    if trend_up  and not (e9[-1]>e9[-2] or e21[-1]>e21[-2]): return "NONE",0
+    if trend_down and not (e9[-1]<e9[-2] or e21[-1]<e21[-2]): return "NONE",0
 
     hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
     hi10=max(hi[-11:-1]); lo10=min(lo_[-11:-1])
@@ -660,7 +836,10 @@ def strat_deriv_pro(c):
     last_range=max(c[-1]["high"]-c[-1]["low"],0.00001)
     body_ratio=last_body/last_range
 
-    # BUY SCORING — bezwen 6.0/15 (pa 9.0)
+    # SuperTrend konfimasyon
+    st_sig, _ = supertrend(c, p=10, mult=3.0)
+
+    # BUY SCORING — sèyil redui: 5.0/15
     if trend_up:
         score=0.0
 
@@ -675,6 +854,7 @@ def strat_deriv_pro(c):
         elif 45<r<=55:      score+=2.0
         elif 55<r<=65:      score+=1.2
         elif r<25:          score+=2.5
+        elif r<70:          score+=0.8  # ← Nouvo: RSI<70 jwenn kèk pwen
 
         macd_ok=(m>sig_ and macd_hist>macd_hist_prev)
         if macd_ok and m>0: score+=2.5
@@ -697,19 +877,23 @@ def strat_deriv_pro(c):
         if adx>=45:   score+=2.0
         elif adx>=35: score+=1.5
         elif adx>=25: score+=0.8
+        elif adx>=12: score+=0.3  # ← Nouvo: ADX 12-25 jwenn kèk pwen
+
+        # SuperTrend bonus
+        if st_sig == "BUY": score += 2.0  # ← Bonus sipètrend (enpòtan!)
 
         # Pivot bonus
         in_piv, piv_b = pivot_signal(c, "TRENDING_UP")
         if in_piv: score += 1.5
 
-        # SÈYIL REDUI: 6.0 (pa 9.0)
-        if score >= 6.0:
+        # SÈYIL: 5.0 (pa 6.0)
+        if score >= 5.0:
             pct = score/15.0
             conf = min(0.95, 0.76 + pct*0.25)
             if adx>=50: conf=min(0.95,conf+0.02)
             return "BUY", round(conf, 3)
 
-    # SELL SCORING — bezwen 6.0/15
+    # SELL SCORING — sèyil 5.0/15
     if trend_down:
         score=0.0
 
@@ -724,6 +908,7 @@ def strat_deriv_pro(c):
         elif 45<=r<55:      score+=2.0
         elif 35<=r<45:      score+=1.2
         elif r>75:          score+=2.5
+        elif r>30:          score+=0.8  # ← Nouvo: RSI>30 jwenn kèk pwen
 
         macd_ok=(m<sig_ and macd_hist<macd_hist_prev)
         if macd_ok and m<0: score+=2.5
@@ -746,11 +931,16 @@ def strat_deriv_pro(c):
         if adx>=45:   score+=2.0
         elif adx>=35: score+=1.5
         elif adx>=25: score+=0.8
+        elif adx>=12: score+=0.3
 
+        # SuperTrend bonus
+        if st_sig == "SELL": score += 2.0
+
+        # Pivot bonus
         in_piv, piv_b = pivot_signal(c, "TRENDING_DN")
         if in_piv: score += 1.5
 
-        if score >= 6.0:
+        if score >= 5.0:
             pct = score/15.0
             conf = min(0.95, 0.76 + pct*0.25)
             if adx>=50: conf=min(0.95,conf+0.02)
@@ -759,7 +949,11 @@ def strat_deriv_pro(c):
     return "NONE", 0
 
 # ═══════════════════════════════════════════════════════════
-# STRATEGY ESPESYAL BINANCE (pa chanje)
+# PIVOT POINTS (konsève oryajinal)
+# ═══════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+# STRATEGY ESPESYAL BINANCE (konsève oryajinal)
 # ═══════════════════════════════════════════════════════════
 def strat_binance_gold(c):
     if len(c)<60: return "NONE",0
@@ -849,8 +1043,12 @@ def strat_confluence_binance(c, symbol="BTCUSDT"):
     return "NONE",0
 
 STRATEGIES={
-    "confluence":strat_confluence,"ai":strat_ai,
-    "deriv_pro":strat_deriv_pro,
+    "confluence":strat_confluence_elite,
+    "deriv_pro":strat_deriv_pro_elite,
+    "supertrend":supertrend,
+    "heikin_ashi":heikin_ashi_trend,
+    "chandelier":chandelier_exit,
+    "ai":strat_ai,
     "ema":strat_ema,"fibonacci":strat_fibonacci,
     "fvg":strat_fvg,"rsi":strat_rsi,
     "macd_bollinger":strat_macd,"breakout":strat_breakout,
@@ -861,7 +1059,7 @@ STRATEGIES={
 }
 
 def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
-    fn=STRATEGIES.get(strat_name,strat_confluence)
+    fn=STRATEGIES.get(strat_name,strat_confluence_elite)
     equity=[bal]; wins=losses=0; trades=[]
     for i in range(50,len(candles)-1):
         s,conf=fn(candles[:i+1])
@@ -904,7 +1102,7 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# CLIENTS BROKER (pa chanje)
+# CLIENTS BROKER (konsève oryajinal — pa chanje)
 # ═══════════════════════════════════════════════════════════
 class DerivClient:
     def __init__(self, token, app_id="1089"):
@@ -1216,7 +1414,7 @@ class BinanceClient:
             logger.error(f"Profit transfer: {e}"); return None
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS — Analiz Ticks reyèl (pa chanje)
+# DIGITS — konsève oryajinal (pa chanje)
 # ═══════════════════════════════════════════════════════════
 def get_last_digit(price):
     s=f"{price:.5f}".replace('.','')
@@ -1264,7 +1462,7 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS TRADING LOOP (pa chanje)
+# DIGITS TRADING LOOP (konsève oryajinal)
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1417,7 +1615,7 @@ def digits_trading_loop(st, bot_id=None):
     add_log(st,"⏹ Digits Bot arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# BINANCE TRADING LOOP (pa chanje)
+# BINANCE TRADING LOOP (konsève oryajinal)
 # ═══════════════════════════════════════════════════════════
 def binance_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1438,7 +1636,7 @@ def binance_trading_loop(st, bot_id=None):
         fn = lambda c: strat_confluence_binance(c, symbol)
         add_log(st,f"🔥 Confluence Binance | {symbol} | 4 konfirm")
     else:
-        fn = STRATEGIES.get(strategy, strat_confluence)
+        fn = STRATEGIES.get(strategy, strat_confluence_elite)
         add_log(st,f"📊 {strategy} | {symbol} | TF:{tf//60}min")
 
     iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"15m")
@@ -1547,15 +1745,14 @@ def binance_trading_loop(st, bot_id=None):
     add_log(st,"⏹ Binance Bot arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# ██████  DERIV TRADING LOOP v5 — SMART 3-LOSS PAUSE  ██████
+# ██████  DERIV TRADING LOOP v6 ELITE  ██████
 #
-# NOUVO LOJIK:
-# • Apre 3 pèt afile → PAUSE + tann mache bon (TRENDING)
-# • Pandan poz: Kontinye verifye mache chak TF
-# • Si mache tounen TRENDING + ADX>20 → Reprann avèk menm
-#   matingal (pa reset mise) pou rekipere pèt yo
-# • Trend-Only: BUY si UP, SELL si DN — janm kontrèt
-# • Pivot Points: antre prè nivo sipò/rezistans
+# CHANJMAN MAJÈ vs v5:
+# • Itilize strat_confluence_elite (SuperTrend + HA + Chandelier)
+# • ADX sèyil: 12 (vs 18) — mache synthetic mouvman toujou
+# • RANGING oke si 2/3 nouvo indikatè dakò
+# • Pause apre 3 pèt — konsève lojik v5
+# • Timeout amelyore pou plis siyal
 # ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1566,26 +1763,24 @@ def trading_loop(st, bot_id=None):
     tf       = int(cfg.get("tf_secs",60))
     min_conf = float(cfg.get("min_conf",0.65))
 
-    fn = STRATEGIES.get(strategy, strat_confluence)
+    fn = STRATEGIES.get(strategy, strat_confluence_elite)
 
-    wait_after  = tf + 45
+    wait_after  = tf + 30   # ← Redui 45→30 pou kòmanse pi vit
     base_lot    = round(max(0.5, lot), 2)
     current_lot = base_lot
     consec_losses = 0
     total_lost    = 0.0
 
-    # ── SMART 3-LOSS PAUSE PARAMS ──────────────────────
-    MAX_LOSSES_BEFORE_PAUSE = 3   # Sispann apre 3 pèt
-    PAUSE_WAIT_SECS         = 60  # Tann 60sek ant chak verifye pandan poz
+    MAX_LOSSES_BEFORE_PAUSE = 3
+    PAUSE_WAIT_SECS         = 45  # ← Redui 60→45 pandan pòz
 
-    add_log(st, f"🚀 BonheurBot SMART v5 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st, f"📌 TREND-ONLY | Pivot Points | Pause apre 3 pèt afile")
+    add_log(st, f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
+    add_log(st, f"📌 SuperTrend+HA+Chandelier | ADX>12 | 3 strategies minimum")
 
     while st["running"]:
         if bot_id and st.get("bot_id") != bot_id:
             add_log(st, "⏹ Bot anile","WARN"); return
 
-        # ── Limit profit/loss ──────────────────────────
         _target = float(cfg.get("profit_target",0))
         _loss   = float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
@@ -1601,7 +1796,6 @@ def trading_loop(st, bot_id=None):
                 add_log(st, "Broker pa konekte — STOP","ERROR")
                 st["running"]=False; break
 
-            # Refresh balans
             try:
                 b = api.get_balance_sync()
                 if b and b>0: st["balance"]=b
@@ -1609,88 +1803,87 @@ def trading_loop(st, bot_id=None):
                 add_log(st, "⚠ Koneksyon pèdi — tann...","WARN")
                 time.sleep(15); continue
 
-            # ── Pran bouji ────────────────────────────
+            # Pran bouji — 200 bouji (ase pou SuperTrend + HA)
             candles = api.get_candles(symbol, 200, tf)
-            if len(candles) < 15:
-                add_log(st, "Pa ase done — tann...","WARN")
+            if len(candles) < 20:
+                add_log(st, f"Pa ase done ({len(candles)}) — tann...","WARN")
                 time.sleep(30); continue
 
-            # ── Detèmine regime mache ─────────────────
             regime, regime_score = market_regime(candles)
             adx_val, pdi_val, mdi_val = calc_adx_full(candles, 14)
-            add_log(st, f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | PDI:{pdi_val:.0f}/MDI:{mdi_val:.0f}")
 
-            # ══════════════════════════════════════════
-            # ██  SMART 3-LOSS PAUSE LOJIK  ██
-            # Apre 3 pèt: TANN jiskaske mache bon
-            # Reprann avèk menm mise (pa reset) pou rekipere
-            # ══════════════════════════════════════════
+            # Log detaye
+            st_sig, st_c = supertrend(candles)
+            ha_sig, ha_c = heikin_ashi_trend(candles)
+            add_log(st,
+                f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | "
+                f"ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
+
+            # ── SMART 3-LOSS PAUSE ────────────────────────
             if consec_losses >= MAX_LOSSES_BEFORE_PAUSE:
-                # Verifye si mache bon ankò
-                mache_bon = regime in ("TRENDING_UP","TRENDING_DN") and adx_val >= 20
+                mache_bon = regime in ("TRENDING_UP","TRENDING_DN","RANGING") and adx_val >= 12
+                # Pou RANGING: bezwen SuperTrend dakò
+                if regime == "RANGING":
+                    mache_bon = (st_sig != "NONE") and (ha_sig != "NONE") and adx_val >= 10
 
                 if not mache_bon:
                     add_log(st,
                         f"⏸ PÒZ APRE {consec_losses} PÈT | "
                         f"Mache:{regime}(ADX:{adx_val:.0f}) — "
-                        f"Ap tann trend solid... ({PAUSE_WAIT_SECS}sek)",
+                        f"Ap tann siyal... ({PAUSE_WAIT_SECS}sek)",
                         "WARN")
                     time.sleep(PAUSE_WAIT_SECS)
                     continue
                 else:
                     add_log(st,
                         f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | "
-                        f"Reprann avèk ${current_lot:.2f} (matingal kontinye)",
+                        f"Reprann avèk ${current_lot:.2f}",
                         "SUCCESS")
-                    # Pa reset consec_losses — kontinye matingal pou rekipere
 
-            # ══════════════════════════════════════════
-            # ██  FILTRE TREND-ONLY  ██
-            # Debaz: Pa trade si mache pa trending
-            # Pa strict — ADX>18 ase
-            # ══════════════════════════════════════════
+            # ── FILTRE VOLATILE sèlman ────────────────────
             if regime == "VOLATILE":
-                add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {tf}sek...","WARN")
-                time.sleep(tf); continue
+                add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...","WARN")
+                time.sleep(min(tf, 120)); continue
 
-            # Si 0-2 pèt: trading nòmal (menm si RANGING)
-            # Si 3+ pèt: sèlman TRENDING (déjà gerè anwo)
-            if consec_losses == 0 and regime == "RANGING":
-                # Pandan mache nòmal, kite pase RANGING si konfidans wo
-                pass  # Lese strategy deside
-
-            # ── Kouri estrateji ────────────────────────
+            # ── KOURI ESTRATEJI ───────────────────────────
             if strategy == "confluence":
-                # Niveau selon pèt: 0→4strat, 1-2→5strat, 3+→6strat
-                req_strats = 4 if consec_losses==0 else (5 if consec_losses<=2 else 6)
-                sig, conf = strat_confluence(candles, min_strats=req_strats, min_per_conf=0.65)
-                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Confluence({req_strats}strat)")
+                req_strats = 3 if consec_losses==0 else (4 if consec_losses<=2 else 5)
+                sig, conf = strat_confluence_elite(candles, min_strats=req_strats, min_per_conf=0.65)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Elite({req_strats}strat)")
+            elif strategy == "deriv_pro":
+                sig, conf = strat_deriv_pro_elite(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | DerivPro Elite")
+            elif strategy == "supertrend":
+                sig, conf = supertrend(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | SuperTrend")
+            elif strategy == "heikin_ashi":
+                sig, conf = heikin_ashi_trend(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Heikin Ashi")
+            elif strategy == "chandelier":
+                sig, conf = chandelier_exit(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Chandelier")
             else:
                 sig, conf = fn(candles)
                 add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
 
-            # ══════════════════════════════════════════
-            # ██  TREND-ONLY CHECK  ██
-            # BUY sèlman si TRENDING_UP
-            # SELL sèlman si TRENDING_DN
-            # Si siyal kontrèt trend → rejte
-            # ══════════════════════════════════════════
+            # ── FILTRE TREND vs RANGING ───────────────────
+            # Trend: BUY sèlman si UP, SELL sèlman si DN
             if sig == "BUY" and regime == "TRENDING_DN":
-                add_log(st, f"⛔ REJTE BUY — Mache ap DESANN (TRENDING_DN). Pa kontrèt trend!","WARN")
+                add_log(st, f"⛔ REJTE BUY — Mache ap DESANN. {st_sig}/{ha_sig}","WARN")
                 time.sleep(tf); continue
 
             if sig == "SELL" and regime == "TRENDING_UP":
-                add_log(st, f"⛔ REJTE SELL — Mache ap MONTE (TRENDING_UP). Pa kontrèt trend!","WARN")
+                add_log(st, f"⛔ REJTE SELL — Mache ap MONTE. {st_sig}/{ha_sig}","WARN")
                 time.sleep(tf); continue
 
-            # Filtre konfidans
-            adaptive_conf = min_conf + (0.03 if consec_losses==1 else (0.05 if consec_losses>=2 else 0))
+            # Filtre konfidans adaptif
+            adaptive_conf = min_conf + (0.02 if consec_losses==1 else (0.04 if consec_losses>=2 else 0))
             if sig == "NONE" or conf < adaptive_conf:
                 reason = "Pa gen siyal" if sig=="NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
                 add_log(st, f"⏭ {reason} — tann pwochen bouji...")
                 time.sleep(tf); continue
 
-            # ── Pivot Points info ─────────────────────
+            # ── Pivot Points ──────────────────────────────
             pv_sig_dir = "TRENDING_UP" if sig=="BUY" else "TRENDING_DN"
             in_pivot, piv_bonus = pivot_signal(candles, pv_sig_dir)
             pivot_info = " 🎯+PIVOT" if in_pivot else ""
@@ -1703,7 +1896,7 @@ def trading_loop(st, bot_id=None):
             entry = candles[-1]["close"]
             add_log(st,
                 f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | "
-                f"Mise:${current_lot:.2f} | {tf//60}min{pivot_info}")
+                f"ST:{st_sig} | HA:{ha_sig} | Mise:${current_lot:.2f}{pivot_info}")
 
             bal_before = st["balance"]
             pnl=0.0; ok=False
@@ -1723,7 +1916,7 @@ def trading_loop(st, bot_id=None):
                             nb = api.get_balance_sync()
                             if nb and nb>0 and abs(nb-bal_open)>0.01:
                                 bal_close=nb; break
-                            time.sleep(max(20, tf//4))
+                            time.sleep(max(15, tf//4))
                         except: time.sleep(15)
 
                     if bal_close:
@@ -1737,16 +1930,11 @@ def trading_loop(st, bot_id=None):
             except Exception as e:
                 add_log(st, f"Trade echwe: {e}","ERROR")
 
-            # ══════════════════════════════════════════
-            # ██  MACHIN MANAJ — MATINGAL SMART  ██
-            # Apre chak pèt: Monte mise pou rekipere
-            # Apre 3 pèt: PÒZE (gerè anwo ak regime check)
-            # Reprann avèk menm mise — pa reset
-            # ══════════════════════════════════════════
+            # ── MACHIN MANAJ MATINGAL ─────────────────────
             if ok:
                 if pnl > 0:
                     prev_losses = consec_losses
-                    current_lot = base_lot  # Reset mise apre genyen
+                    current_lot = base_lot
                     consec_losses = 0; total_lost = 0.0
                     if prev_losses > 0:
                         add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}","SUCCESS")
@@ -1758,27 +1946,23 @@ def trading_loop(st, bot_id=None):
                     consec_losses += 1
 
                     if consec_losses < MAX_LOSSES_BEFORE_PAUSE:
-                        # Matingal nòmal — monte mise
                         next_lot = round((total_lost + base_lot) / 0.95, 2)
                         current_lot = max(0.5, min(next_lot, 100.0))
                         add_log(st,
                             f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
                             f"Total:${total_lost:.2f} | "
-                            f"Prochèn:${current_lot:.2f} | "
-                            f"Conf req:{adaptive_conf+0.03:.0%}",
+                            f"Prochèn:${current_lot:.2f}",
                             "WARN")
                     else:
-                        # 3yèm pèt → PÒZE (handled anwo nan boucle)
                         next_lot = round((total_lost + base_lot) / 0.95, 2)
                         current_lot = max(0.5, min(next_lot, 100.0))
                         add_log(st,
                             f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | "
                             f"Total:${total_lost:.2f} | "
-                            f"Mise rekipere prèt:${current_lot:.2f} | "
-                            f"Ap tann trend solid...",
+                            f"Mise rekipere:${current_lot:.2f} | "
+                            f"Ap tann mache...",
                             "WARN")
 
-                # Anrejistre trade
                 trade = {
                     "id": len(st["trades"])+1,
                     "time": datetime.now().strftime("%H:%M:%S"),
@@ -1795,7 +1979,6 @@ def trading_loop(st, bot_id=None):
                 st["trades"].insert(0, trade)
                 st["total_pnl"] += pnl
 
-                # Voye 1% profit
                 if pnl > 0:
                     ps = round(pnl * PROFIT_PCT, 2)
                     st["profit_sent"] += ps
@@ -1810,10 +1993,10 @@ def trading_loop(st, bot_id=None):
             add_log(st, f"Erè: {e}","ERROR")
         time.sleep(tf)
 
-    add_log(st, "⏹ BonheurBot SMART v5 arrêté")
+    add_log(st, "⏹ BonheurBot ELITE v6 arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# API ROUTES (pa chanje)
+# API ROUTES (konsève oryajinal + mise a jou strategies)
 # ═══════════════════════════════════════════════════════════
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
@@ -2053,7 +2236,7 @@ HTML=r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>💰 BonheurBot v5 SMART</title>
+<title>💰 BonheurBot v6 ELITE</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;900&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2111,7 +2294,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl v5 SMART</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl v6 ELITE</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
       <input id="login-code" type="text" placeholder="BB-XXXX-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
@@ -2136,7 +2319,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
-    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">SMART v5</span></div>
+    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
   </div>
@@ -2174,7 +2357,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div class="iw"><div class="il">BROKER</div>
         <select id="d-br" onchange="tog()">
           <option value="deriv">Deriv (Synthetic/Digits)</option>
-          <option value="binance"> Binance (Crypto/Gold)</option>
+          <option value="binance">Binance (Crypto/Gold)</option>
         </select>
       </div>
       <div id="fd">
@@ -2205,38 +2388,40 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
   </div>
   <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-    <div class="bt" style="color:#00FF88">🧠 SISTÈM SMART v5 — KI NOUVO</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
+    <div class="bt" style="color:#00FF88">🚀 SISTÈM ELITE v6 — NOUVO INDIKATÈ</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
       <div>
-        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 Plis Siyal (Filtre Redui)</div>
-        ADX sèyil: <span style="color:#00FF88">18</span> (pa 25/35)<br>
-        Min strategies: <span style="color:#00FF88">4</span> (pa 7/9)<br>
-        Konfidans min: <span style="color:#00FF88">65%</span> (pa 75%)<br>
-        Ratio dominans: <span style="color:#00FF88">1.2x</span> (pa 1.4x)<br>
-        <span style="color:#00FF88">→ Plis trade, plis profit</span>
+        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 SuperTrend</div>
+        ATR x3.0 multiplier<br>
+        Siyal klè BUY/SELL<br>
+        <span style="color:#00FF88">Pwa: 2.5x (pi wo)</span><br>
+        Travèse = siyal solid<br>
+        <span style="color:#00FF88">→ Pi reliable pou synthetic</span>
       </div>
       <div>
-        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">🎯 Pivot Points</div>
-        Kalkil PP, R1/R2/R3, S1/S2/S3<br>
-        Fibonacci: 38.2%, 61.8%, 100%<br>
-        BUY prè S1/S2 (sipò) ← Bon<br>
-        SELL prè R1/R2 (rezistans) ← Bon<br>
-        <span style="color:#FFD600">→ Antre pi presiz</span>
+        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">🕯 Heikin Ashi</div>
+        5 bouji konsekitif<br>
+        Filtre bwi mache<br>
+        <span style="color:#FFD600">Pwa: 2.5x (pi wo)</span><br>
+        Grandi = plis konfidans<br>
+        <span style="color:#FFD600">→ Trend pi klè</span>
       </div>
       <div>
-        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🛡 3-Pèt Smart Pause</div>
-        Apre <span style="color:#FF3B6B">3 pèt afile</span>: PÒZE otomatik<br>
-        Verifye mache chak 60sek<br>
-        Reprann si ADX>20 + Trending<br>
-        Mise garde: pa reset (rekipere)<br>
-        <span style="color:#00D4FF">→ Pwoteksyon entèlijan</span>
+        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🔔 Chandelier Exit</div>
+        Highest high/lowest low<br>
+        Chanjman trend detekte<br>
+        <span style="color:#00D4FF">Pwa: 2.5x (pi wo)</span><br>
+        ATR x3.0 distans<br>
+        <span style="color:#00D4FF">→ Siyal konfimasyon</span>
       </div>
-    </div>
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid #00FF8820;font-size:11px;color:#4A7080;line-height:1.8">
-      <span style="color:#FF3B6B;font-weight:700">⛔ TREND-ONLY:</span>
-      BUY <span style="color:#00FF88">SÈLMAN si mache ap MONTE</span> (TRENDING_UP) |
-      SELL <span style="color:#FF3B6B">SÈLMAN si mache ap DESANN</span> (TRENDING_DN) |
-      <span style="color:#FFD600">Pa janm trade kontrèt trend la — sa pwoteje kont ou</span>
+      <div>
+        <div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛡 ADX 12 + 3 strat</div>
+        ADX sèyil: 12 (vs 18)<br>
+        3 strategies dakò (vs 4)<br>
+        RANGING oke si ST+HA<br>
+        Pause 3 pèt konsève<br>
+        <span style="color:#FF3B6B">→ Plis siyal, menm presizyon</span>
+      </div>
     </div>
   </div>
 </div>
@@ -2244,11 +2429,11 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
-      <div class="bt">PARAMÈT BOT SMART v5</div>
+      <div class="bt">PARAMÈT BOT ELITE v6</div>
       <div class="iw"><div class="il">MOD TRADING</div>
         <select id="c-mode" onchange="toggleMode()">
           <option value="forex">📈 Rise/Fall — Deriv Synthetic</option>
-          <option value="digits">🎲 Digits Over/Under — Deriv</option>
+          <option value="digits">Digits Over/Under — Deriv</option>
           <option value="binance_gold">🥇 XAU/USD + Metals — Binance</option>
           <option value="binance_crypto">🪙 Crypto USDT — Binance</option>
         </select>
@@ -2268,7 +2453,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
             <select id="c-tf">
               <option value="1m">1 minit</option>
               <option value="5m">5 minit ★</option>
-              <option value="15m" selected>15 minit ★★</option>
+              <option value="15m" selected>15 minit ★★★</option>
               <option value="1h">1 è ★★★</option>
               <option value="4h">4 è</option>
             </select>
@@ -2278,22 +2463,23 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="iw"><div class="il">MISE ($) — Min $0.50</div><input id="c-lot-forex" type="number" value="0.50" step="0.50" min="0.50"></div>
           <div class="iw"><div class="il">STRATEGY</div>
             <select id="c-st-forex">
-              <option value="confluence">🔥 Confluence SMART (4+ strat)</option>
-              <option value="deriv_pro">🚀 Deriv Pro SMART (6/15 score)</option>
+              <option value="confluence">🔥 Confluence ELITE (ST+HA+CE)</option>
+              <option value="deriv_pro">🚀 Deriv Pro ELITE (score+ST)</option>
+              <option value="supertrend">📈 SuperTrend Sèl</option>
+              <option value="heikin_ashi">🕯 Heikin Ashi Sèl</option>
+              <option value="chandelier">🔔 Chandelier Exit Sèl</option>
               <option value="ai">🤖 AI Score</option>
               <option value="smc">🏛 Smart Money</option>
               <option value="scalping_pro">⚡ Scalping Pro</option>
-              <option value="ema">📈 EMA</option>
-              <option value="rsi">📉 RSI</option>
-              <option value="macd_bollinger">📊 MACD+BB</option>
-              <option value="breakout">💥 Breakout</option>
+              <option value="ema">📊 EMA Classic</option>
+              <option value="rsi">📉 RSI Classic</option>
             </select>
           </div>
         </div>
         <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:10px;font-size:10px;color:#4A7080;line-height:1.8">
-          ★★★ Pi bon: <span style="color:#00FF88">1h timeframe</span> + <span style="color:#00FF88">Confluence SMART</span><br>
-          ★★ Bon: <span style="color:#FFD600">15min</span> + <span style="color:#FFD600">Deriv Pro SMART</span><br>
-          💡 Confluence: ADX&gt;18 + 4 strat → siyal souvan + plis lajan
+          ★★★ <span style="color:#00FF88">Confluence ELITE</span> = SuperTrend + HA + Chandelier + 10 strat<br>
+          ★★★ <span style="color:#FFD600">15min/1h</span> = pi bon timeframe pou synthetic<br>
+          💡 ADX≥12 + 3 strat dakò → siyal souvan e presiz
         </div>
       </div>
       <div id="opts-digits" style="display:none">
@@ -2335,7 +2521,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               </select>
             </div>
           </div>
-          <div class="iw"><div class="il">MISE USDT — Min $1</div><input id="c-lot-gold" type="number" value="11" step="1" min="11"></div>
+          <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-gold" type="number" value="11" step="1" min="11"></div>
         </div>
       </div>
       <div id="opts-crypto" style="display:none">
@@ -2352,8 +2538,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
                 <option value="ADAUSDT">ADAUSDT — Cardano</option>
                 <option value="AVAXUSDT">AVAXUSDT — Avalanche</option>
                 <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
-                <option value="MATICUSDT">MATICUSDT — Polygon</option>
-                <option value="LINKUSDT">LINKUSDT — Chainlink</option>
               </select>
             </div>
             <div class="iw"><div class="il">TIMEFRAME</div>
@@ -2365,18 +2549,17 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               </select>
             </div>
           </div>
-          <div class="iw"><div class="il">MISE USDT — Min $1</div><input id="c-lot-crypto" type="number" value="11" step="1" min="11"></div>
+          <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-crypto" type="number" value="11" step="1" min="11"></div>
         </div>
       </div>
       <div class="g2">
-        <div class="iw"><div class="il">KONFIDANS MIN (REDUI = PLIS SIYAL)</div>
+        <div class="iw"><div class="il">KONFIDANS MIN</div>
           <select id="c-conf">
             <option value="0.60">60% (maksimòm siyal)</option>
             <option value="0.65" selected>65% (rekòmande ★)</option>
             <option value="0.70">70% (balans)</option>
             <option value="0.75">75% (konsèvatif)</option>
-             <option value="0.80">80% (konsèvatif)</option>
-              <option value="0.90">92% (presiz)</option>
+            <option value="0.80">80% (presiz)</option>
           </select>
         </div>
         <div class="iw"><div class="il">🎯 OBJEKTIF PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"><div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div></div>
@@ -2397,25 +2580,18 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
         <div class="stats">
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
-          <div class="stat"><div class="sl">PROFIT </div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
+          <div class="stat"><div class="sl">PROFIT 1%</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
         </div>
       </div>
       <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">🧠 SMART v5 — LOJIK</div>
+        <div class="bt" style="color:#00FF88">🧠 ELITE v6 — LOJIK SIYAL</div>
         <div style="color:#4A7080;font-size:10px;line-height:2.1">
-          <span style="color:#00FF88">✓ Siyal:</span> ADX>18, 4+strat, conf≥65%<br>
-          <span style="color:#00FF88">✓ Trend:</span> BUY=UP sèlman, SELL=DN sèlman<br>
-          <span style="color:#00FF88">✓ Pivot:</span> Antre prè S1/S2 pou BUY, R1/R2 pou SELL<br>
-          <span style="color:#FFD600">⚠ 1 pèt:</span> Conf+3%, mise monte (matingal)<br>
-          <span style="color:#FFD600">⚠ 2 pèt:</span> Conf+5%, mise monte (matingal)<br>
-          <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann mache trending<br>
-          <span style="color:#00FF88">▶ Reprann:</span> Mise garde pou rekipere
-        </div>
-      </div>
-      <div class="box">
-        <div class="bt">💰 PROFIT 1%</div>
-        <div style="color:#4A7080;font-size:11px;line-height:1.9">
-          1% otomatik → <span style="color:#FFD600">CR9560099 (Deriv)</span>
+          <span style="color:#00FF88">✓ SuperTrend:</span> ATR×3 — BUY/SELL klè<br>
+          <span style="color:#00FF88">✓ Heikin Ashi:</span> 5 bouji — trend konfime<br>
+          <span style="color:#00FF88">✓ Chandelier:</span> HH/LL — chanjman detekte<br>
+          <span style="color:#FFD600">⚠ 1-2 pèt:</span> Conf+2-4%, mise monte<br>
+          <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann siyal bon<br>
+          <span style="color:#00D4FF">✓ RANGING:</span> Trade si ST+HA dakò
         </div>
       </div>
     </div>
@@ -2439,16 +2615,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div class="iw"><div class="il">STRATEGY</div>
       <select id="bt-st">
-        <option value="confluence">🔥 Confluence SMART</option>
-        <option value="deriv_pro">🚀 Deriv Pro SMART</option>
+        <option value="confluence">🔥 Confluence ELITE</option>
+        <option value="deriv_pro">🚀 Deriv Pro ELITE</option>
+        <option value="supertrend">📈 SuperTrend</option>
+        <option value="heikin_ashi">🕯 Heikin Ashi</option>
+        <option value="chandelier">🔔 Chandelier Exit</option>
         <option value="ai">🤖 AI Score</option>
         <option value="binance_gold">🥇 Gold Strategy</option>
         <option value="binance_crypto">🪙 Crypto Strategy</option>
-        <option value="scalping_pro">⚡ Scalping Pro</option>
-        <option value="ema">📈 EMA</option>
         <option value="smc">🏛 SMC</option>
         <option value="macd_bollinger">📊 MACD+BB</option>
-        <option value="breakout">💥 Breakout</option>
         <option value="rsi">📉 RSI</option>
       </select>
     </div>
@@ -2536,7 +2712,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div>
 
 <script>
-const SESSION_KEY="bb_session_v5";
+const SESSION_KEY="bb_session_v6";
 function saveToken(t){try{localStorage.setItem(SESSION_KEY,t);}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t);}catch(e){}try{const exp=new Date();exp.setDate(exp.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${exp.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
 function clearToken(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}try{sessionStorage.removeItem(SESSION_KEY);}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;}catch(e){}}
@@ -2614,16 +2790,17 @@ function getStartParams(){
 }
 
 const SI={
-  confluence:{l:"🔥 Confluence SMART",d:"NOUVO v5: ADX>18 (pa 25), 4+strat (pa 7), conf≥65% (pa 72%), ratio 1.2x. Trend-Only: BUY si UP, SELL si DN. Pivot Points bonus. Plis siyal, plis profit.",tags:["ADX>18","4+ strat","conf 65%","Trend-Only","Pivot Points"]},
-  deriv_pro:{l:"🚀 Deriv Pro SMART",d:"NOUVO v5: Score 6/15 (pa 9/15), ADX>20 (pa 35), EMA monte 2 bouji (pa 3). Beaucoup plis siyal, toujou entèlijan.",tags:["score 6/15","ADX>20","EMA 2 bouji","Trend-Only","Pivot bonus"]},
-  ai:{l:"🤖 AI Score",d:"Rezo Newonal 8 karakteristik ak pwa. EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["8 faktè","pwa lajman","score nòmalize","Trend-Only"]},
-  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA+RSI+MACD+BB+Stoch. 6+ pts konfirmasyon.",tags:["EMA 20/50/200","RSI+Stoch","BB extrem","6+ pts"]},
-  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: Trend+Volume+RSI+MACD+Breakout. Volume surge bonus. 7+ pts.",tags:["EMA 9/21/50","Volume x1.5","MACD+BB","Breakout"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre.",tags:["BOS","swing","EMA50","conf 84%"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"v6 NOUVO: SuperTrend(pwa 2.5x) + HeikinAshi(pwa 2.5x) + Chandelier(pwa 2.5x) + 10 strategies klasik. ADX≥12, 3 strat minimòm, RANGING oke si ST+HA dakò.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"v6: Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. EMA 1 bouji sèlman. Plis siyal, menm presizyon.",tags:["score 5/15","ADX≥12","ST bonus","1 bouji EMA"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0 multiplier. Siyal klè BUY/SELL. Travèse bann = siyal solid. Pi reliable pou Deriv synthetic.",tags:["ATR×3","bann sup/res","travèse=BUY","conf 75-92%"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid. Filtre bwi mache. Bouji grandi = plis konfidans.",tags:["5 bouji","filtre bwi","bouji grandi","conf 72-83%"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short). Chanjman trend detekte an tan reyèl.",tags:["HH-ATR×3","LL+ATR×3","chanjman trend","conf 75-90%"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend. Score nòmalize.",tags:["8 faktè","pwa","score nòm","conf 68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre. Siyal presiz.",tags:["BOS","swing","EMA50","conf 84%"]},
   scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
   rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
-  macd_bollinger:{l:"📊 MACD+BB",d:"MACD kwa + Bollinger ekstrem.",tags:["MACD 12/26","BB 20/2","mean-rev","conf 78%"]},
-  breakout:{l:"💥 Breakout",d:"Donchian 20 periòd breakout + RSI.",tags:["channel 20","momentum","RSI filtre","conf 80%"]},
+  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA+RSI+MACD+BB+Stoch. 6+ pts.",tags:["EMA 20/50/200","RSI+Stoch","BB","6+ pts"]},
+  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: Trend+Volume+RSI+MACD+Breakout. 7+ pts.",tags:["EMA 9/21/50","Volume","MACD+BB","Breakout"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
@@ -2674,7 +2851,7 @@ async function doStart(){
   const body=getStartParams();
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
-  if(d.ok){msg("ctm","✓ BonheurBot SMART v5 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
+  if(d.ok){msg("ctm","✓ BonheurBot ELITE v6 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else msg("ctm","✗ "+d.error,false);
 }
 async function doStop(){
@@ -2815,5 +2992,5 @@ checkLogin();
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))
-    logger.info(f"BonheurBot Pro v5 SMART starting on port {port}")
+    logger.info(f"BonheurBot ELITE v6 starting on port {port}")
     app.run(host="0.0.0.0",port=port,debug=False,threaded=True)

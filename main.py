@@ -2205,6 +2205,15 @@ def admin_stop_user():
                 st["running"]=False; st["bot_id"]=None; stopped+=1
     return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
 
+async function admClearUser(uid){
+  if(!confirm(`Efase istorik ${uid}?`))return;
+  const token=getStoredToken();
+  const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
+  const d=await r.json();
+  alert(d.ok?d.msg:d.error);
+  if(d.ok)admRefresh();
+}
+
 @app.route("/api/admin/sessions", methods=["POST"])
 def admin_sessions():
     d=request.json or {}
@@ -2231,6 +2240,22 @@ def admin_clean_sessions():
 
 @app.route("/")
 def index(): return render_template_string(HTML)
+
+@app.route("/api/admin/clear_user", methods=["POST"])
+def admin_clear_user():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    uid_prefix = d.get("uid","").replace("...","")
+    cleared = 0
+    with _user_lock:
+        for uid, st in _user_states.items():
+            if uid.startswith(uid_prefix):
+                st["trades"]=[]
+                st["total_pnl"]=0.0
+                st["profit_sent"]=0.0
+                st["log"]=[]
+                cleared+=1
+    return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè efase"})
 
 HTML=r"""<!DOCTYPE html>
 <html>
@@ -2960,7 +2985,10 @@ async function admRefresh(){
     const d2=await r2.json();
     if(d2.ok){
       document.getElementById("adm-users-count").textContent=d2.total;
-      document.getElementById("adm-users-list").innerHTML=d2.total===0?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>':`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr><td style="color:#4A7080;font-size:10px">${u.uid}</td><td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td><td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td><td style="color:#00D4FF">$${u.balance}</td><td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td><td>${u.trades}</td><td>${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:"—"}</td></tr>`).join("")}</table>`;
+      document.getElementById("adm-users-list").innerHTML=d2.total===0?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>':`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr><td style="color:#4A7080;font-size:10px">${u.uid}</td><td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td><td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td><td style="color:#00D4FF">$${u.balance}</td><td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td><td>${u.trades}</td><td style="display:flex;gap:4px">
+  ${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■ STOP</button>`:""}
+  <button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
+</td>('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:"—"}</td></tr>`).join("")}</table>`;
     }
   }catch(e){}
   try{

@@ -1766,7 +1766,7 @@ def trading_loop(st, bot_id=None):
 
     fn = STRATEGIES.get(strategy, strat_confluence_elite)
 
-    wait_after  = tf + 30   # ← Redui 45→30 pou kòmanse pi vit
+    wait_after  = tf + 90  # ← Redui 45→30 pou kòmanse pi vit
     base_lot    = round(max(0.5, lot), 2)
     current_lot = base_lot
     consec_losses = 0
@@ -1912,18 +1912,18 @@ def trading_loop(st, bot_id=None):
                     time.sleep(wait_after)
 
                     bal_close = None
-                    for attempt in range(3):
+                    for attempt in range(5):
                         try:
                             nb = api.get_balance_sync()
                             if nb and nb>0 and abs(nb-bal_open)>0.01:
                                 bal_close=nb; break
-                            time.sleep(max(15, tf//4))
-                        except: time.sleep(15)
+                            time.sleep(max(30, tf//4))
+                        except: time.sleep(30)
 
                     if bal_close:
                         st["balance"] = bal_close
                         pnl = bal_close - bal_before
-                        if pnl>0: add_log(st, f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
+                        if pnl>0.10: add_log(st, f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
                         else: add_log(st, f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
                     else:
                         pnl = -(bal_before - bal_open)

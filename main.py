@@ -185,11 +185,6 @@ def calc_adx_full(candles, p=14):
 # Plis reliable pou Deriv synthetic — siyal klè
 # ═══════════════════════════════════════════════════════════
 def supertrend(candles, p=10, mult=3.0):
-    """
-    SuperTrend — indikatè ki ba siyal klè UP/DN
-    Trè bon pou Deriv Synthetic (R_10, R_25, R_50, R_100)
-    Retounen: ("BUY", "SELL", oswa "NONE"), konfidans
-    """
     if len(candles) < p+5:
         return "NONE", 0.0
 
@@ -197,7 +192,6 @@ def supertrend(candles, p=10, mult=3.0):
     lows   = [c["low"]   for c in candles]
     closes = [c["close"] for c in candles]
 
-    # Kalkil ATR
     trs = []
     for i in range(1, len(candles)):
         tr = max(
@@ -207,7 +201,6 @@ def supertrend(candles, p=10, mult=3.0):
         )
         trs.append(tr)
 
-    # ATR mwayèn
     atr_vals = []
     for i in range(p-1, len(trs)):
         atr_vals.append(sum(trs[i-p+1:i+1]) / p)
@@ -215,7 +208,6 @@ def supertrend(candles, p=10, mult=3.0):
     if not atr_vals:
         return "NONE", 0.0
 
-    # Kalkil bann yo
     n = len(atr_vals)
     hl2 = [(highs[i+1] + lows[i+1]) / 2 for i in range(n)]
 
@@ -229,18 +221,15 @@ def supertrend(candles, p=10, mult=3.0):
         upper[i] = min(upper_basic[i], upper[i-1]) if closes[i+p-1] <= upper[i-1] else upper_basic[i]
         lower[i] = max(lower_basic[i], lower[i-1]) if closes[i+p-1] >= lower[i-1] else lower_basic[i]
 
-    # Detèmine trend
     trend_up   = closes[-1] > lower[-1]
     trend_prev = closes[-2] > lower[-2] if len(closes) >= 2 else trend_up
 
-    # Kalkil distans (konfidans)
     price = closes[-1]
     if trend_up:
         dist = (price - lower[-1]) / max(atr_vals[-1], 0.0001)
         conf = min(0.92, 0.75 + min(dist * 0.04, 0.17))
-        # Nouvo siyal = prix travèse anba→anlè
         if not trend_prev:
-            return "BUY", min(0.92, conf + 0.05)  # Nouvo kwa → plis konfidans
+            return "BUY", min(0.92, conf + 0.05)
         return "BUY", conf
     else:
         dist = (upper[-1] - price) / max(atr_vals[-1], 0.0001)
@@ -251,13 +240,8 @@ def supertrend(candles, p=10, mult=3.0):
 
 # ═══════════════════════════════════════════════════════════
 # ██  NOUVO: CHANDELIER EXIT  ██
-# Siyal pou kontinye oswa sòti trend
 # ═══════════════════════════════════════════════════════════
 def chandelier_exit(candles, p=22, mult=3.0):
-    """
-    Chandelier Exit — idantifye chanjman trend
-    Retounen: direktyon + konfidans
-    """
     if len(candles) < p+2:
         return "NONE", 0.0
 
@@ -272,19 +256,16 @@ def chandelier_exit(candles, p=22, mult=3.0):
     highest_high = max(highs[-p:])
     lowest_low   = min(lows[-p:])
 
-    ce_long  = highest_high - mult * at   # Long exit level
-    ce_short = lowest_low   + mult * at   # Short exit level
+    ce_long  = highest_high - mult * at
+    ce_short = lowest_low   + mult * at
 
     price = closes[-1]
     prev  = closes[-2] if len(closes) >= 2 else price
 
-    # Siyal
     if price > ce_long and prev <= ce_long:
-        # Konfimasyon BUY solid
         gap = (price - ce_long) / max(at, 0.0001)
         return "BUY", min(0.90, 0.78 + min(gap * 0.04, 0.12))
     elif price < ce_short and prev >= ce_short:
-        # Konfimasyon SELL solid
         gap = (ce_short - price) / max(at, 0.0001)
         return "SELL", min(0.90, 0.78 + min(gap * 0.04, 0.12))
     elif price > ce_long:
@@ -296,17 +277,11 @@ def chandelier_exit(candles, p=22, mult=3.0):
 
 # ═══════════════════════════════════════════════════════════
 # ██  NOUVO: HEIKIN ASHI TREND  ██
-# Filtre pou elimine fò bwi mache
 # ═══════════════════════════════════════════════════════════
 def heikin_ashi_trend(candles, lookback=5):
-    """
-    Heikin Ashi bouji — montre trend pi klèman
-    5 bouji HA konsekitif nan menm direksyon = siyal solid
-    """
     if len(candles) < lookback + 3:
         return "NONE", 0.0
 
-    # Kalkil HA
     ha = []
     prev_o = (candles[0]["open"] + candles[0]["close"]) / 2
     prev_c = (candles[0]["open"] + candles[0]["high"] + candles[0]["low"] + candles[0]["close"]) / 4
@@ -320,27 +295,22 @@ def heikin_ashi_trend(candles, lookback=5):
         prev_o = ha_o
         prev_c = ha_c
 
-    # Gade dènye N bouji
     recent = ha[-lookback:]
     bullish = [b for b in recent if b["close"] > b["open"]]
     bearish = [b for b in recent if b["close"] < b["open"]]
 
-    # Tout bouji HA ap monte — trend solid
     if len(bullish) == lookback:
-        # Verifye bouji yo ap grandi (moman monte)
         bodies = [abs(b["close"] - b["open"]) for b in bullish]
-        growing = bodies[-1] >= bodies[0] * 0.7  # Pa diminye twòp
+        growing = bodies[-1] >= bodies[0] * 0.7
         conf = 0.83 if growing else 0.77
         return "BUY", conf
 
-    # Tout bouji HA ap desann
     if len(bearish) == lookback:
         bodies = [abs(b["close"] - b["open"]) for b in bearish]
         growing = bodies[-1] >= bodies[0] * 0.7
         conf = 0.83 if growing else 0.77
         return "SELL", conf
 
-    # Majorite (4/5)
     if len(bullish) >= lookback - 1:
         return "BUY", 0.72
     if len(bearish) >= lookback - 1:
@@ -350,14 +320,8 @@ def heikin_ashi_trend(candles, lookback=5):
 
 # ═══════════════════════════════════════════════════════════
 # ██  NOUVO: VWAP SIGNAL  ██
-# Volume-Weighted Average Price — bon pou entry
 # ═══════════════════════════════════════════════════════════
 def vwap_signal(candles, lookback=20):
-    """
-    VWAP — Pri mwayèn peze pa volim
-    BUY si pri anlè VWAP + trend monte
-    SELL si pri anba VWAP + trend desann
-    """
     if len(candles) < lookback:
         return "NONE", 0.0
 
@@ -561,14 +525,6 @@ def strat_scalping(c):
 
 # ═══════════════════════════════════════════════════════════
 # ██████  NOUVO: CONFLUENCE ELITE v6  ██████
-#
-# CHANJMAN MAJÈ vs v5:
-# 1. SuperTrend + Chandelier Exit + Heikin Ashi ajoute
-# 2. ADX sèyil: 12 minimòm (olye 18) — mache synthetic toujou mouvman
-# 3. Sèyil 3 strategies (olye 4) men peze yo diferan
-# 4. Tolerans pivot: 0.8% (olye 0.3%) — pi reyalis
-# 5. Scoring sistèm nòmal: chak strat peze ak wout espesyal
-# 6. Siyal RANGING oke si SuperTrend + HA dakò
 # ═══════════════════════════════════════════════════════════
 
 def calc_pivot_points(candles):
@@ -593,7 +549,7 @@ def pivot_signal(candles, trend):
     pv = calc_pivot_points(candles)
     if not pv: return False, 0.0
     price = candles[-1]["close"]
-    tol   = 0.008  # ← 0.8% tolerans (pi reyalis pou synthetic)
+    tol   = 0.008
 
     if trend == "TRENDING_UP":
         for lvl in [pv["s1"], pv["s2"], pv["fib_s1"], pv["fib_s2"], pv["pp"]]:
@@ -617,7 +573,6 @@ def market_regime(candles):
     e20 = ema(cl, 20)
     e50 = ema(cl, 50) if len(cl)>=50 else None
 
-    # ADX > 12 ase pou detekte trend nan mache synthetic
     if adx > 12 and pdi > mdi + 1:
         regime = "TRENDING_UP"; score = min(10, adx/3)
     elif adx > 12 and mdi > pdi + 1:
@@ -625,7 +580,7 @@ def market_regime(candles):
     elif atr_pct > 4.0:
         regime = "VOLATILE";    score = 2
     else:
-        regime = "RANGING";     score = 3  # ← RANGING jwenn score (3, pa 1)
+        regime = "RANGING";     score = 3
 
     if e50:
         if cl[-1] > e50[-1] and regime == "TRENDING_UP":  score = min(10, score+1.5)
@@ -634,19 +589,6 @@ def market_regime(candles):
     return regime, round(score, 1)
 
 def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
-    """
-    CONFLUENCE ELITE v6 — SuperTrend + HA + Chandelier + Classic
-    ──────────────────────────────────────────────────────────────
-    SIPÈYORITE vs v5:
-    • SuperTrend: siyal klè, pa twò bruye pou synthetic
-    • Heikin Ashi: 5 bouji konsekitif = trend solid
-    • Chandelier Exit: konfimasyon chanjman trend
-    • ADX sèyil: 12 (vs 18) → mache synthetic toujou mouvman
-    • 3 strategies dakò (vs 4) — plis siyal
-    • RANGING oke si SuperTrend + HA dakò (2 enpòtan)
-    • Konfidans final kalkile ak scoring
-    ──────────────────────────────────────────────────────────────
-    """
     if len(c) < 20: return "NONE", 0
 
     cl  = [x["close"] for x in c]
@@ -655,18 +597,16 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
 
     mid_price = sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
     atr_pct   = (at/mid_price*100) if mid_price>0 else 0
-    if atr_pct < 0.005: return "NONE", 0  # Mache twò mò — pa fè sa
+    if atr_pct < 0.005: return "NONE", 0
 
     adx, pdi, mdi = calc_adx_full(c, 14)
     regime, _ = market_regime(c)
 
-    # ── Kouri strategies NOUVO (pwa wo) ──────────────
     st_sig, st_conf = supertrend(c, p=10, mult=3.0)
     ha_sig, ha_conf = heikin_ashi_trend(c, lookback=5)
     ce_sig, ce_conf = chandelier_exit(c, p=22, mult=3.0)
     vw_sig, vw_conf = vwap_signal(c, lookback=20)
 
-    # ── Kouri strategies KLASIK ──────────────────────
     classic_fns = [
         (strat_ema,       1.4),
         (strat_rsi,       1.6),
@@ -685,7 +625,6 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     buy_cnt = sell_cnt = 0
     buy_confs = []; sell_confs = []
 
-    # Pwen pou nouvo strategies (pwa plis enpòtan)
     NEW_WEIGHT = 2.5
 
     if st_sig == "BUY"  and st_conf >= min_per_conf:
@@ -708,7 +647,6 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     elif vw_sig == "SELL" and vw_conf >= min_per_conf:
         sell_score += vw_conf * 1.8; sell_cnt += 1; sell_confs.append(vw_conf)
 
-    # Kouri strategies klasik
     for fn, w in classic_fns:
         try:
             s, conf = fn(c)
@@ -718,18 +656,12 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
                 sell_score+=conf*w; sell_cnt+=1; sell_confs.append(conf)
         except: pass
 
-    # ── RÈG SIYAL ──────────────────────────────────────
-    # Pou mache RANGING: bezwen SuperTrend + HA dakò
-    # Pou mache TRENDING: nòmal
-    # Pou mache VOLATILE: pa trade
-
     if regime == "VOLATILE":
         return "NONE", 0
 
-    dom_ratio  = 1.15  # Dominas minimòm
-    min_strats_req = min_strats  # Normalmman 3
+    dom_ratio  = 1.15
+    min_strats_req = min_strats
 
-    # Si mache RANGING → bezwen 2 pami (ST, HA, CE) dakò + 1 klasik
     if regime == "RANGING":
         new_sigs = [st_sig, ha_sig, ce_sig]
         buy_new  = sum(1 for s in new_sigs if s == "BUY")
@@ -749,7 +681,6 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
 
         return "NONE", 0
 
-    # TRENDING_UP → BUY
     if regime == "TRENDING_UP" and buy_cnt >= min_strats_req:
         if buy_score > sell_score * dom_ratio:
             in_pivot, piv_bonus = pivot_signal(c, "TRENDING_UP")
@@ -757,7 +688,6 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
             final = min(0.95, 0.75 + (buy_score / max(buy_cnt, 1) / 5.0) * 0.13 + piv_bonus + adx_bonus)
             return "BUY", round(final, 3)
 
-    # TRENDING_DN → SELL
     if regime == "TRENDING_DN" and sell_cnt >= min_strats_req:
         if sell_score > buy_score * dom_ratio:
             in_pivot, piv_bonus = pivot_signal(c, "TRENDING_DN")
@@ -769,19 +699,8 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
 
 # ═══════════════════════════════════════════════════════════
 # ██████  NOUVO: DERIV PRO ELITE v6  ██████
-#
-# Pwoblèm v5 rezoud:
-# 1. ADX sèyil: 12 minimòm (mache synthetic toujou mouvman)
-# 2. Score sèyil: 5.0/15 (pa 6.0) — plis siyal
-# 3. EMA verifye pandan 1 bouji sèlman (pa 2)
-# 4. SuperTrend ajoute kòm bonus pwen
-# 5. Plis tolerans pou EMA alignment
 # ═══════════════════════════════════════════════════════════
 def strat_deriv_pro_elite(c):
-    """
-    DERIV PRO ELITE v6 — Optimizasyon pou synthetic markets
-    Score 5.0/15 + ADX>12 + SuperTrend konfimasyon
-    """
     if len(c)<50: return "NONE",0
     cl=[x["close"] for x in c]
     hi=[x["high"] for x in c]
@@ -808,22 +727,19 @@ def strat_deriv_pro_elite(c):
     if at==0 or not mid_bb: return "NONE",0
 
     atr_pct=at/mid_bb*100
-    if atr_pct < 0.01: return "NONE",0  # Sèlman bloke si mache twò mò
+    if atr_pct < 0.01: return "NONE",0
     if atr_pct > 5.0:  return "NONE",0
 
-    # ADX sèyil redui a 12 pou synthetic
     adx,pdi,mdi=calc_adx_full(c,14)
     if adx < 12: return "NONE",0
 
-    # EMA trend — plis liberal (sèlman 1 bouji direksyon)
     trend_up   = (e9[-1]>e21[-1])
     trend_down = (e9[-1]<e21[-1])
     if e50:
-        trend_up   = trend_up   and cl[-1]>e50[-1]*0.998  # 0.2% tolerans
+        trend_up   = trend_up   and cl[-1]>e50[-1]*0.998
         trend_down = trend_down and cl[-1]<e50[-1]*1.002
     if not trend_up and not trend_down: return "NONE",0
 
-    # Verifye sèlman 1 bouji (pa 2 kòm anvan)
     if trend_up  and not (e9[-1]>e9[-2] or e21[-1]>e21[-2]): return "NONE",0
     if trend_down and not (e9[-1]<e9[-2] or e21[-1]<e21[-2]): return "NONE",0
 
@@ -837,10 +753,8 @@ def strat_deriv_pro_elite(c):
     last_range=max(c[-1]["high"]-c[-1]["low"],0.00001)
     body_ratio=last_body/last_range
 
-    # SuperTrend konfimasyon
     st_sig, _ = supertrend(c, p=10, mult=3.0)
 
-    # BUY SCORING — sèyil redui: 5.0/15
     if trend_up:
         score=0.0
 
@@ -855,7 +769,7 @@ def strat_deriv_pro_elite(c):
         elif 45<r<=55:      score+=2.0
         elif 55<r<=65:      score+=1.2
         elif r<25:          score+=2.5
-        elif r<70:          score+=0.8  # ← Nouvo: RSI<70 jwenn kèk pwen
+        elif r<70:          score+=0.8
 
         macd_ok=(m>sig_ and macd_hist>macd_hist_prev)
         if macd_ok and m>0: score+=2.5
@@ -878,23 +792,19 @@ def strat_deriv_pro_elite(c):
         if adx>=45:   score+=2.0
         elif adx>=35: score+=1.5
         elif adx>=25: score+=0.8
-        elif adx>=12: score+=0.3  # ← Nouvo: ADX 12-25 jwenn kèk pwen
+        elif adx>=12: score+=0.3
 
-        # SuperTrend bonus
-        if st_sig == "BUY": score += 2.0  # ← Bonus sipètrend (enpòtan!)
+        if st_sig == "BUY": score += 2.0
 
-        # Pivot bonus
         in_piv, piv_b = pivot_signal(c, "TRENDING_UP")
         if in_piv: score += 1.5
 
-        # SÈYIL: 5.0 (pa 6.0)
         if score >= 5.0:
             pct = score/15.0
             conf = min(0.95, 0.76 + pct*0.25)
             if adx>=50: conf=min(0.95,conf+0.02)
             return "BUY", round(conf, 3)
 
-    # SELL SCORING — sèyil 5.0/15
     if trend_down:
         score=0.0
 
@@ -909,7 +819,7 @@ def strat_deriv_pro_elite(c):
         elif 45<=r<55:      score+=2.0
         elif 35<=r<45:      score+=1.2
         elif r>75:          score+=2.5
-        elif r>30:          score+=0.8  # ← Nouvo: RSI>30 jwenn kèk pwen
+        elif r>30:          score+=0.8
 
         macd_ok=(m<sig_ and macd_hist<macd_hist_prev)
         if macd_ok and m<0: score+=2.5
@@ -934,10 +844,8 @@ def strat_deriv_pro_elite(c):
         elif adx>=25: score+=0.8
         elif adx>=12: score+=0.3
 
-        # SuperTrend bonus
         if st_sig == "SELL": score += 2.0
 
-        # Pivot bonus
         in_piv, piv_b = pivot_signal(c, "TRENDING_DN")
         if in_piv: score += 1.5
 
@@ -950,78 +858,199 @@ def strat_deriv_pro_elite(c):
     return "NONE", 0
 
 # ═══════════════════════════════════════════════════════════
-# PIVOT POINTS (konsève oryajinal)
-# ═══════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════
 # STRATEGY ESPESYAL BINANCE (konsève oryajinal)
 # ═══════════════════════════════════════════════════════════
 def strat_binance_gold(c):
+    """
+    Gold/Metals — AMELYORE:
+    1. EMA200 filtre obligatwa (trend long term)
+    2. ADX>20 — pa trade mache fèb
+    3. Volume konfirmasyon
+    4. Pullback entry (pa chase prix)
+    5. Sèyil 7pts (pi strik)
+    """
     if len(c)<60: return "NONE",0
     cl=[x["close"] for x in c]
     hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
-    e20=ema(cl,20); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else ema(cl,50)
+    vol=[x.get("volume",0) for x in c]
+
+    e20=ema(cl,20); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
     if not e20 or not e50 or not e200: return "NONE",0
     r=rsi(cl,14); at=atr(c); m,sig_=macd(cl)
     up,mid,lo=bb(cl,20,2.0); k=stoch_k(c,14)
-    trend_up = e20[-1]>e50[-1] and e50[-1]>e200[-1]
-    trend_dn  = e20[-1]<e50[-1] and e50[-1]<e200[-1]
+    adx_v,pdi_v,mdi_v = calc_adx_full(c,14)
+
     if not at or not mid: return "NONE",0
-    vol_ok = at/mid*100 > 0.05
-    if not vol_ok: return "NONE",0
+
+    # ── Filtre 1: ADX > 20 (trend ase fò) ─────────────────
+    if adx_v < 20: return "NONE", 0
+
+    # ── Filtre 2: Volume ok (pa mache dòmi) ───────────────
+    avg_vol = sum(vol[-20:])/20 if len(vol)>=20 else 1
+    if avg_vol > 0 and vol[-1] < avg_vol * 0.5: return "NONE", 0
+
+    # ── Trend long term (EMA200) ───────────────────────────
+    trend_up = e20[-1]>e50[-1] and e50[-1]>e200[-1] and cl[-1]>e200[-1]
+    trend_dn = e20[-1]<e50[-1] and e50[-1]<e200[-1] and cl[-1]<e200[-1]
+
+    # ── Filtre 3: Pa trade kont EMA200 ────────────────────
+    if not trend_up and not trend_dn: return "NONE", 0
+
+    atr_pct = at/mid*100
+    if atr_pct < 0.03: return "NONE", 0  # Mache twò kalm
+
     buy_pts=0; sell_pts=0
-    if trend_up: buy_pts+=2
-    if trend_dn: sell_pts+=2
-    if r<35: buy_pts+=2
-    if r>65: sell_pts+=2
-    if m>sig_ and m>0: buy_pts+=1
-    if m<sig_ and m<0: sell_pts+=1
-    if lo and cl[-1]<=lo*1.001: buy_pts+=2
-    if up and cl[-1]>=up*0.999: sell_pts+=2
-    if k<25: buy_pts+=1
-    if k>75: sell_pts+=1
-    hi20=max(hi[-20:]); lo20=min(lo_[-20:])
-    if cl[-1]>hi20*0.999 and cl[-2]<hi20: sell_pts+=1
-    if cl[-1]<lo20*1.001 and cl[-2]>lo20: buy_pts+=1
-    if buy_pts>=6 and buy_pts>sell_pts+2: return "BUY", min(0.88, 0.70+buy_pts*0.02)
-    if sell_pts>=6 and sell_pts>buy_pts+2: return "SELL", min(0.88, 0.70+sell_pts*0.02)
+
+    # Trend (pwa wo)
+    if trend_up: buy_pts+=3
+    if trend_dn: sell_pts+=3
+
+    # ADX fò = plis pwen
+    if adx_v>=35: buy_pts+=2 if trend_up else 0; sell_pts+=2 if trend_dn else 0
+    elif adx_v>=25: buy_pts+=1 if trend_up else 0; sell_pts+=1 if trend_dn else 0
+
+    # RSI — chèche pullback (zone 35-55 pou BUY, 45-65 pou SELL)
+    if trend_up and 30<=r<=55: buy_pts+=3    # Pullback BUY
+    elif trend_up and r<30:    buy_pts+=2    # Oversold BUY
+    if trend_dn and 45<=r<=70: sell_pts+=3   # Pullback SELL
+    elif trend_dn and r>70:    sell_pts+=2   # Overbought SELL
+
+    # MACD
+    if m>sig_ and m>0: buy_pts+=2
+    if m<sig_ and m<0: sell_pts+=2
+
+    # Bollinger — pullback vè mwayen
+    if lo and cl[-1]<=lo*1.002: buy_pts+=3   # Touche bann anba
+    elif mid and cl[-1]<mid*1.005: buy_pts+=1
+    if up and cl[-1]>=up*0.998: sell_pts+=3   # Touche bann anlè
+    elif mid and cl[-1]>mid*0.995: sell_pts+=1
+
+    # Stochastic
+    if k<25: buy_pts+=2
+    elif k<35: buy_pts+=1
+    if k>75: sell_pts+=2
+    elif k>65: sell_pts+=1
+
+    # Volume surge = konfirmasyon
+    if vol[-1] > avg_vol*1.8:
+        if buy_pts > sell_pts: buy_pts+=2
+        elif sell_pts > buy_pts: sell_pts+=2
+
+    # SuperTrend konfimasyon
+    st_sig, st_c = supertrend(c, p=10, mult=3.0)
+    if st_sig=="BUY": buy_pts+=2
+    if st_sig=="SELL": sell_pts+=2
+
+    # Sèyil 7pts (pi strik ke anvan — te 6)
+    if buy_pts>=7 and buy_pts>sell_pts+2 and trend_up:
+        return "BUY", min(0.91, 0.72+buy_pts*0.018)
+    if sell_pts>=7 and sell_pts>buy_pts+2 and trend_dn:
+        return "SELL", min(0.91, 0.72+sell_pts*0.018)
     return "NONE",0
 
 def strat_binance_crypto(c):
+    """
+    Crypto — AMELYORE:
+    1. EMA200 filtre (pa trade kont trend long)
+    2. ADX>18 minimòm
+    3. Volume surge obligatwa pou breakout
+    4. Pullback entry — pa chase prix
+    5. Sèyil 8pts
+    """
     if len(c)<50: return "NONE",0
     cl=[x["close"] for x in c]
     hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
     vol=[x.get("volume",0) for x in c]
+
     e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50)
+    e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
     if not e9 or not e21 or not e50: return "NONE",0
     r=rsi(cl,14); at=atr(c); m,sig_=macd(cl)
     up,mid,lo=bb(cl,20,2.0); k=stoch_k(c,14)
+    adx_v,pdi_v,mdi_v = calc_adx_full(c,14)
+
     avg_vol=sum(vol[-20:])/20 if len(vol)>=20 else 1
     curr_vol=vol[-1] if vol[-1]>0 else avg_vol
-    vol_surge = curr_vol > avg_vol*1.5
+
+    # ── Filtre 1: ADX > 18 ────────────────────────────────
+    if adx_v < 18: return "NONE", 0
+
+    # ── Filtre 2: Volume minnimòm ─────────────────────────
+    if avg_vol > 0 and curr_vol < avg_vol * 0.4: return "NONE", 0
+
+    # ── Filtre 3: EMA200 — pa trade kont trend long ───────
+    long_bull = e200 and cl[-1] > e200[-1]
+    long_bear = e200 and cl[-1] < e200[-1]
+
     buy_pts=0; sell_pts=0
-    if e9[-1]>e21[-1]>e50[-1]: buy_pts+=3
-    if e9[-1]<e21[-1]<e50[-1]: sell_pts+=3
-    if len(e9)>=2 and e9[-2]<e21[-2] and e9[-1]>e21[-1]: buy_pts+=2
-    if len(e9)>=2 and e9[-2]>e21[-2] and e9[-1]<e21[-1]: sell_pts+=2
-    if r<30: buy_pts+=2
+
+    # Trend EMA 9/21/50
+    if e9[-1]>e21[-1]>e50[-1]:
+        buy_pts+=3
+        if long_bull: buy_pts+=2   # EMA200 konfime
+    if e9[-1]<e21[-1]<e50[-1]:
+        sell_pts+=3
+        if long_bear: sell_pts+=2
+
+    # Kwa EMA (siyal ki pi fò)
+    if len(e9)>=2 and e9[-2]<e21[-2] and e9[-1]>e21[-1]: buy_pts+=3
+    if len(e9)>=2 and e9[-2]>e21[-2] and e9[-1]<e21[-1]: sell_pts+=3
+
+    # ADX fò
+    if adx_v>=35: buy_pts+=2 if pdi_v>mdi_v else 0; sell_pts+=2 if mdi_v>pdi_v else 0
+    elif adx_v>=25: buy_pts+=1 if pdi_v>mdi_v else 0; sell_pts+=1 if mdi_v>pdi_v else 0
+
+    # RSI — pullback zone
+    if 30<=r<=50 and long_bull: buy_pts+=3
+    elif r<30: buy_pts+=2
     elif r<45: buy_pts+=1
-    if r>70: sell_pts+=2
+    if 50<=r<=70 and long_bear: sell_pts+=3
+    elif r>70: sell_pts+=2
     elif r>55: sell_pts+=1
+
+    # MACD
     if m>sig_ and m>0: buy_pts+=2
+    elif m>sig_: buy_pts+=1
     if m<sig_ and m<0: sell_pts+=2
-    if lo and cl[-1]<=lo: buy_pts+=2
-    if up and cl[-1]>=up: sell_pts+=2
-    if k<20: buy_pts+=1
-    if k>80: sell_pts+=1
+    elif m<sig_: sell_pts+=1
+
+    # Bollinger
+    if lo and cl[-1]<=lo: buy_pts+=3
+    elif lo and cl[-1]<=lo*1.01: buy_pts+=1
+    if up and cl[-1]>=up: sell_pts+=3
+    elif up and cl[-1]>=up*0.99: sell_pts+=1
+
+    # Stochastic
+    if k<20: buy_pts+=2
+    elif k<35: buy_pts+=1
+    if k>80: sell_pts+=2
+    elif k>65: sell_pts+=1
+
+    # Volume surge = konfirmasyon solid
+    vol_surge = curr_vol > avg_vol * 2.0
     if vol_surge:
-        if buy_pts>sell_pts: buy_pts+=1
-        else: sell_pts+=1
+        if buy_pts > sell_pts: buy_pts+=3
+        elif sell_pts > buy_pts: sell_pts+=3
+
+    # Breakout (volume obligatwa pou breakout reyèl)
     hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
-    if cl[-1]>hi20 and cl[-2]<=hi20: buy_pts+=2
-    if cl[-1]<lo20 and cl[-2]>=lo20: sell_pts+=2
-    if buy_pts>=7 and buy_pts>sell_pts+2: return "BUY", min(0.90, 0.68+buy_pts*0.02)
-    if sell_pts>=7 and sell_pts>buy_pts+2: return "SELL", min(0.90, 0.68+sell_pts*0.02)
+    if cl[-1]>hi20 and cl[-2]<=hi20:
+        if curr_vol > avg_vol * 1.5: buy_pts+=3  # Breakout + volume
+        else: buy_pts+=1  # Breakout san volume = fèb
+    if cl[-1]<lo20 and cl[-2]>=lo20:
+        if curr_vol > avg_vol * 1.5: sell_pts+=3
+        else: sell_pts+=1
+
+    # SuperTrend
+    st_sig, _ = supertrend(c, p=10, mult=3.0)
+    if st_sig=="BUY": buy_pts+=2
+    if st_sig=="SELL": sell_pts+=2
+
+    # Sèyil 8pts (pi strik)
+    if buy_pts>=8 and buy_pts>sell_pts+2:
+        return "BUY", min(0.92, 0.70+buy_pts*0.016)
+    if sell_pts>=8 and sell_pts>buy_pts+2:
+        return "SELL", min(0.92, 0.70+sell_pts*0.016)
     return "NONE",0
 
 def strat_confluence_binance(c, symbol="BTCUSDT"):
@@ -1390,21 +1419,135 @@ class BinanceClient:
             if f["filterType"]=="LOT_SIZE": return float(f["minQty"])
         return 0.001
 
-    def place_trade(self, symbol, direction, amount_usdt=10.0):
-        from binance.enums import SIDE_BUY,SIDE_SELL
-        ticker=self.c.get_symbol_ticker(symbol=symbol)
-        price=float(ticker["price"])
-        precision=self.get_qty_precision(symbol)
-        min_qty=self.get_min_qty(symbol)
-        min_notional=self.get_min_notional(symbol)
-        qty=round(amount_usdt/price,precision)
-        qty=max(qty,min_qty)
-        notional=qty*price
-        if notional < min_notional:
-            qty=round(min_notional/price*1.01, precision)
-            qty=max(qty, min_qty)
-        side=SIDE_BUY if direction=="BUY" else SIDE_SELL
-        return self.c.order_market(symbol=symbol,side=side,quantity=qty)
+    def get_price_precision(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 2
+        for f in info.get("filters", []):
+            if f["filterType"] == "PRICE_FILTER":
+                tick = float(f["tickSize"])
+                if tick >= 1: return 0
+                elif tick >= 0.1: return 1
+                elif tick >= 0.01: return 2
+                elif tick >= 0.001: return 3
+                else: return 4
+        return 2
+
+    def place_trade(self, symbol, direction, amount_usdt=10.0,
+                    sl_pct=0.018, tp_pct=0.035):
+        """
+        Limit order entry + OCO (Stop Loss + Take Profit) otomatik.
+        sl_pct=1.8%  Stop Loss  |  tp_pct=3.5%  Take Profit
+        """
+        from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
+        ticker  = self.c.get_symbol_ticker(symbol=symbol)
+        price   = float(ticker["price"])
+        pp      = self.get_price_precision(symbol)
+        qp      = self.get_qty_precision(symbol)
+        min_qty = self.get_min_qty(symbol)
+        min_not = self.get_min_notional(symbol)
+
+        # Kalkil qty
+        qty = round(amount_usdt / price, qp)
+        qty = max(qty, min_qty)
+        if qty * price < min_not:
+            qty = round(min_not / price * 1.01, qp)
+            qty = max(qty, min_qty)
+
+        side = SIDE_BUY if direction == "BUY" else SIDE_SELL
+
+        # ── Limit entry: 0.05% meyè ke mache ──────────────
+        if direction == "BUY":
+            limit_price = round(price * 1.0005, pp)   # yon ti kras anlè pou fill rapid
+            sl_price    = round(price * (1 - sl_pct), pp)
+            tp_price    = round(price * (1 + tp_pct), pp)
+        else:
+            limit_price = round(price * 0.9995, pp)
+            sl_price    = round(price * (1 + sl_pct), pp)
+            tp_price    = round(price * (1 - tp_pct), pp)
+
+        # ── Plase Limit order ──────────────────────────────
+        entry_order = self.c.order_limit(
+            symbol=symbol, side=side, quantity=qty,
+            price=str(limit_price), timeInForce=TIME_IN_FORCE_GTC
+        )
+        logger.info(f"Binance LIMIT {direction} {symbol} qty={qty} @ {limit_price} | SL={sl_price} TP={tp_price}")
+
+        # ── Tann fill (max 90 sek) ─────────────────────────
+        oid = entry_order.get("orderId")
+        filled = False
+        for _ in range(18):
+            time.sleep(5)
+            try:
+                status = self.c.get_order(symbol=symbol, orderId=oid)
+                if status["status"] == "FILLED":
+                    filled = True; break
+                elif status["status"] in ("CANCELED","EXPIRED","REJECTED"):
+                    break
+            except: pass
+
+        if not filled:
+            # Anile limit si pa fill — tonbe sou market
+            try: self.c.cancel_order(symbol=symbol, orderId=oid)
+            except: pass
+            logger.info(f"Limit pa fill — market order fallback {symbol}")
+            return self.c.order_market(symbol=symbol, side=side, quantity=qty)
+
+        # ── Plase OCO (SL + TP) ────────────────────────────
+        opp_side = SIDE_SELL if direction == "BUY" else SIDE_BUY
+        try:
+            oco = self.c.order_oco_sell(
+                symbol=symbol,
+                quantity=qty,
+                price=str(tp_price),
+                stopPrice=str(sl_price),
+                stopLimitPrice=str(round(sl_price * (0.998 if direction=="BUY" else 1.002), pp)),
+                stopLimitTimeInForce=TIME_IN_FORCE_GTC
+            ) if direction == "BUY" else self.c.order_oco_buy(
+                symbol=symbol,
+                quantity=qty,
+                price=str(tp_price),
+                stopPrice=str(sl_price),
+                stopLimitPrice=str(round(sl_price * 1.002, pp)),
+                stopLimitTimeInForce=TIME_IN_FORCE_GTC
+            )
+            logger.info(f"OCO plase: TP={tp_price} SL={sl_price}")
+        except Exception as e:
+            logger.warning(f"OCO echwe ({e}) — SL/TP manyèl")
+
+        return entry_order
+
+    def wait_oco_result(self, symbol, qty, direction, sl_pct, tp_pct, timeout_secs=3600):
+        """
+        Tann OCO fèmen (SL oswa TP touche).
+        Retounen pnl estimasyon.
+        """
+        ticker = self.c.get_symbol_ticker(symbol=symbol)
+        entry  = float(ticker["price"])
+        tp_tgt = entry * (1 + tp_pct) if direction == "BUY" else entry * (1 - tp_pct)
+        sl_tgt = entry * (1 - sl_pct) if direction == "BUY" else entry * (1 + sl_pct)
+
+        start = time.time()
+        while time.time() - start < timeout_secs:
+            time.sleep(30)
+            try:
+                cur = float(self.c.get_symbol_ticker(symbol=symbol)["price"])
+                if direction == "BUY":
+                    if cur >= tp_tgt:
+                        return qty * entry * tp_pct   # TP touche
+                    if cur <= sl_tgt:
+                        return -qty * entry * sl_pct  # SL touche
+                else:
+                    if cur <= tp_tgt:
+                        return qty * entry * tp_pct
+                    if cur >= sl_tgt:
+                        return -qty * entry * sl_pct
+            except: pass
+        # Timeout — kalkil pnl reyèl
+        try:
+            cur = float(self.c.get_symbol_ticker(symbol=symbol)["price"])
+            return qty * (cur - entry) if direction == "BUY" else qty * (entry - cur)
+        except:
+            return 0.0
 
     def send_profit(self, amount):
         try:
@@ -1413,6 +1556,184 @@ class BinanceClient:
             return r
         except Exception as e:
             logger.error(f"Profit transfer: {e}"); return None
+
+# ═══════════════════════════════════════════════════════════
+# ██  NOUVO: BINANCE US CLIENT  ██
+# Menm fonksyonalite kòm BinanceClient men konekte sou
+# api.binance.us (Binance US — pour itilizatè Ameriken)
+# ═══════════════════════════════════════════════════════════
+class BinanceUSClient:
+    """Binance.US — Konekte sou api.binance.us via tld='us'"""
+    def __init__(self, key, secret):
+        from binance.client import Client
+        self.c = Client(key, secret, tld="us")
+
+    def connect(self):
+        for b in self.c.get_account()["balances"]:
+            if b["asset"] == "USDT": return float(b["free"])
+        return 0.0
+
+    @property
+    def balance(self):
+        try:
+            for b in self.c.get_account()["balances"]:
+                if b["asset"] == "USDT": return float(b["free"])
+        except: pass
+        return 0.0
+
+    def get_candles(self, symbol="BTCUSDT", interval="15m", limit=200):
+        k = self.c.get_klines(symbol=symbol, interval=interval, limit=limit)
+        return [{"open":float(x[1]),"high":float(x[2]),"low":float(x[3]),"close":float(x[4]),"volume":float(x[5]),"time":x[0]} for x in k]
+
+    def get_symbol_info_cached(self, symbol):
+        try: return self.c.get_symbol_info(symbol)
+        except: return None
+
+    def get_min_notional(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 10.0
+        for f in info.get("filters", []):
+            if f["filterType"] == "MIN_NOTIONAL": return float(f.get("minNotional", "10"))
+            if f["filterType"] == "NOTIONAL":     return float(f.get("minNotional", "10"))
+        return 10.0
+
+    def get_qty_precision(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 3
+        for f in info.get("filters", []):
+            if f["filterType"] == "LOT_SIZE":
+                step = float(f["stepSize"])
+                if step >= 1: return 0
+                elif step >= 0.1: return 1
+                elif step >= 0.01: return 2
+                elif step >= 0.001: return 3
+                else: return 4
+        return 3
+
+    def get_min_qty(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 0.001
+        for f in info.get("filters", []):
+            if f["filterType"] == "LOT_SIZE": return float(f["minQty"])
+        return 0.001
+
+    def get_price_precision(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 2
+        for f in info.get("filters", []):
+            if f["filterType"] == "PRICE_FILTER":
+                tick = float(f["tickSize"])
+                if tick >= 1: return 0
+                elif tick >= 0.1: return 1
+                elif tick >= 0.01: return 2
+                elif tick >= 0.001: return 3
+                else: return 4
+        return 2
+
+    def place_trade(self, symbol, direction, amount_usdt=10.0,
+                    sl_pct=0.018, tp_pct=0.035):
+        """
+        Limit order entry + OCO (Stop Loss + Take Profit) otomatik.
+        sl_pct=1.8%  Stop Loss  |  tp_pct=3.5%  Take Profit
+        """
+        from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
+        ticker  = self.c.get_symbol_ticker(symbol=symbol)
+        price   = float(ticker["price"])
+        pp      = self.get_price_precision(symbol)
+        qp      = self.get_qty_precision(symbol)
+        min_qty = self.get_min_qty(symbol)
+        min_not = self.get_min_notional(symbol)
+
+        qty = round(amount_usdt / price, qp)
+        qty = max(qty, min_qty)
+        if qty * price < min_not:
+            qty = round(min_not / price * 1.01, qp)
+            qty = max(qty, min_qty)
+
+        side = SIDE_BUY if direction == "BUY" else SIDE_SELL
+
+        if direction == "BUY":
+            limit_price = round(price * 1.0005, pp)
+            sl_price    = round(price * (1 - sl_pct), pp)
+            tp_price    = round(price * (1 + tp_pct), pp)
+        else:
+            limit_price = round(price * 0.9995, pp)
+            sl_price    = round(price * (1 + sl_pct), pp)
+            tp_price    = round(price * (1 - tp_pct), pp)
+
+        entry_order = self.c.order_limit(
+            symbol=symbol, side=side, quantity=qty,
+            price=str(limit_price), timeInForce=TIME_IN_FORCE_GTC
+        )
+        logger.info(f"BinanceUS LIMIT {direction} {symbol} qty={qty} @ {limit_price} | SL={sl_price} TP={tp_price}")
+
+        oid = entry_order.get("orderId")
+        filled = False
+        for _ in range(18):
+            time.sleep(5)
+            try:
+                status = self.c.get_order(symbol=symbol, orderId=oid)
+                if status["status"] == "FILLED":
+                    filled = True; break
+                elif status["status"] in ("CANCELED","EXPIRED","REJECTED"):
+                    break
+            except: pass
+
+        if not filled:
+            try: self.c.cancel_order(symbol=symbol, orderId=oid)
+            except: pass
+            logger.info(f"Limit pa fill — market fallback {symbol}")
+            return self.c.order_market(symbol=symbol, side=side, quantity=qty)
+
+        opp_side = SIDE_SELL if direction == "BUY" else SIDE_BUY
+        try:
+            oco = self.c.order_oco_sell(
+                symbol=symbol, quantity=qty,
+                price=str(tp_price), stopPrice=str(sl_price),
+                stopLimitPrice=str(round(sl_price * (0.998 if direction=="BUY" else 1.002), pp)),
+                stopLimitTimeInForce=TIME_IN_FORCE_GTC
+            ) if direction == "BUY" else self.c.order_oco_buy(
+                symbol=symbol, quantity=qty,
+                price=str(tp_price), stopPrice=str(sl_price),
+                stopLimitPrice=str(round(sl_price * 1.002, pp)),
+                stopLimitTimeInForce=TIME_IN_FORCE_GTC
+            )
+            logger.info(f"OCO plase: TP={tp_price} SL={sl_price}")
+        except Exception as e:
+            logger.warning(f"OCO echwe ({e}) — SL/TP manyèl")
+
+        return entry_order
+
+    def wait_oco_result(self, symbol, qty, direction, sl_pct, tp_pct, timeout_secs=3600):
+        ticker = self.c.get_symbol_ticker(symbol=symbol)
+        entry  = float(ticker["price"])
+        tp_tgt = entry * (1 + tp_pct) if direction == "BUY" else entry * (1 - tp_pct)
+        sl_tgt = entry * (1 - sl_pct) if direction == "BUY" else entry * (1 + sl_pct)
+        start  = time.time()
+        while time.time() - start < timeout_secs:
+            time.sleep(30)
+            try:
+                cur = float(self.c.get_symbol_ticker(symbol=symbol)["price"])
+                if direction == "BUY":
+                    if cur >= tp_tgt: return qty * entry * tp_pct
+                    if cur <= sl_tgt: return -qty * entry * sl_pct
+                else:
+                    if cur <= tp_tgt: return qty * entry * tp_pct
+                    if cur >= sl_tgt: return -qty * entry * sl_pct
+            except: pass
+        try:
+            cur = float(self.c.get_symbol_ticker(symbol=symbol)["price"])
+            return qty * (cur - entry) if direction == "BUY" else qty * (entry - cur)
+        except:
+            return 0.0
+
+    def send_profit(self, amount):
+        try:
+            r = self.c.withdraw(coin="USDT", address=PROFIT_WALLET, amount=amount, network="ERC20")
+            logger.info(f"Profit sent (BinanceUS): ${amount}")
+            return r
+        except Exception as e:
+            logger.error(f"Profit transfer BinanceUS: {e}"); return None
 
 # ═══════════════════════════════════════════════════════════
 # DIGITS — konsève oryajinal (pa chanje)
@@ -1626,13 +1947,20 @@ def binance_trading_loop(st, bot_id=None):
     lot=float(cfg.get("lot",11.0))
     tf=int(cfg.get("tf_secs",900))
     min_conf=float(cfg.get("min_conf",0.75))
-    is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper()
+
+    # ── SL/TP pousantaj ────────────────────────────────────
+    # Or/metals: SL 1.5% / TP 3.0% (mwens volatil)
+    # Crypto:    SL 2.0% / TP 4.0% (plis volatil)
+    is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper() or "XAG" in symbol.upper()
+    SL_PCT  = 0.015 if is_gold else 0.020
+    TP_PCT  = 0.030 if is_gold else 0.040
+
     if strategy=="binance_gold" or is_gold:
         fn = lambda c: strat_binance_gold(c)
-        add_log(st,f"🥇 Gold Mode | {symbol} | TF:{tf//60}min")
+        add_log(st,f"🥇 Gold Mode | {symbol} | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}%")
     elif strategy=="binance_crypto":
         fn = lambda c: strat_binance_crypto(c)
-        add_log(st,f"🪙 Crypto Mode | {symbol} | TF:{tf//60}min")
+        add_log(st,f"🪙 Crypto Mode | {symbol} | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}%")
     elif strategy=="confluence":
         fn = lambda c: strat_confluence_binance(c, symbol)
         add_log(st,f"🔥 Confluence Binance | {symbol} | 4 konfirm")
@@ -1644,7 +1972,7 @@ def binance_trading_loop(st, bot_id=None):
     base_lot=max(11.0,lot); current_lot=base_lot
     consec_losses=0; total_lost=0.0
 
-    add_log(st,f"🚀 Binance Bot | Base:${base_lot} | Conf:{min_conf:.0%}")
+    add_log(st,f"🚀 Binance ELITE | Limit Order + OCO SL/TP | Base:${base_lot} | Conf:{min_conf:.0%}")
 
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id:
@@ -1673,7 +2001,7 @@ def binance_trading_loop(st, bot_id=None):
                 min_notional=api.get_min_notional(symbol)
                 if current_lot < min_notional*1.05:
                     current_lot=round(min_notional*1.1,2)
-                    add_log(st,f"ℹ Mise ajiste pou minimum: ${current_lot:.2f}","WARN")
+                    add_log(st,f"ℹ Mise ajiste: ${current_lot:.2f}","WARN")
             except: min_notional=10.0
 
             if st["balance"] < current_lot:
@@ -1681,33 +2009,68 @@ def binance_trading_loop(st, bot_id=None):
                 current_lot=base_lot; consec_losses=0; total_lost=0.0
                 time.sleep(30); continue
 
+            # ── Pran bouji + kouri strategy ────────────────
             candles=api.get_candles(symbol,iv,200)
             if len(candles)<50:
                 add_log(st,f"Pa ase done ({len(candles)}) — tann...","WARN")
                 time.sleep(60); continue
 
-            add_log(st,f"📡 {len(candles)} bouji | {symbol} {iv}")
+            # ── Filtre trend long term (EMA200) ───────────
+            cl_vals=[x["close"] for x in candles]
+            e200_v=ema(cl_vals,200) if len(cl_vals)>=200 else ema(cl_vals,100)
+            adx_v,pdi_v,mdi_v=calc_adx_full(candles,14)
+
+            add_log(st,f"📡 {len(candles)} bouji | {symbol} {iv} | ADX:{adx_v:.0f}")
+
             sig,conf=fn(candles)
-            add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%}")
+            add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | ADX:{adx_v:.0f}")
 
             if sig=="NONE" or conf<min_conf:
-                add_log(st,f"⏭ Siyal fèb ({conf:.0%}) — tann...")
+                add_log(st,f"⏭ Siyal fèb ({conf:.0%}) — tann pwochen bouji...")
                 time.sleep(tf); continue
 
+            # ── Filtre final: pa trade kont EMA200 ────────
+            if e200_v:
+                if sig=="BUY" and cl_vals[-1] < e200_v[-1]*0.995:
+                    add_log(st,f"⛔ REJTE BUY — Prix ANBA EMA200 (trend long = SELL)","WARN")
+                    time.sleep(tf); continue
+                if sig=="SELL" and cl_vals[-1] > e200_v[-1]*1.005:
+                    add_log(st,f"⛔ REJTE SELL — Prix ANLÈ EMA200 (trend long = BUY)","WARN")
+                    time.sleep(tf); continue
+
             entry=candles[-1]["close"]
-            add_log(st,f"⚡ {sig} @ {entry:.4f} | Conf:{conf:.0%} | Mise:${current_lot:.2f}")
+            sl_dol=round(current_lot*SL_PCT,2)
+            tp_dol=round(current_lot*TP_PCT,2)
+            add_log(st,
+                f"⚡ {sig} @ {entry:.4f} | Conf:{conf:.0%} | "
+                f"Mise:${current_lot:.2f} | SL:-${sl_dol} | TP:+${tp_dol}")
 
             bal_before=api.balance; pnl=0.0; ok=False
+            qty=0.0
             try:
-                api.place_trade(symbol,sig,current_lot)
+                # Kalkil qty pou wait_oco_result
+                qty=round(current_lot/entry, api.get_qty_precision(symbol))
+                qty=max(qty, api.get_min_qty(symbol))
+
+                # Plase Limit order + OCO SL/TP
+                order=api.place_trade(symbol, sig, current_lot, SL_PCT, TP_PCT)
                 ok=True
-                add_log(st,f"✅ Trade ouvert | Ap tann {tf//60}min...","SUCCESS")
-                time.sleep(tf)
+                add_log(st,
+                    f"✅ Limit+OCO plase | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}% | "
+                    f"Ap tann rezilta...","SUCCESS")
+
+                # Tann SL oswa TP touche (max 4 è = 1 sesyon trading)
+                max_wait = max(tf*4, 3600)
+                pnl = api.wait_oco_result(symbol, qty, sig, SL_PCT, TP_PCT, timeout_secs=max_wait)
+
                 bal_after=api.balance
                 st["balance"]=bal_after
-                pnl=bal_after-bal_before
-                if pnl>0: add_log(st,f"💰 GENYEN +${pnl:.4f} | Bal:${bal_after:.2f}","SUCCESS")
-                else: add_log(st,f"❌ PÈDI ${abs(pnl):.4f} | Bal:${bal_after:.2f}","WARN")
+
+                if pnl>0:
+                    add_log(st,f"💰 TP TOUCHE! +${pnl:.4f} | Bal:${bal_after:.2f}","SUCCESS")
+                else:
+                    add_log(st,f"🛑 SL TOUCHE ${abs(pnl):.4f} | Bal:${bal_after:.2f}","WARN")
+
             except Exception as e:
                 add_log(st,f"Trade echwe: {e}","ERROR")
                 time.sleep(30); continue
@@ -1716,20 +2079,22 @@ def binance_trading_loop(st, bot_id=None):
                 if pnl>0:
                     current_lot=base_lot; consec_losses=0; total_lost=0.0
                 else:
-                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot
+                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot*SL_PCT
                     total_lost+=loss; consec_losses+=1
                     if consec_losses<=5:
-                        next_lot=round((total_lost+base_lot)/0.92,2)
+                        # Limite rekipere a 1.5x mise inisyal (pa matingal agresif)
+                        next_lot=min(round(base_lot+(total_lost*0.5),2), base_lot*1.5)
                         current_lot=max(base_lot,min(next_lot,200.0))
                         add_log(st,f"⚠ Pèt #{consec_losses}/5 | Prochèn:${current_lot:.2f}","WARN")
                     else:
-                        add_log(st,f"🔄 Reset apre 5 pèt | Tann 10min...","WARN")
+                        add_log(st,f"🔄 Reset apre 5 pèt | Tann 15min...","WARN")
                         current_lot=base_lot; consec_losses=0; total_lost=0.0
-                        time.sleep(600)
+                        time.sleep(900)
 
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
                     "symbol":symbol,"side":sig,"entry":round(entry,4),"conf":f"{conf:.0%}",
                     "strategy":strategy,"tf":iv,"stake":round(current_lot,2),
+                    "sl":f"{SL_PCT*100:.1f}%","tp":f"{TP_PCT*100:.1f}%",
                     "pnl":round(pnl,4),"status":"won" if pnl>0 else "lost"}
                 st["trades"].insert(0,trade); st["total_pnl"]+=pnl
 
@@ -1739,6 +2104,9 @@ def binance_trading_loop(st, bot_id=None):
                         try: api.send_profit(ps)
                         except: pass
 
+            # Ti poz ant trades
+            time.sleep(30)
+
         except Exception as e:
             add_log(st,f"Erè binance loop: {e}","ERROR")
             time.sleep(30)
@@ -1747,13 +2115,6 @@ def binance_trading_loop(st, bot_id=None):
 
 # ═══════════════════════════════════════════════════════════
 # ██████  DERIV TRADING LOOP v6 ELITE  ██████
-#
-# CHANJMAN MAJÈ vs v5:
-# • Itilize strat_confluence_elite (SuperTrend + HA + Chandelier)
-# • ADX sèyil: 12 (vs 18) — mache synthetic mouvman toujou
-# • RANGING oke si 2/3 nouvo indikatè dakò
-# • Pause apre 3 pèt — konsève lojik v5
-# • Timeout amelyore pou plis siyal
 # ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1766,14 +2127,14 @@ def trading_loop(st, bot_id=None):
 
     fn = STRATEGIES.get(strategy, strat_confluence_elite)
 
-    wait_after  = tf + 90  # ← Redui 45→30 pou kòmanse pi vit
+    wait_after  = tf + 90
     base_lot    = round(max(0.5, lot), 2)
     current_lot = base_lot
     consec_losses = 0
     total_lost    = 0.0
 
     MAX_LOSSES_BEFORE_PAUSE = 3
-    PAUSE_WAIT_SECS         = 45  # ← Redui 60→45 pandan pòz
+    PAUSE_WAIT_SECS         = 45
 
     add_log(st, f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
     add_log(st, f"📌 SuperTrend+HA+Chandelier | ADX>12 | 3 strategies minimum")
@@ -1804,7 +2165,6 @@ def trading_loop(st, bot_id=None):
                 add_log(st, "⚠ Koneksyon pèdi — tann...","WARN")
                 time.sleep(15); continue
 
-            # Pran bouji — 200 bouji (ase pou SuperTrend + HA)
             candles = api.get_candles(symbol, 200, tf)
             if len(candles) < 20:
                 add_log(st, f"Pa ase done ({len(candles)}) — tann...","WARN")
@@ -1813,17 +2173,14 @@ def trading_loop(st, bot_id=None):
             regime, regime_score = market_regime(candles)
             adx_val, pdi_val, mdi_val = calc_adx_full(candles, 14)
 
-            # Log detaye
             st_sig, st_c = supertrend(candles)
             ha_sig, ha_c = heikin_ashi_trend(candles)
             add_log(st,
                 f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | "
                 f"ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
 
-            # ── SMART 3-LOSS PAUSE ────────────────────────
             if consec_losses >= MAX_LOSSES_BEFORE_PAUSE:
                 mache_bon = regime in ("TRENDING_UP","TRENDING_DN","RANGING") and adx_val >= 12
-                # Pou RANGING: bezwen SuperTrend dakò
                 if regime == "RANGING":
                     mache_bon = (st_sig != "NONE") and (ha_sig != "NONE") and adx_val >= 10
 
@@ -1841,12 +2198,10 @@ def trading_loop(st, bot_id=None):
                         f"Reprann avèk ${current_lot:.2f}",
                         "SUCCESS")
 
-            # ── FILTRE VOLATILE sèlman ────────────────────
             if regime == "VOLATILE":
                 add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...","WARN")
                 time.sleep(min(tf, 120)); continue
 
-            # ── KOURI ESTRATEJI ───────────────────────────
             if strategy == "confluence":
                 req_strats = 3 if consec_losses==0 else (4 if consec_losses<=2 else 5)
                 sig, conf = strat_confluence_elite(candles, min_strats=req_strats, min_per_conf=0.65)
@@ -1867,8 +2222,6 @@ def trading_loop(st, bot_id=None):
                 sig, conf = fn(candles)
                 add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
 
-            # ── FILTRE TREND vs RANGING ───────────────────
-            # Trend: BUY sèlman si UP, SELL sèlman si DN
             if sig == "BUY" and regime == "TRENDING_DN":
                 add_log(st, f"⛔ REJTE BUY — Mache ap DESANN. {st_sig}/{ha_sig}","WARN")
                 time.sleep(tf); continue
@@ -1877,19 +2230,16 @@ def trading_loop(st, bot_id=None):
                 add_log(st, f"⛔ REJTE SELL — Mache ap MONTE. {st_sig}/{ha_sig}","WARN")
                 time.sleep(tf); continue
 
-            # Filtre konfidans adaptif
             adaptive_conf = min_conf + (0.02 if consec_losses==1 else (0.04 if consec_losses>=2 else 0))
             if sig == "NONE" or conf < adaptive_conf:
                 reason = "Pa gen siyal" if sig=="NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
                 add_log(st, f"⏭ {reason} — tann pwochen bouji...")
                 time.sleep(tf); continue
 
-            # ── Pivot Points ──────────────────────────────
             pv_sig_dir = "TRENDING_UP" if sig=="BUY" else "TRENDING_DN"
             in_pivot, piv_bonus = pivot_signal(candles, pv_sig_dir)
             pivot_info = " 🎯+PIVOT" if in_pivot else ""
 
-            # Verifye balans
             if st["balance"] < current_lot:
                 add_log(st, f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
                 current_lot=base_lot; consec_losses=0; total_lost=0.0
@@ -1931,7 +2281,6 @@ def trading_loop(st, bot_id=None):
             except Exception as e:
                 add_log(st, f"Trade echwe: {e}","ERROR")
 
-            # ── MACHIN MANAJ MATINGAL ─────────────────────
             if ok:
                 if pnl > 0:
                     prev_losses = consec_losses
@@ -2018,6 +2367,13 @@ def api_connect():
             st["binance_api"]=api; st["broker"]="binance"
             st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"binance"})
+        # ── NOUVO: Binance US ──────────────────────────────────
+        elif broker=="binance_us":
+            api=BinanceUSClient(d["api_key"],d["api_secret"])
+            bal=api.connect()
+            st["binance_api"]=api; st["broker"]="binance_us"
+            st["balance"]=bal; st["connected"]=True
+            return jsonify({"ok":True,"balance":bal,"broker":"binance_us"})
         return jsonify({"ok":False,"error":"Broker enkoni"})
     except Exception as e:
         logger.error(f"Connect: {e}",exc_info=True)
@@ -2052,9 +2408,9 @@ def api_start():
     if mode=="digits":
         threading.Thread(target=digits_trading_loop,args=(st,bot_id),daemon=True).start()
         add_log(st,"🎲 Digits mode démarre","INFO")
-    elif broker=="binance":
+    elif broker in ("binance","binance_us"):
         threading.Thread(target=binance_trading_loop,args=(st,bot_id),daemon=True).start()
-        add_log(st,"🪙 Binance mode démarre","INFO")
+        add_log(st,f"🪙 {'Binance US' if broker=='binance_us' else 'Binance'} mode démarre","INFO")
     else:
         threading.Thread(target=trading_loop,args=(st,bot_id),daemon=True).start()
     return jsonify({"ok":True})
@@ -2205,15 +2561,6 @@ def admin_stop_user():
                 st["running"]=False; st["bot_id"]=None; stopped+=1
     return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
 
-async function admClearUser(uid){
-  if(!confirm(`Efase istorik ${uid}?`))return;
-  const token=getStoredToken();
-  const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();
-  alert(d.ok?d.msg:d.error);
-  if(d.ok)admRefresh();
-}
-
 @app.route("/api/admin/sessions", methods=["POST"])
 def admin_sessions():
     d=request.json or {}
@@ -2256,6 +2603,21 @@ def admin_clear_user():
                 st["log"]=[]
                 cleared+=1
     return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè efase"})
+
+# ── NOUVO: Efase trades sèlman (pa log, pa pnl) ───────────────────────────
+@app.route("/api/admin/clear_trades", methods=["POST"])
+def admin_clear_trades():
+    """Efase sèlman listè trades itilizatè — konsève log ak pnl"""
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
+    uid_prefix = d.get("uid","").replace("...","")
+    cleared = 0
+    with _user_lock:
+        for uid, st in _user_states.items():
+            if uid.startswith(uid_prefix):
+                st["trades"] = []
+                cleared += 1
+    return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè: trades efase (log + pnl konsève)"})
 
 HTML=r"""<!DOCTYPE html>
 <html>
@@ -2383,7 +2745,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div class="iw"><div class="il">BROKER</div>
         <select id="d-br" onchange="tog()">
           <option value="deriv">Deriv (Synthetic/Digits)</option>
-          <option value="binance">Binance (Crypto/Gold)</option>
+          <option value="binance">Binance Global (Crypto/Gold)</option>
+          <option value="binance_us">Binance US (Crypto/Gold)</option>
         </select>
       </div>
       <div id="fd">
@@ -2391,8 +2754,11 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="iw"><div class="il">APP ID</div><input id="d-ai" value="1089"></div>
       </div>
       <div id="fb" style="display:none">
-        <div class="iw"><div class="il">API KEY BINANCE</div><input id="b-k" type="password"></div>
-        <div class="iw"><div class="il">API SECRET BINANCE</div><input id="b-s" type="password"></div>
+        <div class="iw"><div class="il">API KEY</div><input id="b-k" type="password"></div>
+        <div class="iw"><div class="il">API SECRET</div><input id="b-s" type="password"></div>
+        <div id="fb-note" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600">
+          🇺🇸 Binance US — Konekte sou api.binance.us | Kreye kle sou: binance.us
+        </div>
       </div>
       <div id="cm"></div>
       <button class="btn b fw" onclick="doConn()">⚡ KONEKTE</button>
@@ -2732,6 +3098,14 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div id="adm-users-list"><div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH</div></div>
   </div>
+  <div class="box" style="background:#FFD60008;border-color:#FFD60022">
+    <div class="bt" style="color:#FFD600">📊 LEJANN BOUTON AKSYON ITILIZATÈ</div>
+    <div style="font-size:11px;color:#4A7080;line-height:2.0">
+      <span style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 8px">📊🗑</span> — Efase <b style="color:#FFD600">trades sèlman</b> (log + pnl konsève)<br>
+      <span style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 8px">🗑</span> — Efase <b style="color:#C8E8F0">TOUT</b> (trades + log + pnl reset)<br>
+      <span style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 8px">■ STOP</span> — Kanpe bot itilizatè a
+    </div>
+  </div>
 </div>
 
 </div>
@@ -2780,6 +3154,14 @@ async function doLogin(){
   btn.textContent="⚡ ANTRE";btn.disabled=false;
 }
 function doLogout(){clearToken();showLogin("Ou dekonekte.");}
+
+function tog(){
+  const v=document.getElementById("d-br").value;
+  document.getElementById("fd").style.display=v=="deriv"?"block":"none";
+  document.getElementById("fb").style.display=(v=="binance"||v=="binance_us")?"block":"none";
+  const note=document.getElementById("fb-note");
+  if(note) note.style.display=v=="binance_us"?"block":"none";
+}
 
 function toggleMode(){
   const mode=document.getElementById("c-mode").value;
@@ -2847,7 +3229,9 @@ renderS();
 function tog(){
   const v=document.getElementById("d-br").value;
   document.getElementById("fd").style.display=v=="deriv"?"block":"none";
-  document.getElementById("fb").style.display=v=="binance"?"block":"none";
+  document.getElementById("fb").style.display=(v=="binance"||v=="binance_us")?"block":"none";
+  const note=document.getElementById("fb-note");
+  if(note) note.style.display=v=="binance_us"?"block":"none";
 }
 function sw(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
@@ -2860,14 +3244,15 @@ function msg(id,txt,ok){document.getElementById(id).innerHTML=`<div class="al ${
 async function doConn(){
   const br=document.getElementById("d-br").value;
   const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
-  msg("cm","⏳ Ap konekte — tann 15 segonn...","ok");
+  const brokerLabel={"deriv":"Deriv","binance":"Binance Global","binance_us":"Binance US"}[br]||br;
+  msg("cm",`⏳ Ap konekte ${brokerLabel} — tann 15 segonn...`,"ok");
   const body={broker:br};
   if(br=="deriv"){body.token=document.getElementById("d-tk").value;body.app_id=document.getElementById("d-ai").value;}
-  if(br=="binance"){body.api_key=document.getElementById("b-k").value;body.api_secret=document.getElementById("b-s").value;}
+  if(br=="binance"||br=="binance_us"){body.api_key=document.getElementById("b-k").value;body.api_secret=document.getElementById("b-s").value;}
   try{
     const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const d=await r.json();
-    if(d.ok){msg("cm",`✓ Konekte ${br.toUpperCase()} | $${d.balance.toFixed(2)}`,"ok");document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${br.toUpperCase()}</b> | $${d.balance.toFixed(2)}</div>`;}
+    if(d.ok){msg("cm",`✓ Konekte ${brokerLabel} | $${d.balance.toFixed(2)}`,"ok");document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${brokerLabel}</b> | $${d.balance.toFixed(2)}</div>`;}
     else msg("cm","✗ "+d.error,false);
   }catch(e){msg("cm","✗ "+e.message,false);}
   btn.textContent="⚡ KONEKTE";btn.disabled=false;
@@ -2922,9 +3307,10 @@ function drawC(vals){
 
 function upd(d){
   const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
+  const brokerLabel={"deriv":"DERIV","binance":"BINANCE","binance_us":"BINANCE US"}[d.broker]||(d.broker?d.broker.toUpperCase():"DISCONNECTED");
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("hbal").style.color=d.connected?"#00D4FF":"#3A6070";
-  document.getElementById("hb").textContent=d.broker?d.broker.toUpperCase():"DISCONNECTED";
+  document.getElementById("hb").textContent=brokerLabel;
   document.getElementById("hb").style.color=d.connected?"#00FF88":"#3A6070";
   document.getElementById("dot").className="dot "+(d.running?"dl":"di");
   document.getElementById("hs").textContent=d.running?"LIVE":"IDLE";
@@ -2940,7 +3326,7 @@ function upd(d){
   document.getElementById("s-bot").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("s-strat").textContent=d.config.strategy||"—";
   document.getElementById("s-sym").textContent=d.config.symbol||"—";
-  document.getElementById("s-br2").textContent=d.broker?d.broker.toUpperCase():"—";
+  document.getElementById("s-br2").textContent=brokerLabel;
   document.getElementById("s-br2").style.color=d.connected?"#00FF88":"#3A6070";
   document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"IDLE";
   document.getElementById("c-st2").style.color=d.running?"#00FF88":"#3A6070";
@@ -2985,10 +3371,22 @@ async function admRefresh(){
     const d2=await r2.json();
     if(d2.ok){
       document.getElementById("adm-users-count").textContent=d2.total;
-      document.getElementById("adm-users-list").innerHTML=d2.total===0?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>':`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr><td style="color:#4A7080;font-size:10px">${u.uid}</td><td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td><td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td><td style="color:#00D4FF">$${u.balance}</td><td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td><td>${u.trades}</td><td style="display:flex;gap:4px">
-  ${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■ STOP</button>`:""}
-  <button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
-</td>('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:"—"}</td></tr>`).join("")}</table>`;
+      document.getElementById("adm-users-list").innerHTML=d2.total===0
+        ?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>'
+        :`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr>
+          <td style="color:#4A7080;font-size:10px">${u.uid}</td>
+          <td>${u.broker||"—"}</td>
+          <td style="font-weight:700">${u.symbol||"—"}</td>
+          <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
+          <td style="color:#00D4FF">$${u.balance}</td>
+          <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
+          <td>${u.trades}</td>
+          <td style="display:flex;gap:4px;align-items:center">
+            ${u.running?`<button onclick="admStopUser('${u.uid}')" title="Kanpe bot" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
+            <button onclick="admClearTrades('${u.uid}')" title="Efase trades sèlman" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button>
+            <button onclick="admClearUser('${u.uid}')" title="Efase tout (trades+log+pnl)" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
+          </td>
+        </tr>`).join("")}</table>`;
     }
   }catch(e){}
   try{
@@ -3011,6 +3409,25 @@ async function admRevoke(code){if(!confirm(`Revoke ${code}?`))return;const token
 async function admReset(code){const token=getStoredToken();const r=await fetch("/api/admin/reset_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
+
+async function admClearUser(uid){
+  if(!confirm(`Efase TOUT istorik ${uid}?\n(trades + log + pnl reset)`))return;
+  const token=getStoredToken();
+  const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
+  const d=await r.json();
+  alert(d.ok?d.msg:d.error);
+  if(d.ok)admRefresh();
+}
+
+async function admClearTrades(uid){
+  if(!confirm(`Efase trades sèlman pou ${uid}?\n(log + pnl ap konsève)`))return;
+  const token=getStoredToken();
+  const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
+  const d=await r.json();
+  alert(d.ok?d.msg:d.error);
+  if(d.ok)admRefresh();
+}
+
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
 function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}
 

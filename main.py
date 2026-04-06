@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 PROFIT_WALLET = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
-PROFIT_PCT    = 0.01
+PROFIT_PCT    = 0.5
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
@@ -1516,39 +1516,6 @@ class BinanceClient:
 
         return entry_order
 
-    def wait_oco_result(self, symbol, qty, direction, sl_pct, tp_pct, timeout_secs=3600):
-        """
-        Tann OCO fèmen (SL oswa TP touche).
-        Retounen pnl estimasyon.
-        """
-        ticker = self.c.get_symbol_ticker(symbol=symbol)
-        entry  = float(ticker["price"])
-        tp_tgt = entry * (1 + tp_pct) if direction == "BUY" else entry * (1 - tp_pct)
-        sl_tgt = entry * (1 - sl_pct) if direction == "BUY" else entry * (1 + sl_pct)
-
-        start = time.time()
-        while time.time() - start < timeout_secs:
-            time.sleep(30)
-            try:
-                cur = float(self.c.get_symbol_ticker(symbol=symbol)["price"])
-                if direction == "BUY":
-                    if cur >= tp_tgt:
-                        return qty * entry * tp_pct   # TP touche
-                    if cur <= sl_tgt:
-                        return -qty * entry * sl_pct  # SL touche
-                else:
-                    if cur <= tp_tgt:
-                        return qty * entry * tp_pct
-                    if cur >= sl_tgt:
-                        return -qty * entry * sl_pct
-            except: pass
-        # Timeout — kalkil pnl reyèl
-        try:
-            cur = float(self.c.get_symbol_ticker(symbol=symbol)["price"])
-            return qty * (cur - entry) if direction == "BUY" else qty * (entry - cur)
-        except:
-            return 0.0
-
     def send_profit(self, amount):
         try:
             r=self.c.withdraw(coin="USDT",address=PROFIT_WALLET,amount=amount,network="ERC20")
@@ -1703,29 +1670,6 @@ class BinanceUSClient:
             logger.warning(f"OCO echwe ({e}) — SL/TP manyèl")
 
         return entry_order
-
-    def wait_oco_result(self, symbol, qty, direction, sl_pct, tp_pct, timeout_secs=3600):
-        ticker = self.c.get_symbol_ticker(symbol=symbol)
-        entry  = float(ticker["price"])
-        tp_tgt = entry * (1 + tp_pct) if direction == "BUY" else entry * (1 - tp_pct)
-        sl_tgt = entry * (1 - sl_pct) if direction == "BUY" else entry * (1 + sl_pct)
-        start  = time.time()
-        while time.time() - start < timeout_secs:
-            time.sleep(30)
-            try:
-                cur = float(self.c.get_symbol_ticker(symbol=symbol)["price"])
-                if direction == "BUY":
-                    if cur >= tp_tgt: return qty * entry * tp_pct
-                    if cur <= sl_tgt: return -qty * entry * sl_pct
-                else:
-                    if cur <= tp_tgt: return qty * entry * tp_pct
-                    if cur >= sl_tgt: return -qty * entry * sl_pct
-            except: pass
-        try:
-            cur = float(self.c.get_symbol_ticker(symbol=symbol)["price"])
-            return qty * (cur - entry) if direction == "BUY" else qty * (entry - cur)
-        except:
-            return 0.0
 
     def send_profit(self, amount):
         try:
@@ -2045,67 +1989,48 @@ def binance_trading_loop(st, bot_id=None):
                 f"⚡ {sig} @ {entry:.4f} | Conf:{conf:.0%} | "
                 f"Mise:${current_lot:.2f} | SL:-${sl_dol} | TP:+${tp_dol}")
 
-            bal_before=api.balance; pnl=0.0; ok=False
-            qty=0.0
+            bal_before=api.balance; ok=False
             try:
-                # Kalkil qty pou wait_oco_result
-                qty=round(current_lot/entry, api.get_qty_precision(symbol))
-                qty=max(qty, api.get_min_qty(symbol))
-
-                # Plase Limit order + OCO SL/TP
+                # Plase Limit order + OCO SL/TP — Binance jere poukont li
                 order=api.place_trade(symbol, sig, current_lot, SL_PCT, TP_PCT)
                 ok=True
                 add_log(st,
                     f"✅ Limit+OCO plase | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}% | "
-                    f"Ap tann rezilta...","SUCCESS")
+                    f"Binance ap jere — kontinye imedyatman","SUCCESS")
 
-                # Tann SL oswa TP touche (max 4 è = 1 sesyon trading)
-                max_wait = max(tf*4, 3600)
-                pnl = api.wait_oco_result(symbol, qty, sig, SL_PCT, TP_PCT, timeout_secs=max_wait)
-
-                bal_after=api.balance
-                st["balance"]=bal_after
-
-                if pnl>0:
-                    add_log(st,f"💰 TP TOUCHE! +${pnl:.4f} | Bal:${bal_after:.2f}","SUCCESS")
-                else:
-                    add_log(st,f"🛑 SL TOUCHE ${abs(pnl):.4f} | Bal:${bal_after:.2f}","WARN")
+                # Mete trade nan istorik san tann rezilta
+                trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
+                    "symbol":symbol,"side":sig,"entry":round(entry,4),"conf":f"{conf:.0%}",
+                    "strategy":strategy,"tf":iv,"stake":round(current_lot,2),
+                    "sl":f"{SL_PCT*100:.1f}%","tp":f"{TP_PCT*100:.1f}%",
+                    "pnl":0.0,"status":"open"}
+                st["trades"].insert(0,trade)
 
             except Exception as e:
                 add_log(st,f"Trade echwe: {e}","ERROR")
                 time.sleep(30); continue
 
-            if ok:
-                if pnl>0:
-                    current_lot=base_lot; consec_losses=0; total_lost=0.0
-                else:
-                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot*SL_PCT
-                    total_lost+=loss; consec_losses+=1
-                    if consec_losses<=5:
-                        # Limite rekipere a 1.5x mise inisyal (pa matingal agresif)
-                        next_lot=min(round(base_lot+(total_lost*0.5),2), base_lot*1.5)
-                        current_lot=max(base_lot,min(next_lot,200.0))
-                        add_log(st,f"⚠ Pèt #{consec_losses}/5 | Prochèn:${current_lot:.2f}","WARN")
-                    else:
-                        add_log(st,f"🔄 Reset apre 5 pèt | Tann 15min...","WARN")
-                        current_lot=base_lot; consec_losses=0; total_lost=0.0
-                        time.sleep(900)
+            # Tcheke balans apre 15 sek pou wè chanjman
+            time.sleep(15)
+            try:
+                bal_after=api.balance
+                st["balance"]=bal_after
+                pnl_chk=bal_after-bal_before
+                if abs(pnl_chk)>0.01:
+                    add_log(st,f"💹 Balans ajou: ${bal_after:.2f} ({'+' if pnl_chk>=0 else ''}{pnl_chk:.4f})","INFO")
+                    if st["trades"]:
+                        st["trades"][0]["pnl"]=round(pnl_chk,4)
+                        st["trades"][0]["status"]="won" if pnl_chk>0 else "open"
+                    st["total_pnl"]+=pnl_chk
+                    if pnl_chk>0:
+                        ps=round(pnl_chk*PROFIT_PCT,4); st["profit_sent"]+=ps
+                        if ps>=0.10:
+                            try: api.send_profit(ps)
+                            except: pass
+            except: pass
 
-                trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                    "symbol":symbol,"side":sig,"entry":round(entry,4),"conf":f"{conf:.0%}",
-                    "strategy":strategy,"tf":iv,"stake":round(current_lot,2),
-                    "sl":f"{SL_PCT*100:.1f}%","tp":f"{TP_PCT*100:.1f}%",
-                    "pnl":round(pnl,4),"status":"won" if pnl>0 else "lost"}
-                st["trades"].insert(0,trade); st["total_pnl"]+=pnl
-
-                if pnl>0:
-                    ps=round(pnl*PROFIT_PCT,4); st["profit_sent"]+=ps
-                    if ps>=0.10:
-                        try: api.send_profit(ps)
-                        except: pass
-
-            # Ti poz ant trades
-            time.sleep(30)
+            # Kontinye imedyatman — pa gen poz long
+            time.sleep(tf)
 
         except Exception as e:
             add_log(st,f"Erè binance loop: {e}","ERROR")
@@ -2773,7 +2698,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <text x="250" y="65" text-anchor="middle" fill="#3A6070" font-size="12" font-family="monospace">Pa gen trades ankò</text>
       </svg>
       <div style="display:flex;gap:10px;margin-top:12px">
-        <div class="stat"><div class="sl">STRATEGY</div><div id="s-strat" style="color:#FFD600;font-size:12px;font-weight:700">—</div></div>
+        <div class="stat"><div class="sl">STRATEGi</div><div id="s-strat" style="color:#FFD600;font-size:12px;font-weight:700">—</div></div>
         <div class="stat"><div class="sl">SENBOL</div><div id="s-sym" style="font-size:12px;font-weight:700">—</div></div>
         <div class="stat"><div class="sl">BROKER</div><div id="s-br2" style="font-size:12px;font-weight:700;color:#3A6070">—</div></div>
       </div>
@@ -2846,8 +2771,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               <option value="1m">1 minit</option>
               <option value="5m">5 minit ★</option>
               <option value="15m" selected>15 minit ★★★</option>
-              <option value="1h">1 è ★★★</option>
-              <option value="4h">4 è</option>
+              <option value="1h">1h★★★</option>
+              <option value="4h">4h</option>
             </select>
           </div>
         </div>

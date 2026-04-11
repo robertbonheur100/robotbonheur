@@ -1886,18 +1886,18 @@ def digits_trading_loop(st, bot_id=None):
 def binance_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
     cfg=st["config"]
-    symbol=cfg.get("symbol","BTCUSDT")
+    symbol=cfg.get("symbol","GBPUSD")
     strategy=cfg.get("strategy","confluence")
-    lot=float(cfg.get("lot",11.0))
+    lot=float(cfg.get("lot",0.5))
     tf=int(cfg.get("tf_secs",900))
     min_conf=float(cfg.get("min_conf",0.75))
 
     # ── SL/TP pousantaj ────────────────────────────────────
     # Or/metals: SL 1.5% / TP 3.0% (mwens volatil)
     # Crypto:    SL 2.0% / TP 4.0% (plis volatil)
-    is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper() or "XAG" in symbol.upper()
-    SL_PCT  = 0.015 if is_gold else 0.020
-    TP_PCT  = 0.030 if is_gold else 0.040
+    is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper() or "USDT" in symbol.upper()
+    SL_PCT  = 0.015 if is_USD else 0.020
+    TP_PCT  = 0.030 if is_USD else 0.040
 
     if strategy=="binance_gold" or is_gold:
         fn = lambda c: strat_binance_gold(c)
@@ -1912,8 +1912,8 @@ def binance_trading_loop(st, bot_id=None):
         fn = STRATEGIES.get(strategy, strat_confluence_elite)
         add_log(st,f"📊 {strategy} | {symbol} | TF:{tf//60}min")
 
-    iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"15m")
-    base_lot=max(11.0,lot); current_lot=base_lot
+    iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"5m")
+    base_lot=max(1.0,lot); current_lot=base_lot
     consec_losses=0; total_lost=0.0
 
     add_log(st,f"🚀 Binance ELITE | Limit Order + OCO SL/TP | Base:${base_lot} | Conf:{min_conf:.0%}")
@@ -2773,6 +2773,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               <option value="15m" selected>15 minit ★★★</option>
               <option value="1h">1h★★★</option>
               <option value="4h">4h</option>
+               <option value="D1">24h</option>
             </select>
           </div>
         </div>
@@ -2824,21 +2825,25 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div style="background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:12px;margin-bottom:10px">
           <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🥇 GOLD / METALS — BINANCE</div>
           <div class="g2">
-            <div class="iw"><div class="il">SENBOL METAL</div>
+            <div class="iw"><div class="il">SENBOL METAL/DEVICE</div>
               <select id="c-sy-gold">
                 <option value="XAUUSDT">XAUUSDT — Or (Gold)</option>
                 <option value="XAGUSDT">XAGUSDT — Ajan (Silver)</option>
+                 <option value="EURUSD">EURUSD — DEVICE (Silver)</option>
+                  <option value="GBPUSD">GBPUSD — DEVICE (Silver)</option>
               </select>
             </div>
             <div class="iw"><div class="il">TIMEFRAME</div>
               <select id="c-tf-gold">
+                 <option value="1m">1 minit</option>
                 <option value="5m">5 minit</option>
                 <option value="15m" selected>15 minit</option>
                 <option value="1h">1 è</option>
+                <option value="24h">24è</option>
               </select>
             </div>
           </div>
-          <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-gold" type="number" value="11" step="1" min="11"></div>
+          <div class="iw"><div class="il">MISE USDT — Min $0,5</div><input id="c-lot-gold" type="number" value="0,5" step="1" min="0,5"></div>
         </div>
       </div>
       <div id="opts-crypto" style="display:none">
@@ -2847,7 +2852,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="g2">
             <div class="iw"><div class="il">SENBOL KRIPTO</div>
               <select id="c-sy-crypto">
-                <option value="BTCUSDT" selected>BTCUSDT — Bitcoin</option>
+                <option value="GBPUSD" selected>GBPUSD — USD</option>
                 <option value="ETHUSDT">ETHUSDT — Ethereum</option>
                 <option value="BNBUSDT">BNBUSDT — BNB</option>
                 <option value="SOLUSDT">SOLUSDT — Solana</option>
@@ -2855,14 +2860,17 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
                 <option value="ADAUSDT">ADAUSDT — Cardano</option>
                 <option value="AVAXUSDT">AVAXUSDT — Avalanche</option>
                 <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
+                  <option value="EURUSD">EURUSD — EURUSD</option>
               </select>
             </div>
             <div class="iw"><div class="il">TIMEFRAME</div>
               <select id="c-tf-crypto">
+                 <option value="1m">1 minit</option>
                 <option value="5m">5 minit</option>
                 <option value="15m" selected>15 minit</option>
                 <option value="1h">1 è</option>
                 <option value="4h">4 è</option>
+                <option value="D1">24 è</option>
               </select>
             </div>
           </div>
@@ -2877,6 +2885,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
             <option value="0.70">70% (balans)</option>
             <option value="0.75">75% (konsèvatif)</option>
             <option value="0.80">80% (presiz)</option>
+            <option value="0.90">90% (presiz)</option>
           </select>
         </div>
         <div class="iw"><div class="il">🎯 OBJEKTIF PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"><div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div></div>
@@ -2897,7 +2906,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
         <div class="stats">
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
-          <div class="stat"><div class="sl">PROFIT 1%</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
         </div>
       </div>
       <div class="box" style="background:#00FF8808;border-color:#00FF8822">

@@ -2801,7 +2801,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
       <div id="opts-digits" style="display:none">
         <div style="background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:12px;margin-bottom:10px">
-          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🎲 DIGITS MODE</div>
+          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">DIGITS MODE</div>
           <div class="g2">
             <div class="iw"><div class="il">SENBOL</div>
               <select id="c-sy-digits">

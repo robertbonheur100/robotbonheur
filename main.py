@@ -2292,7 +2292,7 @@ def api_connect():
             st["binance_api"]=api; st["broker"]="binance"
             st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"binance"})
-        # ── NOUVO: Binance US ──────────────────────────────────
+        # ── NOUVO:Binance US ──────────────────────────────────
         elif broker=="binance_us":
             api=BinanceUSClient(d["api_key"],d["api_secret"])
             bal=api.connect()

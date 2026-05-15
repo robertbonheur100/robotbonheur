@@ -20,7 +20,6 @@ ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
     "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adm": False},
     "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
-    
 }
 CODE_TTL_SECONDS = 2592000
 
@@ -124,32 +123,66 @@ def get_state():
     return _user_states[uid]
 
 # ═══════════════════════════════════════════════════════════
-# ██  NOUVO: DERIV pat_ TOKEN HELPER  ██
-# Konvèti pat_ token → session token via Deriv REST API
+# ██  NOUVO: DERIV OTP / pat_ TOKEN HELPER  ██
+# Sipòte de metòd:
+#   1. Token klasik — dirèkteman via WebSocket
+#   2. Token pat_ — via REST API OTP flow pou jwenn session token
 # ═══════════════════════════════════════════════════════════
-def resolve_deriv_token(raw_token):
-    """
-    Si token kòmanse ak 'pat_' se yon Personal Access Token (OAuth).
-    Retounen: (token_pou_websocket, is_pat)
-    """
-    raw_token = raw_token.strip()
-    is_pat = raw_token.lower().startswith("pat_")
-    return raw_token, is_pat
 
-def exchange_pat_token(pat_token, app_id="1089", timeout=20):
+# App ID pa defaut pou pat_ / OTP (nouvo sistèm Deriv)
+PAT_APP_ID = "33h9RL9bbCjURr4MO3PQ0"
+
+def resolve_pat_token_rest(pat_token, timeout=20):
     """
-    Echange yon pat_ token pou yon session token Deriv via WebSocket OAuth flow.
-    pat_ token mande yon app_id ki gen OAuth scope — nou eseye plizyè app_id.
-    Retounen: (ok, session_token_or_error, balance)
+    Nouvo sistèm Deriv OTP:
+    Itilize REST API pou echange pat_ token → one-time token → konekte WebSocket.
+    Retounen: (ok, otp_or_error, account_id, balance)
+    """
+    import urllib.request
+    import urllib.error
+
+    # Etap 1: Rele REST API pou jwenn OTP
+    rest_url = "https://oauth.deriv.com/oauth2/token"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {pat_token}",
+    }
+    body = json.dumps({"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                       "subject_token": pat_token,
+                       "subject_token_type": "urn:ietf:params:oauth:token-type:access_token"}).encode()
+
+    try:
+        req = urllib.request.Request(rest_url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            otp = data.get("access_token") or data.get("token")
+            if otp:
+                logger.info("OTP jwenn via REST API")
+                return True, otp, None, 0.0
+            return False, f"REST pa bay token: {data}", None, 0.0
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode() if e.fp else ""
+        logger.info(f"REST OTP HTTP {e.code}: {body_err}")
+    except Exception as e:
+        logger.info(f"REST OTP echwe: {e}")
+
+    # Etap 2: Eseye via WebSocket dirèkteman ak pat_ token + nouvo app_id
+    return _try_pat_websocket(pat_token, timeout)
+
+
+def _try_pat_websocket(pat_token, timeout=20):
+    """
+    Eseye konekte pat_ token dirèkteman sou WebSocket Deriv
+    avèk plizyè app_id (PAT_APP_ID an premye).
+    Retounen: (ok, token_or_error, account_id, balance)
     """
     import websocket
 
-    # App IDs Deriv ki sipòte OAuth / pat_ tokens
-    OAUTH_APP_IDS = ["36544", "1089", "16929"]
+    APP_IDS = [PAT_APP_ID, "36544", "16929", "1089"]
 
-    for aid in OAUTH_APP_IDS:
+    for aid in APP_IDS:
         done   = threading.Event()
-        result = [None, None, 0.0]  # [ok, token_or_err, balance]
+        result = [None, None, None, 0.0]  # [ok, token, account_id, balance]
 
         def on_open(ws):
             ws.send(json.dumps({"authorize": pat_token}))
@@ -164,7 +197,12 @@ def exchange_pat_token(pat_token, app_id="1089", timeout=20):
                     auth = d["authorize"]
                     result[0] = True
                     result[1] = auth.get("token", pat_token)
-                    result[2] = float(auth.get("balance", 0))
+                    result[2] = auth.get("loginid")
+                    result[3] = float(auth.get("balance", 0))
+                done.set()
+            elif "error" in d:
+                result[0] = False
+                result[1] = d["error"].get("message", "Erè enkoni")
                 done.set()
 
         def on_err(ws, e):
@@ -180,19 +218,23 @@ def exchange_pat_token(pat_token, app_id="1089", timeout=20):
             t = threading.Thread(target=ws.run_forever, daemon=True)
             t.start()
             done.wait(timeout=timeout)
+            try: ws.close()
+            except: pass
 
             if result[0] is True:
                 logger.info(f"pat_ token aksepte avèk app_id={aid}")
-                return True, result[1], result[2]
+                return True, result[1], result[2], result[3]
             else:
                 logger.info(f"pat_ echwe app_id={aid}: {result[1]}")
         except Exception as e:
             logger.info(f"pat_ erè app_id={aid}: {e}")
-        finally:
-            try: ws.close()
-            except: pass
 
-    return False, "Token pat_ pa aksepte pa okenn app_id Deriv", 0.0
+    return False, (
+        "Token pat_ pa aksepte.\n"
+        "SOLISYON: Kreye yon token API KLASIK nan:\n"
+        "app.deriv.com → foto ou → API Token → Create"
+    ), None, 0.0
+
 
 def test_deriv_token_ws(token, app_id="1089", timeout=15):
     """
@@ -201,7 +243,7 @@ def test_deriv_token_ws(token, app_id="1089", timeout=15):
     """
     import websocket
     done  = threading.Event()
-    result = [None, None]  # [ok, val]
+    result = [None, None]
 
     def on_open(ws):
         ws.send(json.dumps({"authorize": token}))
@@ -232,7 +274,7 @@ def test_deriv_token_ws(token, app_id="1089", timeout=15):
     return result[0], result[1]
 
 # ═══════════════════════════════════════════════════════════
-# INDIKATÈ TEKNIK — Oryajinal + amelyore
+# INDIKATÈ TEKNIK
 # ═══════════════════════════════════════════════════════════
 def ema(prices, p):
     if len(prices) < p: return []
@@ -288,184 +330,107 @@ def calc_adx_full(candles, p=14):
     adx_val=100*abs(pdi-mdi)/(pdi+mdi+0.001)
     return round(adx_val,2), round(pdi,2), round(mdi,2)
 
-# ═══════════════════════════════════════════════════════════
-# ██  NOUVO: SUPERTREND INDIKATÈ  ██
-# ═══════════════════════════════════════════════════════════
 def supertrend(candles, p=10, mult=3.0):
     if len(candles) < p+5:
         return "NONE", 0.0
-
     highs  = [c["high"]  for c in candles]
     lows   = [c["low"]   for c in candles]
     closes = [c["close"] for c in candles]
-
     trs = []
     for i in range(1, len(candles)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i-1]),
-            abs(lows[i]  - closes[i-1])
-        )
+        tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
         trs.append(tr)
-
     atr_vals = []
     for i in range(p-1, len(trs)):
         atr_vals.append(sum(trs[i-p+1:i+1]) / p)
-
-    if not atr_vals:
-        return "NONE", 0.0
-
+    if not atr_vals: return "NONE", 0.0
     n = len(atr_vals)
     hl2 = [(highs[i+1] + lows[i+1]) / 2 for i in range(n)]
-
     upper_basic = [hl2[i] + mult * atr_vals[i] for i in range(n)]
     lower_basic = [hl2[i] - mult * atr_vals[i] for i in range(n)]
-
-    upper = list(upper_basic)
-    lower = list(lower_basic)
-
+    upper = list(upper_basic); lower = list(lower_basic)
     for i in range(1, n):
         upper[i] = min(upper_basic[i], upper[i-1]) if closes[i+p-1] <= upper[i-1] else upper_basic[i]
         lower[i] = max(lower_basic[i], lower[i-1]) if closes[i+p-1] >= lower[i-1] else lower_basic[i]
-
     trend_up   = closes[-1] > lower[-1]
     trend_prev = closes[-2] > lower[-2] if len(closes) >= 2 else trend_up
-
     price = closes[-1]
     if trend_up:
         dist = (price - lower[-1]) / max(atr_vals[-1], 0.0001)
         conf = min(0.92, 0.75 + min(dist * 0.04, 0.17))
-        if not trend_prev:
-            return "BUY", min(0.92, conf + 0.05)
+        if not trend_prev: return "BUY", min(0.92, conf + 0.05)
         return "BUY", conf
     else:
         dist = (upper[-1] - price) / max(atr_vals[-1], 0.0001)
         conf = min(0.92, 0.75 + min(dist * 0.04, 0.17))
-        if trend_prev:
-            return "SELL", min(0.92, conf + 0.05)
+        if trend_prev: return "SELL", min(0.92, conf + 0.05)
         return "SELL", conf
 
-# ═══════════════════════════════════════════════════════════
-# ██  NOUVO: CHANDELIER EXIT  ██
-# ═══════════════════════════════════════════════════════════
 def chandelier_exit(candles, p=22, mult=3.0):
-    if len(candles) < p+2:
-        return "NONE", 0.0
-
+    if len(candles) < p+2: return "NONE", 0.0
     closes = [c["close"] for c in candles]
     highs  = [c["high"]  for c in candles]
     lows   = [c["low"]   for c in candles]
-
     at = atr(candles, p)
-    if at == 0:
-        return "NONE", 0.0
-
-    highest_high = max(highs[-p:])
-    lowest_low   = min(lows[-p:])
-
-    ce_long  = highest_high - mult * at
-    ce_short = lowest_low   + mult * at
-
-    price = closes[-1]
-    prev  = closes[-2] if len(closes) >= 2 else price
-
+    if at == 0: return "NONE", 0.0
+    highest_high = max(highs[-p:]); lowest_low = min(lows[-p:])
+    ce_long  = highest_high - mult * at; ce_short = lowest_low + mult * at
+    price = closes[-1]; prev = closes[-2] if len(closes) >= 2 else price
     if price > ce_long and prev <= ce_long:
         gap = (price - ce_long) / max(at, 0.0001)
         return "BUY", min(0.90, 0.78 + min(gap * 0.04, 0.12))
     elif price < ce_short and prev >= ce_short:
         gap = (ce_short - price) / max(at, 0.0001)
         return "SELL", min(0.90, 0.78 + min(gap * 0.04, 0.12))
-    elif price > ce_long:
-        return "BUY", 0.75
-    elif price < ce_short:
-        return "SELL", 0.75
-
+    elif price > ce_long: return "BUY", 0.75
+    elif price < ce_short: return "SELL", 0.75
     return "NONE", 0.0
 
-# ═══════════════════════════════════════════════════════════
-# ██  NOUVO: HEIKIN ASHI TREND  ██
-# ═══════════════════════════════════════════════════════════
 def heikin_ashi_trend(candles, lookback=5):
-    if len(candles) < lookback + 3:
-        return "NONE", 0.0
-
+    if len(candles) < lookback + 3: return "NONE", 0.0
     ha = []
     prev_o = (candles[0]["open"] + candles[0]["close"]) / 2
     prev_c = (candles[0]["open"] + candles[0]["high"] + candles[0]["low"] + candles[0]["close"]) / 4
-
     for c in candles:
         ha_c = (c["open"] + c["high"] + c["low"] + c["close"]) / 4
         ha_o = (prev_o + prev_c) / 2
-        ha_h = max(c["high"], ha_o, ha_c)
-        ha_l = min(c["low"],  ha_o, ha_c)
+        ha_h = max(c["high"], ha_o, ha_c); ha_l = min(c["low"], ha_o, ha_c)
         ha.append({"open": ha_o, "high": ha_h, "low": ha_l, "close": ha_c})
-        prev_o = ha_o
-        prev_c = ha_c
-
+        prev_o = ha_o; prev_c = ha_c
     recent = ha[-lookback:]
     bullish = [b for b in recent if b["close"] > b["open"]]
     bearish = [b for b in recent if b["close"] < b["open"]]
-
     if len(bullish) == lookback:
         bodies = [abs(b["close"] - b["open"]) for b in bullish]
         growing = bodies[-1] >= bodies[0] * 0.7
-        conf = 0.83 if growing else 0.77
-        return "BUY", conf
-
+        return "BUY", 0.83 if growing else 0.77
     if len(bearish) == lookback:
         bodies = [abs(b["close"] - b["open"]) for b in bearish]
         growing = bodies[-1] >= bodies[0] * 0.7
-        conf = 0.83 if growing else 0.77
-        return "SELL", conf
-
-    if len(bullish) >= lookback - 1:
-        return "BUY", 0.72
-    if len(bearish) >= lookback - 1:
-        return "SELL", 0.72
-
+        return "SELL", 0.83 if growing else 0.77
+    if len(bullish) >= lookback - 1: return "BUY", 0.72
+    if len(bearish) >= lookback - 1: return "SELL", 0.72
     return "NONE", 0.0
 
-# ═══════════════════════════════════════════════════════════
-# ██  NOUVO: VWAP SIGNAL  ██
-# ═══════════════════════════════════════════════════════════
 def vwap_signal(candles, lookback=20):
-    if len(candles) < lookback:
-        return "NONE", 0.0
-
-    recent = candles[-lookback:]
-    total_pv = 0.0
-    total_v  = 0.0
-
+    if len(candles) < lookback: return "NONE", 0.0
+    recent = candles[-lookback:]; total_pv = 0.0; total_v = 0.0
     for c in recent:
         typ = (c["high"] + c["low"] + c["close"]) / 3
         vol = c.get("volume", 1000)
-        total_pv += typ * vol
-        total_v  += vol
-
-    if total_v == 0:
-        return "NONE", 0.0
-
-    vwap = total_pv / total_v
-    price = candles[-1]["close"]
-    at    = atr(candles, 14)
-
-    if at == 0:
-        return "NONE", 0.0
-
+        total_pv += typ * vol; total_v += vol
+    if total_v == 0: return "NONE", 0.0
+    vwap = total_pv / total_v; price = candles[-1]["close"]; at = atr(candles, 14)
+    if at == 0: return "NONE", 0.0
     dist_pct = (price - vwap) / max(at, 0.0001)
-
     if dist_pct > 0.3:
         conf = min(0.88, 0.72 + min(dist_pct * 0.03, 0.16))
         return "BUY", conf
     elif dist_pct < -0.3:
         conf = min(0.88, 0.72 + min(abs(dist_pct) * 0.03, 0.16))
         return "SELL", conf
-
     return "NONE", 0.0
 
-# ═══════════════════════════════════════════════════════════
-# STRATEGIES ORYAJINAL (pa chanje)
-# ═══════════════════════════════════════════════════════════
 def strat_ema(c):
     cl=[x["close"] for x in c]
     if len(cl)<25: return "NONE",0
@@ -494,8 +459,7 @@ def strat_fibonacci(c):
 def strat_fvg(c):
     if len(c)<15: return "NONE",0
     cl=[x["close"] for x in c]
-    e21=ema(cl,21) if len(cl)>=21 else None
-    r=rsi(cl)
+    e21=ema(cl,21) if len(cl)>=21 else None; r=rsi(cl)
     for i in range(3,min(15,len(c)-1)):
         c1=c[-(i+2)]; c3=c[-i]
         if c3["low"]>c1["high"] and c1["high"]<cl[-1]<c3["low"]:
@@ -534,8 +498,7 @@ def strat_macd(c):
 def strat_breakout(c):
     if len(c)<30: return "NONE",0
     cl=[x["close"] for x in c]
-    hi20=max(x["high"] for x in c[-21:-1])
-    lo20=min(x["low"] for x in c[-21:-1])
+    hi20=max(x["high"] for x in c[-21:-1]); lo20=min(x["low"] for x in c[-21:-1])
     r=rsi(cl)
     if cl[-1]>hi20 and cl[-2]<=hi20 and 50<r<75: return "BUY", 0.80
     if cl[-1]<lo20 and cl[-2]>=lo20 and 25<r<50: return "SELL", 0.80
@@ -546,10 +509,8 @@ def strat_breakout(c):
 def strat_smc(c):
     if len(c)<40: return "NONE",0
     cl=[x["close"] for x in c]
-    e50=ema(cl,50) if len(cl)>=50 else None
-    r=rsi(cl)
-    swing_hi=max(x["high"] for x in c[-30:-5])
-    swing_lo=min(x["low"] for x in c[-30:-5])
+    e50=ema(cl,50) if len(cl)>=50 else None; r=rsi(cl)
+    swing_hi=max(x["high"] for x in c[-30:-5]); swing_lo=min(x["low"] for x in c[-30:-5])
     if cl[-1]>swing_hi and cl[-2]<=swing_hi:
         if (not e50 or cl[-1]>e50[-1]) and 45<r<75: return "BUY", 0.84
     if cl[-1]<swing_lo and cl[-2]>=swing_lo:
@@ -559,8 +520,7 @@ def strat_smc(c):
 def strat_ob(c):
     if len(c)<30: return "NONE",0
     cl=[x["close"] for x in c]
-    e21=ema(cl,21) if len(cl)>=21 else None
-    r=rsi(cl)
+    e21=ema(cl,21) if len(cl)>=21 else None; r=rsi(cl)
     for i in range(4,20):
         b=c[-(i+1)]; body=abs(b["close"]-b["open"]); rng=b["high"]-b["low"]
         if rng==0 or body/rng<0.65: continue
@@ -574,8 +534,7 @@ def strat_stoch(c):
     if len(c)<20: return "NONE",0
     cl=[x["close"] for x in c]
     k=stoch_k(c); kp=stoch_k(c[:-1]) if len(c)>1 else k
-    e50=ema(cl,50) if len(cl)>=50 else None
-    r=rsi(cl)
+    e50=ema(cl,50) if len(cl)>=50 else None; r=rsi(cl)
     if k>kp and k<30 and (not e50 or cl[-1]>e50[-1]*0.997): return "BUY", 0.80
     if k<kp and k>70 and (not e50 or cl[-1]<e50[-1]*1.003): return "SELL", 0.80
     return "NONE",0
@@ -630,33 +589,22 @@ def strat_scalping(c):
         if not e50 or cl[-1]<e50[-1]*1.003: return "SELL", 0.74
     return "NONE",0
 
-# ═══════════════════════════════════════════════════════════
-# CONFLUENCE ELITE v6
-# ═══════════════════════════════════════════════════════════
 def calc_pivot_points(candles):
-    if len(candles) < 20:
-        return None
+    if len(candles) < 20: return None
     recent = candles[-20:]
-    hi  = max(x["high"]  for x in recent)
-    lo  = min(x["low"]   for x in recent)
-    cl  = candles[-1]["close"]
-    pp  = (hi + lo + cl) / 3
-    r1  = 2*pp - lo;  r2  = pp + (hi - lo);  r3  = hi + 2*(pp - lo)
-    s1  = 2*pp - hi;  s2  = pp - (hi - lo);  s3  = lo - 2*(hi - pp)
+    hi = max(x["high"] for x in recent); lo = min(x["low"] for x in recent); cl = candles[-1]["close"]
+    pp = (hi + lo + cl) / 3
+    r1 = 2*pp - lo; r2 = pp + (hi - lo); r3 = hi + 2*(pp - lo)
+    s1 = 2*pp - hi; s2 = pp - (hi - lo); s3 = lo - 2*(hi - pp)
     rng = hi - lo
-    return {
-        "pp":pp, "r1":r1, "r2":r2, "r3":r3,
-        "s1":s1, "s2":s2, "s3":s3,
-        "fib_r1":pp+0.382*rng, "fib_r2":pp+0.618*rng,
-        "fib_s1":pp-0.382*rng, "fib_s2":pp-0.618*rng,
-    }
+    return {"pp":pp,"r1":r1,"r2":r2,"r3":r3,"s1":s1,"s2":s2,"s3":s3,
+            "fib_r1":pp+0.382*rng,"fib_r2":pp+0.618*rng,
+            "fib_s1":pp-0.382*rng,"fib_s2":pp-0.618*rng}
 
 def pivot_signal(candles, trend):
     pv = calc_pivot_points(candles)
     if not pv: return False, 0.0
-    price = candles[-1]["close"]
-    tol   = 0.008
-
+    price = candles[-1]["close"]; tol = 0.008
     if trend == "TRENDING_UP":
         for lvl in [pv["s1"], pv["s2"], pv["fib_s1"], pv["fib_s2"], pv["pp"]]:
             if abs(price - lvl) / max(lvl, 0.0001) < tol:
@@ -671,307 +619,216 @@ def pivot_signal(candles, trend):
 
 def market_regime(candles):
     if len(candles)<20: return "UNKNOWN", 0
-    cl  = [x["close"] for x in candles]
+    cl = [x["close"] for x in candles]
     adx, pdi, mdi = calc_adx_full(candles, 14)
-    at  = atr(candles)
+    at = atr(candles)
     mid_val = sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
     atr_pct = (at/mid_val*100) if mid_val>0 else 0
-    e20 = ema(cl, 20)
-    e50 = ema(cl, 50) if len(cl)>=50 else None
-
+    e20 = ema(cl, 20); e50 = ema(cl, 50) if len(cl)>=50 else None
     if adx > 12 and pdi > mdi + 1:
         regime = "TRENDING_UP"; score = min(10, adx/3)
     elif adx > 12 and mdi > pdi + 1:
         regime = "TRENDING_DN"; score = min(10, adx/3)
     elif atr_pct > 4.0:
-        regime = "VOLATILE";    score = 2
+        regime = "VOLATILE"; score = 2
     else:
-        regime = "RANGING";     score = 3
-
+        regime = "RANGING"; score = 3
     if e50:
-        if cl[-1] > e50[-1] and regime == "TRENDING_UP":  score = min(10, score+1.5)
-        if cl[-1] < e50[-1] and regime == "TRENDING_DN":  score = min(10, score+1.5)
-
+        if cl[-1] > e50[-1] and regime == "TRENDING_UP": score = min(10, score+1.5)
+        if cl[-1] < e50[-1] and regime == "TRENDING_DN": score = min(10, score+1.5)
     return regime, round(score, 1)
 
 def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     if len(c) < 20: return "NONE", 0
-
-    cl  = [x["close"] for x in c]
-    at  = atr(c)
+    cl = [x["close"] for x in c]; at = atr(c)
     if at == 0: return "NONE", 0
-
     mid_price = sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
-    atr_pct   = (at/mid_price*100) if mid_price>0 else 0
+    atr_pct = (at/mid_price*100) if mid_price>0 else 0
     if atr_pct < 0.005: return "NONE", 0
-
     adx, pdi, mdi = calc_adx_full(c, 14)
     regime, _ = market_regime(c)
-
     st_sig, st_conf = supertrend(c, p=10, mult=3.0)
     ha_sig, ha_conf = heikin_ashi_trend(c, lookback=5)
     ce_sig, ce_conf = chandelier_exit(c, p=22, mult=3.0)
     vw_sig, vw_conf = vwap_signal(c, lookback=20)
-
     classic_fns = [
-        (strat_ema,       1.4),
-        (strat_rsi,       1.6),
-        (strat_macd,      1.5),
-        (strat_smc,       1.7),
-        (strat_breakout,  1.4),
-        (strat_ob,        1.5),
-        (strat_stoch,     1.3),
-        (strat_ai,        1.8),
-        (strat_scalping,  1.2),
-        (strat_fvg,       1.3),
-        (strat_fibonacci, 1.4),
+        (strat_ema,1.4),(strat_rsi,1.6),(strat_macd,1.5),(strat_smc,1.7),
+        (strat_breakout,1.4),(strat_ob,1.5),(strat_stoch,1.3),
+        (strat_ai,1.8),(strat_scalping,1.2),(strat_fvg,1.3),(strat_fibonacci,1.4),
     ]
-
-    buy_score = sell_score = 0.0
-    buy_cnt = sell_cnt = 0
+    buy_score = sell_score = 0.0; buy_cnt = sell_cnt = 0
     buy_confs = []; sell_confs = []
-
     NEW_WEIGHT = 2.5
-
-    if st_sig == "BUY"  and st_conf >= min_per_conf:
-        buy_score  += st_conf * NEW_WEIGHT; buy_cnt  += 1; buy_confs.append(st_conf)
-    elif st_sig == "SELL" and st_conf >= min_per_conf:
-        sell_score += st_conf * NEW_WEIGHT; sell_cnt += 1; sell_confs.append(st_conf)
-
-    if ha_sig == "BUY"  and ha_conf >= min_per_conf:
-        buy_score  += ha_conf * NEW_WEIGHT; buy_cnt  += 1; buy_confs.append(ha_conf)
-    elif ha_sig == "SELL" and ha_conf >= min_per_conf:
-        sell_score += ha_conf * NEW_WEIGHT; sell_cnt += 1; sell_confs.append(ha_conf)
-
-    if ce_sig == "BUY"  and ce_conf >= min_per_conf:
-        buy_score  += ce_conf * NEW_WEIGHT; buy_cnt  += 1; buy_confs.append(ce_conf)
-    elif ce_sig == "SELL" and ce_conf >= min_per_conf:
-        sell_score += ce_conf * NEW_WEIGHT; sell_cnt += 1; sell_confs.append(ce_conf)
-
-    if vw_sig == "BUY"  and vw_conf >= min_per_conf:
-        buy_score  += vw_conf * 1.8; buy_cnt  += 1; buy_confs.append(vw_conf)
-    elif vw_sig == "SELL" and vw_conf >= min_per_conf:
-        sell_score += vw_conf * 1.8; sell_cnt += 1; sell_confs.append(vw_conf)
-
+    if st_sig=="BUY" and st_conf>=min_per_conf: buy_score+=st_conf*NEW_WEIGHT; buy_cnt+=1; buy_confs.append(st_conf)
+    elif st_sig=="SELL" and st_conf>=min_per_conf: sell_score+=st_conf*NEW_WEIGHT; sell_cnt+=1; sell_confs.append(st_conf)
+    if ha_sig=="BUY" and ha_conf>=min_per_conf: buy_score+=ha_conf*NEW_WEIGHT; buy_cnt+=1; buy_confs.append(ha_conf)
+    elif ha_sig=="SELL" and ha_conf>=min_per_conf: sell_score+=ha_conf*NEW_WEIGHT; sell_cnt+=1; sell_confs.append(ha_conf)
+    if ce_sig=="BUY" and ce_conf>=min_per_conf: buy_score+=ce_conf*NEW_WEIGHT; buy_cnt+=1; buy_confs.append(ce_conf)
+    elif ce_sig=="SELL" and ce_conf>=min_per_conf: sell_score+=ce_conf*NEW_WEIGHT; sell_cnt+=1; sell_confs.append(ce_conf)
+    if vw_sig=="BUY" and vw_conf>=min_per_conf: buy_score+=vw_conf*1.8; buy_cnt+=1; buy_confs.append(vw_conf)
+    elif vw_sig=="SELL" and vw_conf>=min_per_conf: sell_score+=vw_conf*1.8; sell_cnt+=1; sell_confs.append(vw_conf)
     for fn, w in classic_fns:
         try:
             s, conf = fn(c)
-            if s=="BUY" and conf>=min_per_conf:
-                buy_score+=conf*w; buy_cnt+=1; buy_confs.append(conf)
-            elif s=="SELL" and conf>=min_per_conf:
-                sell_score+=conf*w; sell_cnt+=1; sell_confs.append(conf)
+            if s=="BUY" and conf>=min_per_conf: buy_score+=conf*w; buy_cnt+=1; buy_confs.append(conf)
+            elif s=="SELL" and conf>=min_per_conf: sell_score+=conf*w; sell_cnt+=1; sell_confs.append(conf)
         except: pass
-
-    if regime == "VOLATILE":
-        return "NONE", 0
-
-    dom_ratio  = 1.15
-    min_strats_req = min_strats
-
+    if regime == "VOLATILE": return "NONE", 0
+    dom_ratio = 1.15; min_strats_req = min_strats
     if regime == "RANGING":
         new_sigs = [st_sig, ha_sig, ce_sig]
-        buy_new  = sum(1 for s in new_sigs if s == "BUY")
-        sell_new = sum(1 for s in new_sigs if s == "SELL")
-
-        if buy_new >= 2 and buy_cnt >= min_strats_req:
-            if buy_score > sell_score * dom_ratio:
-                in_pivot, piv_bonus = pivot_signal(c, "TRENDING_UP")
-                final = min(0.92, 0.74 + (buy_score / max(buy_cnt, 1) / 5.0) * 0.12 + piv_bonus)
-                return "BUY", round(final, 3)
-
-        if sell_new >= 2 and sell_cnt >= min_strats_req:
-            if sell_score > buy_score * dom_ratio:
-                in_pivot, piv_bonus = pivot_signal(c, "TRENDING_DN")
-                final = min(0.92, 0.74 + (sell_score / max(sell_cnt, 1) / 5.0) * 0.12 + piv_bonus)
-                return "SELL", round(final, 3)
-
-        return "NONE", 0
-
-    if regime == "TRENDING_UP" and buy_cnt >= min_strats_req:
-        if buy_score > sell_score * dom_ratio:
+        buy_new = sum(1 for s in new_sigs if s=="BUY"); sell_new = sum(1 for s in new_sigs if s=="SELL")
+        if buy_new>=2 and buy_cnt>=min_strats_req and buy_score>sell_score*dom_ratio:
             in_pivot, piv_bonus = pivot_signal(c, "TRENDING_UP")
-            adx_bonus = min(0.05, adx / 500)
-            final = min(0.95, 0.75 + (buy_score / max(buy_cnt, 1) / 5.0) * 0.13 + piv_bonus + adx_bonus)
+            final = min(0.92, 0.74+(buy_score/max(buy_cnt,1)/5.0)*0.12+piv_bonus)
             return "BUY", round(final, 3)
-
-    if regime == "TRENDING_DN" and sell_cnt >= min_strats_req:
-        if sell_score > buy_score * dom_ratio:
+        if sell_new>=2 and sell_cnt>=min_strats_req and sell_score>buy_score*dom_ratio:
             in_pivot, piv_bonus = pivot_signal(c, "TRENDING_DN")
-            adx_bonus = min(0.05, adx / 500)
-            final = min(0.95, 0.75 + (sell_score / max(sell_cnt, 1) / 5.0) * 0.13 + piv_bonus + adx_bonus)
+            final = min(0.92, 0.74+(sell_score/max(sell_cnt,1)/5.0)*0.12+piv_bonus)
             return "SELL", round(final, 3)
-
+        return "NONE", 0
+    if regime=="TRENDING_UP" and buy_cnt>=min_strats_req and buy_score>sell_score*dom_ratio:
+        in_pivot, piv_bonus = pivot_signal(c, "TRENDING_UP")
+        adx_bonus = min(0.05, adx/500)
+        final = min(0.95, 0.75+(buy_score/max(buy_cnt,1)/5.0)*0.13+piv_bonus+adx_bonus)
+        return "BUY", round(final, 3)
+    if regime=="TRENDING_DN" and sell_cnt>=min_strats_req and sell_score>buy_score*dom_ratio:
+        in_pivot, piv_bonus = pivot_signal(c, "TRENDING_DN")
+        adx_bonus = min(0.05, adx/500)
+        final = min(0.95, 0.75+(sell_score/max(sell_cnt,1)/5.0)*0.13+piv_bonus+adx_bonus)
+        return "SELL", round(final, 3)
     return "NONE", 0
 
-# ═══════════════════════════════════════════════════════════
-# DERIV PRO ELITE v6
-# ═══════════════════════════════════════════════════════════
 def strat_deriv_pro_elite(c):
     if len(c)<50: return "NONE",0
-    cl=[x["close"] for x in c]
-    hi=[x["high"] for x in c]
-    lo_=[x["low"] for x in c]
-
-    e9=ema(cl,9); e21=ema(cl,21)
-    e50=ema(cl,50) if len(cl)>=50 else None
+    cl=[x["close"] for x in c]; hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
+    e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50) if len(cl)>=50 else None
     if not e9 or not e21: return "NONE",0
     if len(e9)<3 or len(e21)<3: return "NONE",0
-
-    r=rsi(cl,14)
-    at=atr(c)
-    m,sig_=macd(cl)
-    macd_hist=m-sig_
+    r=rsi(cl,14); at=atr(c); m,sig_=macd(cl); macd_hist=m-sig_
     if len(cl)>=2:
-        m_prev,sig_prev=macd(cl[:-1])
-        macd_hist_prev=m_prev-sig_prev
+        m_prev,sig_prev=macd(cl[:-1]); macd_hist_prev=m_prev-sig_prev
     else:
         macd_hist_prev=0
-    up_bb,mid_bb,lo_bb=bb(cl,20,2.0)
-    k=stoch_k(c,14)
-    kp=stoch_k(c[:-2]) if len(c)>2 else k
-
+    up_bb,mid_bb,lo_bb=bb(cl,20,2.0); k=stoch_k(c,14); kp=stoch_k(c[:-2]) if len(c)>2 else k
     if at==0 or not mid_bb: return "NONE",0
-
     atr_pct=at/mid_bb*100
-    if atr_pct < 0.01: return "NONE",0
-    if atr_pct > 5.0:  return "NONE",0
-
+    if atr_pct<0.01 or atr_pct>5.0: return "NONE",0
     adx,pdi,mdi=calc_adx_full(c,14)
-    if adx < 12: return "NONE",0
-
-    trend_up   = (e9[-1]>e21[-1])
-    trend_down = (e9[-1]<e21[-1])
+    if adx<12: return "NONE",0
+    trend_up=(e9[-1]>e21[-1]); trend_down=(e9[-1]<e21[-1])
     if e50:
-        trend_up   = trend_up   and cl[-1]>e50[-1]*0.998
+        trend_up = trend_up and cl[-1]>e50[-1]*0.998
         trend_down = trend_down and cl[-1]<e50[-1]*1.002
     if not trend_up and not trend_down: return "NONE",0
-
-    if trend_up  and not (e9[-1]>e9[-2] or e21[-1]>e21[-2]): return "NONE",0
+    if trend_up and not (e9[-1]>e9[-2] or e21[-1]>e21[-2]): return "NONE",0
     if trend_down and not (e9[-1]<e9[-2] or e21[-1]<e21[-2]): return "NONE",0
-
-    hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
-    hi10=max(hi[-11:-1]); lo10=min(lo_[-11:-1])
-
+    hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1]); hi10=max(hi[-11:-1]); lo10=min(lo_[-11:-1])
     roc3=(cl[-1]-cl[-4])/max(abs(cl[-4]),0.001)*100 if len(cl)>=4 else 0
     roc5v=(cl[-1]-cl[-6])/max(abs(cl[-6]),0.001)*100 if len(cl)>=6 else 0
-
-    last_body=abs(cl[-1]-c[-1]["open"])
-    last_range=max(c[-1]["high"]-c[-1]["low"],0.00001)
+    last_body=abs(cl[-1]-c[-1]["open"]); last_range=max(c[-1]["high"]-c[-1]["low"],0.00001)
     body_ratio=last_body/last_range
-
     st_sig, _ = supertrend(c, p=10, mult=3.0)
-
     if trend_up:
-        score=0.0
-        bo_score=0.0
-        if cl[-1]>hi20 and cl[-2]<=hi20:  bo_score+=2.0
-        elif cl[-1]>hi20*0.997:            bo_score+=0.8
-        if cl[-1]>hi10 and cl[-2]<=hi10:  bo_score+=1.0
-        elif cl[-1]>hi10*0.998:            bo_score+=0.4
+        score=0.0; bo_score=0.0
+        if cl[-1]>hi20 and cl[-2]<=hi20: bo_score+=2.0
+        elif cl[-1]>hi20*0.997: bo_score+=0.8
+        if cl[-1]>hi10 and cl[-2]<=hi10: bo_score+=1.0
+        elif cl[-1]>hi10*0.998: bo_score+=0.4
         score+=min(3.5, bo_score)
-        if 25<=r<=45:       score+=3.0
-        elif 45<r<=55:      score+=2.0
-        elif 55<r<=65:      score+=1.2
-        elif r<25:          score+=2.5
-        elif r<70:          score+=0.8
+        if 25<=r<=45: score+=3.0
+        elif 45<r<=55: score+=2.0
+        elif 55<r<=65: score+=1.2
+        elif r<25: score+=2.5
+        elif r<70: score+=0.8
         macd_ok=(m>sig_ and macd_hist>macd_hist_prev)
         if macd_ok and m>0: score+=2.5
-        elif macd_ok:       score+=1.8
-        elif m>sig_:        score+=1.0
-        if k<25 and k>kp:   score+=2.5
+        elif macd_ok: score+=1.8
+        elif m>sig_: score+=1.0
+        if k<25 and k>kp: score+=2.5
         elif k<35 and k>kp: score+=1.5
-        elif k>kp:          score+=0.8
-        if lo_bb and cl[-1]<=lo_bb*1.005:  score+=2.0
-        elif mid_bb and cl[-1]<mid_bb:     score+=0.8
+        elif k>kp: score+=0.8
+        if lo_bb and cl[-1]<=lo_bb*1.005: score+=2.0
+        elif mid_bb and cl[-1]<mid_bb: score+=0.8
         if roc3>0 and roc5v>0: score+=1.5
-        elif roc3>0:           score+=0.7
+        elif roc3>0: score+=0.7
         if body_ratio>=0.60 and cl[-1]>c[-1]["open"]: score+=1.5
         elif body_ratio>=0.40 and cl[-1]>c[-1]["open"]: score+=0.8
-        if adx>=45:   score+=2.0
+        if adx>=45: score+=2.0
         elif adx>=35: score+=1.5
         elif adx>=25: score+=0.8
         elif adx>=12: score+=0.3
-        if st_sig == "BUY": score += 2.0
+        if st_sig=="BUY": score+=2.0
         in_piv, piv_b = pivot_signal(c, "TRENDING_UP")
-        if in_piv: score += 1.5
-        if score >= 5.0:
-            pct = score/15.0
-            conf = min(0.95, 0.76 + pct*0.25)
+        if in_piv: score+=1.5
+        if score>=5.0:
+            pct=score/15.0; conf=min(0.95,0.76+pct*0.25)
             if adx>=50: conf=min(0.95,conf+0.02)
-            return "BUY", round(conf, 3)
-
+            return "BUY", round(conf,3)
     if trend_down:
-        score=0.0
-        bo_score=0.0
-        if cl[-1]<lo20 and cl[-2]>=lo20:  bo_score+=2.0
-        elif cl[-1]<lo20*1.003:            bo_score+=0.8
-        if cl[-1]<lo10 and cl[-2]>=lo10:  bo_score+=1.0
-        elif cl[-1]<lo10*1.002:            bo_score+=0.4
+        score=0.0; bo_score=0.0
+        if cl[-1]<lo20 and cl[-2]>=lo20: bo_score+=2.0
+        elif cl[-1]<lo20*1.003: bo_score+=0.8
+        if cl[-1]<lo10 and cl[-2]>=lo10: bo_score+=1.0
+        elif cl[-1]<lo10*1.002: bo_score+=0.4
         score+=min(3.5, bo_score)
-        if 55<=r<=75:       score+=3.0
-        elif 45<=r<55:      score+=2.0
-        elif 35<=r<45:      score+=1.2
-        elif r>75:          score+=2.5
-        elif r>30:          score+=0.8
+        if 55<=r<=75: score+=3.0
+        elif 45<=r<55: score+=2.0
+        elif 35<=r<45: score+=1.2
+        elif r>75: score+=2.5
+        elif r>30: score+=0.8
         macd_ok=(m<sig_ and macd_hist<macd_hist_prev)
         if macd_ok and m<0: score+=2.5
-        elif macd_ok:       score+=1.8
-        elif m<sig_:        score+=1.0
-        if k>75 and k<kp:   score+=2.5
+        elif macd_ok: score+=1.8
+        elif m<sig_: score+=1.0
+        if k>75 and k<kp: score+=2.5
         elif k>65 and k<kp: score+=1.5
-        elif k<kp:          score+=0.8
-        if up_bb and cl[-1]>=up_bb*0.995:  score+=2.0
-        elif mid_bb and cl[-1]>mid_bb:     score+=0.8
+        elif k<kp: score+=0.8
+        if up_bb and cl[-1]>=up_bb*0.995: score+=2.0
+        elif mid_bb and cl[-1]>mid_bb: score+=0.8
         if roc3<0 and roc5v<0: score+=1.5
-        elif roc3<0:           score+=0.7
+        elif roc3<0: score+=0.7
         if body_ratio>=0.60 and cl[-1]<c[-1]["open"]: score+=1.5
         elif body_ratio>=0.40 and cl[-1]<c[-1]["open"]: score+=0.8
-        if adx>=45:   score+=2.0
+        if adx>=45: score+=2.0
         elif adx>=35: score+=1.5
         elif adx>=25: score+=0.8
         elif adx>=12: score+=0.3
-        if st_sig == "SELL": score += 2.0
+        if st_sig=="SELL": score+=2.0
         in_piv, piv_b = pivot_signal(c, "TRENDING_DN")
-        if in_piv: score += 1.5
-        if score >= 5.0:
-            pct = score/15.0
-            conf = min(0.95, 0.76 + pct*0.25)
+        if in_piv: score+=1.5
+        if score>=5.0:
+            pct=score/15.0; conf=min(0.95,0.76+pct*0.25)
             if adx>=50: conf=min(0.95,conf+0.02)
-            return "SELL", round(conf, 3)
-
+            return "SELL", round(conf,3)
     return "NONE", 0
 
-# ═══════════════════════════════════════════════════════════
-# BINANCE STRATEGIES
-# ═══════════════════════════════════════════════════════════
 def strat_binance_gold(c):
     if len(c)<60: return "NONE",0
-    cl=[x["close"] for x in c]
-    hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
-    vol=[x.get("volume",0) for x in c]
+    cl=[x["close"] for x in c]; vol=[x.get("volume",0) for x in c]
     e20=ema(cl,20); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
     if not e20 or not e50 or not e200: return "NONE",0
     r=rsi(cl,14); at=atr(c); m,sig_=macd(cl)
     up,mid,lo=bb(cl,20,2.0); k=stoch_k(c,14)
-    adx_v,pdi_v,mdi_v = calc_adx_full(c,14)
+    adx_v,pdi_v,mdi_v=calc_adx_full(c,14)
     if not at or not mid: return "NONE",0
-    if adx_v < 20: return "NONE", 0
-    avg_vol = sum(vol[-20:])/20 if len(vol)>=20 else 1
-    if avg_vol > 0 and vol[-1] < avg_vol * 0.5: return "NONE", 0
-    trend_up = e20[-1]>e50[-1] and e50[-1]>e200[-1] and cl[-1]>e200[-1]
-    trend_dn = e20[-1]<e50[-1] and e50[-1]<e200[-1] and cl[-1]<e200[-1]
-    if not trend_up and not trend_dn: return "NONE", 0
-    atr_pct = at/mid*100
-    if atr_pct < 0.03: return "NONE", 0
+    if adx_v<20: return "NONE",0
+    avg_vol=sum(vol[-20:])/20 if len(vol)>=20 else 1
+    if avg_vol>0 and vol[-1]<avg_vol*0.5: return "NONE",0
+    trend_up=e20[-1]>e50[-1] and e50[-1]>e200[-1] and cl[-1]>e200[-1]
+    trend_dn=e20[-1]<e50[-1] and e50[-1]<e200[-1] and cl[-1]<e200[-1]
+    if not trend_up and not trend_dn: return "NONE",0
+    atr_pct=at/mid*100
+    if atr_pct<0.03: return "NONE",0
     buy_pts=0; sell_pts=0
     if trend_up: buy_pts+=3
     if trend_dn: sell_pts+=3
     if adx_v>=35: buy_pts+=2 if trend_up else 0; sell_pts+=2 if trend_dn else 0
     elif adx_v>=25: buy_pts+=1 if trend_up else 0; sell_pts+=1 if trend_dn else 0
     if trend_up and 30<=r<=55: buy_pts+=3
-    elif trend_up and r<30:    buy_pts+=2
+    elif trend_up and r<30: buy_pts+=2
     if trend_dn and 45<=r<=70: sell_pts+=3
-    elif trend_dn and r>70:    sell_pts+=2
+    elif trend_dn and r>70: sell_pts+=2
     if m>sig_ and m>0: buy_pts+=2
     if m<sig_ and m<0: sell_pts+=2
     if lo and cl[-1]<=lo*1.002: buy_pts+=3
@@ -982,35 +839,31 @@ def strat_binance_gold(c):
     elif k<35: buy_pts+=1
     if k>75: sell_pts+=2
     elif k>65: sell_pts+=1
-    if vol[-1] > avg_vol*1.8:
-        if buy_pts > sell_pts: buy_pts+=2
-        elif sell_pts > buy_pts: sell_pts+=2
-    st_sig, st_c = supertrend(c, p=10, mult=3.0)
+    if vol[-1]>avg_vol*1.8:
+        if buy_pts>sell_pts: buy_pts+=2
+        elif sell_pts>buy_pts: sell_pts+=2
+    st_sig,st_c=supertrend(c,p=10,mult=3.0)
     if st_sig=="BUY": buy_pts+=2
     if st_sig=="SELL": sell_pts+=2
-    if buy_pts>=7 and buy_pts>sell_pts+2 and trend_up:
-        return "BUY", min(0.91, 0.72+buy_pts*0.018)
-    if sell_pts>=7 and sell_pts>buy_pts+2 and trend_dn:
-        return "SELL", min(0.91, 0.72+sell_pts*0.018)
+    if buy_pts>=7 and buy_pts>sell_pts+2 and trend_up: return "BUY",min(0.91,0.72+buy_pts*0.018)
+    if sell_pts>=7 and sell_pts>buy_pts+2 and trend_dn: return "SELL",min(0.91,0.72+sell_pts*0.018)
     return "NONE",0
 
 def strat_binance_crypto(c):
     if len(c)<50: return "NONE",0
-    cl=[x["close"] for x in c]
-    hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
+    cl=[x["close"] for x in c]; hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
     vol=[x.get("volume",0) for x in c]
     e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50)
     e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
     if not e9 or not e21 or not e50: return "NONE",0
     r=rsi(cl,14); at=atr(c); m,sig_=macd(cl)
     up,mid,lo=bb(cl,20,2.0); k=stoch_k(c,14)
-    adx_v,pdi_v,mdi_v = calc_adx_full(c,14)
+    adx_v,pdi_v,mdi_v=calc_adx_full(c,14)
     avg_vol=sum(vol[-20:])/20 if len(vol)>=20 else 1
     curr_vol=vol[-1] if vol[-1]>0 else avg_vol
-    if adx_v < 18: return "NONE", 0
-    if avg_vol > 0 and curr_vol < avg_vol * 0.4: return "NONE", 0
-    long_bull = e200 and cl[-1] > e200[-1]
-    long_bear = e200 and cl[-1] < e200[-1]
+    if adx_v<18: return "NONE",0
+    if avg_vol>0 and curr_vol<avg_vol*0.4: return "NONE",0
+    long_bull=e200 and cl[-1]>e200[-1]; long_bear=e200 and cl[-1]<e200[-1]
     buy_pts=0; sell_pts=0
     if e9[-1]>e21[-1]>e50[-1]:
         buy_pts+=3
@@ -1040,58 +893,50 @@ def strat_binance_crypto(c):
     elif k<35: buy_pts+=1
     if k>80: sell_pts+=2
     elif k>65: sell_pts+=1
-    vol_surge = curr_vol > avg_vol * 2.0
+    vol_surge=curr_vol>avg_vol*2.0
     if vol_surge:
-        if buy_pts > sell_pts: buy_pts+=3
-        elif sell_pts > buy_pts: sell_pts+=3
+        if buy_pts>sell_pts: buy_pts+=3
+        elif sell_pts>buy_pts: sell_pts+=3
     hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
     if cl[-1]>hi20 and cl[-2]<=hi20:
-        if curr_vol > avg_vol * 1.5: buy_pts+=3
+        if curr_vol>avg_vol*1.5: buy_pts+=3
         else: buy_pts+=1
     if cl[-1]<lo20 and cl[-2]>=lo20:
-        if curr_vol > avg_vol * 1.5: sell_pts+=3
+        if curr_vol>avg_vol*1.5: sell_pts+=3
         else: sell_pts+=1
-    st_sig, _ = supertrend(c, p=10, mult=3.0)
+    st_sig,_=supertrend(c,p=10,mult=3.0)
     if st_sig=="BUY": buy_pts+=2
     if st_sig=="SELL": sell_pts+=2
-    if buy_pts>=8 and buy_pts>sell_pts+2:
-        return "BUY", min(0.92, 0.70+buy_pts*0.016)
-    if sell_pts>=8 and sell_pts>buy_pts+2:
-        return "SELL", min(0.92, 0.70+sell_pts*0.016)
+    if buy_pts>=8 and buy_pts>sell_pts+2: return "BUY",min(0.92,0.70+buy_pts*0.016)
+    if sell_pts>=8 and sell_pts>buy_pts+2: return "SELL",min(0.92,0.70+sell_pts*0.016)
     return "NONE",0
 
 def strat_confluence_binance(c, symbol="BTCUSDT"):
     if "XAU" in symbol.upper() or "GOLD" in symbol.upper():
-        primary,conf_p = strat_binance_gold(c)
+        primary,conf_p=strat_binance_gold(c)
     else:
-        primary,conf_p = strat_binance_crypto(c)
+        primary,conf_p=strat_binance_crypto(c)
     if primary=="NONE": return "NONE",0
-    others = [(strat_rsi,1.3),(strat_macd,1.2),(strat_ema,1.1),(strat_smc,1.4),(strat_ob,1.2)]
+    others=[(strat_rsi,1.3),(strat_macd,1.2),(strat_ema,1.1),(strat_smc,1.4),(strat_ob,1.2)]
     confirm=0; total_conf=conf_p
     for fn,w in others:
         try:
             s,conf=fn(c)
-            if s==primary and conf>=0.65:
-                confirm+=1; total_conf+=conf*w
+            if s==primary and conf>=0.65: confirm+=1; total_conf+=conf*w
         except: pass
     if confirm>=3:
-        final_conf=min(0.92, total_conf/(confirm+2))
-        return primary, max(0.75, final_conf)
+        final_conf=min(0.92,total_conf/(confirm+2))
+        return primary,max(0.75,final_conf)
     return "NONE",0
 
 STRATEGIES={
-    "confluence":strat_confluence_elite,
-    "deriv_pro":strat_deriv_pro_elite,
-    "supertrend":supertrend,
-    "heikin_ashi":heikin_ashi_trend,
-    "chandelier":chandelier_exit,
-    "ai":strat_ai,
-    "ema":strat_ema,"fibonacci":strat_fibonacci,
-    "fvg":strat_fvg,"rsi":strat_rsi,
-    "macd_bollinger":strat_macd,"breakout":strat_breakout,
-    "smc":strat_smc,"order_block":strat_ob,
-    "stoch_ema":strat_stoch,"scalping_pro":strat_scalping,
-    "binance_gold":strat_binance_gold,
+    "confluence":strat_confluence_elite,"deriv_pro":strat_deriv_pro_elite,
+    "supertrend":supertrend,"heikin_ashi":heikin_ashi_trend,
+    "chandelier":chandelier_exit,"ai":strat_ai,
+    "ema":strat_ema,"fibonacci":strat_fibonacci,"fvg":strat_fvg,
+    "rsi":strat_rsi,"macd_bollinger":strat_macd,"breakout":strat_breakout,
+    "smc":strat_smc,"order_block":strat_ob,"stoch_ema":strat_stoch,
+    "scalping_pro":strat_scalping,"binance_gold":strat_binance_gold,
     "binance_crypto":strat_binance_crypto,
 }
 
@@ -1139,7 +984,7 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# DERIV CLIENT — Sipòte tou de tip token (ansyen + pat_)
+# DERIV CLIENT — Sipòte Token Klasik + pat_ OTP
 # ═══════════════════════════════════════════════════════════
 class DerivClient:
     def __init__(self, token, app_id="1089"):
@@ -1168,8 +1013,12 @@ class DerivClient:
             err[0] = str(e)
             done.set()
 
-        # Si pat_ token, eseye plizyè app_id
-        app_ids_to_try = ["36544", self.app_id, "16929"] if self.token.lower().startswith("pat_") else [self.app_id]
+        # Token klasik: eseye app_id ou a + 1089 kòm backup
+        is_pat = self.token.lower().startswith("pat_")
+        if is_pat:
+            app_ids_to_try = [PAT_APP_ID, "36544", self.app_id, "16929"]
+        else:
+            app_ids_to_try = [self.app_id, "1089"]
 
         for aid in app_ids_to_try:
             done.clear(); err[0] = None
@@ -1180,16 +1029,10 @@ class DerivClient:
             try: ws.close()
             except: pass
             if not err[0]:
-                self.app_id = aid  # Konsève app_id ki mache a
+                self.app_id = aid
                 return self._bal
 
         if err[0]:
-            is_pat = self.token.lower().startswith("pat_")
-            if is_pat:
-                raise Exception(
-                    f"Token pat_ refize pa Deriv. "
-                    "Kreye yon token API klasik nan app.deriv.com → API Token."
-                )
             raise Exception(f"Deriv: {err[0]}")
         return self._bal
 
@@ -1278,7 +1121,7 @@ class DerivClient:
     def balance(self): return self._bal
 
 # ═══════════════════════════════════════════════════════════
-# DERIV DIGITS CLIENT — Sipòte tou de tip token
+# DERIV DIGITS CLIENT — Sipòte Token Klasik + pat_ OTP
 # ═══════════════════════════════════════════════════════════
 class DerivDigitsClient:
     def __init__(self, token, app_id="1089"):
@@ -1307,7 +1150,11 @@ class DerivDigitsClient:
             err[0] = str(e)
             done.set()
 
-        app_ids_to_try = ["36544", self.app_id, "16929"] if self.token.lower().startswith("pat_") else [self.app_id]
+        is_pat = self.token.lower().startswith("pat_")
+        if is_pat:
+            app_ids_to_try = [PAT_APP_ID, "36544", self.app_id, "16929"]
+        else:
+            app_ids_to_try = [self.app_id, "1089"]
 
         for aid in app_ids_to_try:
             done.clear(); err[0] = None
@@ -1322,12 +1169,6 @@ class DerivDigitsClient:
                 return self._bal
 
         if err[0]:
-            is_pat = self.token.lower().startswith("pat_")
-            if is_pat:
-                raise Exception(
-                    f"Token pat_ refize. "
-                    "Kreye yon token API klasik nan app.deriv.com → API Token."
-                )
             raise Exception(f"Deriv: {err[0]}")
         return self._bal
 
@@ -1338,8 +1179,7 @@ class DerivDigitsClient:
             d=json.loads(msg)
             if d.get("msg_type")=="authorize":
                 ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","style":"ticks"}))
-            elif d.get("msg_type")=="history":
-                res[0]=d.get("history",{}); done.set()
+            elif d.get("msg_type")=="history": res[0]=d.get("history",{}); done.set()
             elif "error" in d: done.set()
         def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
@@ -1359,8 +1199,7 @@ class DerivDigitsClient:
         if barrier is not None: proposal["barrier"]=str(barrier)
         def on_msg(ws,msg):
             d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps(proposal))
+            if mt=="authorize" and "error" not in d: ws.send(json.dumps(proposal))
             elif mt=="proposal":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
@@ -1385,8 +1224,7 @@ class DerivDigitsClient:
             elif mt=="proposal_open_contract":
                 poc=d.get("proposal_open_contract",{})
                 status=poc.get("status","")
-                if status in ("won","lost","sold"):
-                    res[0]=poc; done.set()
+                if status in ("won","lost","sold"): res[0]=poc; done.set()
         def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
@@ -1435,7 +1273,7 @@ class DerivDigitsClient:
     def balance(self): return self._bal
 
 # ═══════════════════════════════════════════════════════════
-# BINANCE CLIENTS (pa chanje)
+# BINANCE CLIENTS
 # ═══════════════════════════════════════════════════════════
 class BinanceClient:
     def __init__(self, key, secret):
@@ -1492,104 +1330,77 @@ class BinanceClient:
         return 0.001
 
     def get_price_precision(self, symbol):
-        info = self.get_symbol_info_cached(symbol)
+        info=self.get_symbol_info_cached(symbol)
         if not info: return 2
-        for f in info.get("filters", []):
-            if f["filterType"] == "PRICE_FILTER":
-                tick = float(f["tickSize"])
-                if tick >= 1: return 0
-                elif tick >= 0.1: return 1
-                elif tick >= 0.01: return 2
-                elif tick >= 0.001: return 3
+        for f in info.get("filters",[]):
+            if f["filterType"]=="PRICE_FILTER":
+                tick=float(f["tickSize"])
+                if tick>=1: return 0
+                elif tick>=0.1: return 1
+                elif tick>=0.01: return 2
+                elif tick>=0.001: return 3
                 else: return 4
         return 2
 
     def place_trade(self, symbol, direction, amount_usdt=10.0, sl_pct=0.018, tp_pct=0.035):
-        from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
-        ticker  = self.c.get_symbol_ticker(symbol=symbol)
-        price   = float(ticker["price"])
-        pp      = self.get_price_precision(symbol)
-        qp      = self.get_qty_precision(symbol)
-        min_qty = self.get_min_qty(symbol)
-        min_not = self.get_min_notional(symbol)
-        qty = round(amount_usdt / price, qp)
-        qty = max(qty, min_qty)
-        if qty * price < min_not:
-            qty = round(min_not / price * 1.01, qp)
-            qty = max(qty, min_qty)
-        side = SIDE_BUY if direction == "BUY" else SIDE_SELL
-        if direction == "BUY":
-            limit_price = round(price * 1.0005, pp)
-            sl_price    = round(price * (1 - sl_pct), pp)
-            tp_price    = round(price * (1 + tp_pct), pp)
+        from binance.enums import SIDE_BUY, SIDE_SELL, TIME_IN_FORCE_GTC
+        ticker=self.c.get_symbol_ticker(symbol=symbol); price=float(ticker["price"])
+        pp=self.get_price_precision(symbol); qp=self.get_qty_precision(symbol)
+        min_qty=self.get_min_qty(symbol); min_not=self.get_min_notional(symbol)
+        qty=round(amount_usdt/price,qp); qty=max(qty,min_qty)
+        if qty*price<min_not: qty=round(min_not/price*1.01,qp); qty=max(qty,min_qty)
+        side=SIDE_BUY if direction=="BUY" else SIDE_SELL
+        if direction=="BUY":
+            limit_price=round(price*1.0005,pp); sl_price=round(price*(1-sl_pct),pp); tp_price=round(price*(1+tp_pct),pp)
         else:
-            limit_price = round(price * 0.9995, pp)
-            sl_price    = round(price * (1 + sl_pct), pp)
-            tp_price    = round(price * (1 - tp_pct), pp)
-        entry_order = self.c.order_limit(
-            symbol=symbol, side=side, quantity=qty,
-            price=str(limit_price), timeInForce=TIME_IN_FORCE_GTC
-        )
+            limit_price=round(price*0.9995,pp); sl_price=round(price*(1+sl_pct),pp); tp_price=round(price*(1-tp_pct),pp)
+        entry_order=self.c.order_limit(symbol=symbol,side=side,quantity=qty,price=str(limit_price),timeInForce=TIME_IN_FORCE_GTC)
         logger.info(f"Binance LIMIT {direction} {symbol} qty={qty} @ {limit_price} | SL={sl_price} TP={tp_price}")
-        oid = entry_order.get("orderId")
-        filled = False
+        oid=entry_order.get("orderId"); filled=False
         for _ in range(18):
             time.sleep(5)
             try:
-                status = self.c.get_order(symbol=symbol, orderId=oid)
-                if status["status"] == "FILLED":
-                    filled = True; break
-                elif status["status"] in ("CANCELED","EXPIRED","REJECTED"):
-                    break
+                status=self.c.get_order(symbol=symbol,orderId=oid)
+                if status["status"]=="FILLED": filled=True; break
+                elif status["status"] in ("CANCELED","EXPIRED","REJECTED"): break
             except: pass
         if not filled:
-            try: self.c.cancel_order(symbol=symbol, orderId=oid)
+            try: self.c.cancel_order(symbol=symbol,orderId=oid)
             except: pass
-            logger.info(f"Limit pa fill — market order fallback {symbol}")
-            return self.c.order_market(symbol=symbol, side=side, quantity=qty)
+            return self.c.order_market(symbol=symbol,side=side,quantity=qty)
         try:
-            oco = self.c.order_oco_sell(
-                symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
-                stopLimitPrice=str(round(sl_price * (0.998 if direction=="BUY" else 1.002), pp)),
-                stopLimitTimeInForce=TIME_IN_FORCE_GTC
-            ) if direction == "BUY" else self.c.order_oco_buy(
-                symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
-                stopLimitPrice=str(round(sl_price * 1.002, pp)),
-                stopLimitTimeInForce=TIME_IN_FORCE_GTC
-            )
-            logger.info(f"OCO plase: TP={tp_price} SL={sl_price}")
+            oco=self.c.order_oco_sell(symbol=symbol,quantity=qty,price=str(tp_price),stopPrice=str(sl_price),stopLimitPrice=str(round(sl_price*(0.998 if direction=="BUY" else 1.002),pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC) if direction=="BUY" else self.c.order_oco_buy(symbol=symbol,quantity=qty,price=str(tp_price),stopPrice=str(sl_price),stopLimitPrice=str(round(sl_price*1.002,pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC)
         except Exception as e:
-            logger.warning(f"OCO echwe ({e}) — SL/TP manyèl")
+            logger.warning(f"OCO echwe ({e})")
         return entry_order
 
     def send_profit(self, amount):
         try:
             r=self.c.withdraw(coin="USDT",address=PROFIT_WALLET,amount=amount,network="ERC20")
-            logger.info(f"Profit sent: ${amount}")
-            return r
+            logger.info(f"Profit sent: ${amount}"); return r
         except Exception as e:
             logger.error(f"Profit transfer: {e}"); return None
 
 class BinanceUSClient:
     def __init__(self, key, secret):
         from binance.client import Client
-        self.c = Client(key, secret, tld="us")
+        self.c=Client(key,secret,tld="us")
 
     def connect(self):
         for b in self.c.get_account()["balances"]:
-            if b["asset"] == "USDT": return float(b["free"])
+            if b["asset"]=="USDT": return float(b["free"])
         return 0.0
 
     @property
     def balance(self):
         try:
             for b in self.c.get_account()["balances"]:
-                if b["asset"] == "USDT": return float(b["free"])
+                if b["asset"]=="USDT": return float(b["free"])
         except: pass
         return 0.0
 
     def get_candles(self, symbol="BTCUSDT", interval="15m", limit=200):
-        k = self.c.get_klines(symbol=symbol, interval=interval, limit=limit)
+        k=self.c.get_klines(symbol=symbol,interval=interval,limit=limit)
         return [{"open":float(x[1]),"high":float(x[2]),"low":float(x[3]),"close":float(x[4]),"volume":float(x[5]),"time":x[0]} for x in k]
 
     def get_symbol_info_cached(self, symbol):
@@ -1597,114 +1408,87 @@ class BinanceUSClient:
         except: return None
 
     def get_min_notional(self, symbol):
-        info = self.get_symbol_info_cached(symbol)
+        info=self.get_symbol_info_cached(symbol)
         if not info: return 10.0
-        for f in info.get("filters", []):
-            if f["filterType"] == "MIN_NOTIONAL": return float(f.get("minNotional", "10"))
-            if f["filterType"] == "NOTIONAL":     return float(f.get("minNotional", "10"))
+        for f in info.get("filters",[]):
+            if f["filterType"]=="MIN_NOTIONAL": return float(f.get("minNotional","10"))
+            if f["filterType"]=="NOTIONAL": return float(f.get("minNotional","10"))
         return 10.0
 
     def get_qty_precision(self, symbol):
-        info = self.get_symbol_info_cached(symbol)
+        info=self.get_symbol_info_cached(symbol)
         if not info: return 3
-        for f in info.get("filters", []):
-            if f["filterType"] == "LOT_SIZE":
-                step = float(f["stepSize"])
-                if step >= 1: return 0
-                elif step >= 0.1: return 1
-                elif step >= 0.01: return 2
-                elif step >= 0.001: return 3
+        for f in info.get("filters",[]):
+            if f["filterType"]=="LOT_SIZE":
+                step=float(f["stepSize"])
+                if step>=1: return 0
+                elif step>=0.1: return 1
+                elif step>=0.01: return 2
+                elif step>=0.001: return 3
                 else: return 4
         return 3
 
     def get_min_qty(self, symbol):
-        info = self.get_symbol_info_cached(symbol)
+        info=self.get_symbol_info_cached(symbol)
         if not info: return 0.001
-        for f in info.get("filters", []):
-            if f["filterType"] == "LOT_SIZE": return float(f["minQty"])
+        for f in info.get("filters",[]):
+            if f["filterType"]=="LOT_SIZE": return float(f["minQty"])
         return 0.001
 
     def get_price_precision(self, symbol):
-        info = self.get_symbol_info_cached(symbol)
+        info=self.get_symbol_info_cached(symbol)
         if not info: return 2
-        for f in info.get("filters", []):
-            if f["filterType"] == "PRICE_FILTER":
-                tick = float(f["tickSize"])
-                if tick >= 1: return 0
-                elif tick >= 0.1: return 1
-                elif tick >= 0.01: return 2
-                elif tick >= 0.001: return 3
+        for f in info.get("filters",[]):
+            if f["filterType"]=="PRICE_FILTER":
+                tick=float(f["tickSize"])
+                if tick>=1: return 0
+                elif tick>=0.1: return 1
+                elif tick>=0.01: return 2
+                elif tick>=0.001: return 3
                 else: return 4
         return 2
 
     def place_trade(self, symbol, direction, amount_usdt=10.0, sl_pct=0.018, tp_pct=0.035):
-        from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
-        ticker  = self.c.get_symbol_ticker(symbol=symbol)
-        price   = float(ticker["price"])
-        pp      = self.get_price_precision(symbol)
-        qp      = self.get_qty_precision(symbol)
-        min_qty = self.get_min_qty(symbol)
-        min_not = self.get_min_notional(symbol)
-        qty = round(amount_usdt / price, qp)
-        qty = max(qty, min_qty)
-        if qty * price < min_not:
-            qty = round(min_not / price * 1.01, qp)
-            qty = max(qty, min_qty)
-        side = SIDE_BUY if direction == "BUY" else SIDE_SELL
-        if direction == "BUY":
-            limit_price = round(price * 1.0005, pp)
-            sl_price    = round(price * (1 - sl_pct), pp)
-            tp_price    = round(price * (1 + tp_pct), pp)
+        from binance.enums import SIDE_BUY, SIDE_SELL, TIME_IN_FORCE_GTC
+        ticker=self.c.get_symbol_ticker(symbol=symbol); price=float(ticker["price"])
+        pp=self.get_price_precision(symbol); qp=self.get_qty_precision(symbol)
+        min_qty=self.get_min_qty(symbol); min_not=self.get_min_notional(symbol)
+        qty=round(amount_usdt/price,qp); qty=max(qty,min_qty)
+        if qty*price<min_not: qty=round(min_not/price*1.01,qp); qty=max(qty,min_qty)
+        side=SIDE_BUY if direction=="BUY" else SIDE_SELL
+        if direction=="BUY":
+            limit_price=round(price*1.0005,pp); sl_price=round(price*(1-sl_pct),pp); tp_price=round(price*(1+tp_pct),pp)
         else:
-            limit_price = round(price * 0.9995, pp)
-            sl_price    = round(price * (1 + sl_pct), pp)
-            tp_price    = round(price * (1 - tp_pct), pp)
-        entry_order = self.c.order_limit(
-            symbol=symbol, side=side, quantity=qty,
-            price=str(limit_price), timeInForce=TIME_IN_FORCE_GTC
-        )
-        logger.info(f"BinanceUS LIMIT {direction} {symbol} qty={qty} @ {limit_price} | SL={sl_price} TP={tp_price}")
-        oid = entry_order.get("orderId")
-        filled = False
+            limit_price=round(price*0.9995,pp); sl_price=round(price*(1+sl_pct),pp); tp_price=round(price*(1-tp_pct),pp)
+        entry_order=self.c.order_limit(symbol=symbol,side=side,quantity=qty,price=str(limit_price),timeInForce=TIME_IN_FORCE_GTC)
+        logger.info(f"BinanceUS LIMIT {direction} {symbol} qty={qty} @ {limit_price}")
+        oid=entry_order.get("orderId"); filled=False
         for _ in range(18):
             time.sleep(5)
             try:
-                status = self.c.get_order(symbol=symbol, orderId=oid)
-                if status["status"] == "FILLED":
-                    filled = True; break
-                elif status["status"] in ("CANCELED","EXPIRED","REJECTED"):
-                    break
+                status=self.c.get_order(symbol=symbol,orderId=oid)
+                if status["status"]=="FILLED": filled=True; break
+                elif status["status"] in ("CANCELED","EXPIRED","REJECTED"): break
             except: pass
         if not filled:
-            try: self.c.cancel_order(symbol=symbol, orderId=oid)
+            try: self.c.cancel_order(symbol=symbol,orderId=oid)
             except: pass
-            logger.info(f"Limit pa fill — market fallback {symbol}")
-            return self.c.order_market(symbol=symbol, side=side, quantity=qty)
+            return self.c.order_market(symbol=symbol,side=side,quantity=qty)
         try:
-            oco = self.c.order_oco_sell(
-                symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
-                stopLimitPrice=str(round(sl_price * (0.998 if direction=="BUY" else 1.002), pp)),
-                stopLimitTimeInForce=TIME_IN_FORCE_GTC
-            ) if direction == "BUY" else self.c.order_oco_buy(
-                symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
-                stopLimitPrice=str(round(sl_price * 1.002, pp)),
-                stopLimitTimeInForce=TIME_IN_FORCE_GTC
-            )
-            logger.info(f"OCO plase: TP={tp_price} SL={sl_price}")
+            oco=self.c.order_oco_sell(symbol=symbol,quantity=qty,price=str(tp_price),stopPrice=str(sl_price),stopLimitPrice=str(round(sl_price*(0.998 if direction=="BUY" else 1.002),pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC) if direction=="BUY" else self.c.order_oco_buy(symbol=symbol,quantity=qty,price=str(tp_price),stopPrice=str(sl_price),stopLimitPrice=str(round(sl_price*1.002,pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC)
         except Exception as e:
-            logger.warning(f"OCO echwe ({e}) — SL/TP manyèl")
+            logger.warning(f"OCO echwe ({e})")
         return entry_order
 
     def send_profit(self, amount):
         try:
-            r = self.c.withdraw(coin="USDT", address=PROFIT_WALLET, amount=amount, network="ERC20")
-            logger.info(f"Profit sent (BinanceUS): ${amount}")
-            return r
+            r=self.c.withdraw(coin="USDT",address=PROFIT_WALLET,amount=amount,network="ERC20")
+            logger.info(f"Profit sent BinanceUS: ${amount}"); return r
         except Exception as e:
             logger.error(f"Profit transfer BinanceUS: {e}"); return None
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS LOGIC (pa chanje)
+# DIGITS LOGIC
 # ═══════════════════════════════════════════════════════════
 def get_last_digit(price):
     s=f"{price:.5f}".replace('.','')
@@ -1739,8 +1523,7 @@ def analyze_digits_ticks(ticks, threshold=4):
 def analyze_digits_even_odd(ticks):
     if len(ticks)<30: return "NONE",0
     digits=[get_last_digit(t["price"]) for t in ticks[-30:]]
-    evens=sum(1 for d in digits if d%2==0)
-    odds=sum(1 for d in digits if d%2!=0)
+    evens=sum(1 for d in digits if d%2==0); odds=sum(1 for d in digits if d%2!=0)
     if odds>=22: return "EVEN",0.62
     if evens>=22: return "ODD",0.62
     return "NONE",0
@@ -1752,281 +1535,158 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 # ═══════════════════════════════════════════════════════════
-# TRADING LOOPS (pa chanje)
+# TRADING LOOPS
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
-    cfg = st["config"]
-    symbol = cfg.get("symbol","R_10")
-    lot = float(cfg.get("lot",0.35))
-    digit_type = cfg.get("digit_type","over_under")
-    min_conf = float(cfg.get("min_conf",0.65))
-    PAYOUT = 0.95
-
-    base_lot=round(max(0.35,lot),2); current_lot=base_lot
+    cfg=st["config"]; symbol=cfg.get("symbol","R_10"); lot=float(cfg.get("lot",0.35))
+    digit_type=cfg.get("digit_type","over_under"); min_conf=float(cfg.get("min_conf",0.65))
+    PAYOUT=0.95; base_lot=round(max(0.35,lot),2); current_lot=base_lot
     consec_losses=0; total_lost=0.0
-
     add_log(st,f"🎲 Digits Bot | {symbol} | {digit_type} | Base:${base_lot}")
-
     while st["running"]:
-        if bot_id and st.get("bot_id")!=bot_id:
-            add_log(st,"⏹ Digits bot anile","WARN"); return
-
+        if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Digits bot anile","WARN"); return
         _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
-            add_log(st,f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!","SUCCESS")
-            st["running"]=False; break
+            add_log(st,f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!","SUCCESS"); st["running"]=False; break
         if _loss>0 and st["total_pnl"]<=-abs(_loss):
-            add_log(st,f"🛑 LIMIT PÈT ${_loss:.2f} RIVE! Bot kanpe!","ERROR")
-            st["running"]=False; break
-
+            add_log(st,f"🛑 LIMIT PÈT ${_loss:.2f} RIVE! Bot kanpe!","ERROR"); st["running"]=False; break
         try:
             api=st.get("deriv_digits_api")
-            if not api:
-                add_log(st,"Digits API pa konekte","ERROR")
-                st["running"]=False; break
-
+            if not api: add_log(st,"Digits API pa konekte","ERROR"); st["running"]=False; break
             try:
                 b=api.get_balance_sync()
                 if b and b>0: st["balance"]=b
             except: pass
-
             if st["balance"]<current_lot:
                 add_log(st,f"⚠ Balans ${st['balance']:.2f} ensifizan — reset","WARN")
-                current_lot=base_lot; consec_losses=0; total_lost=0.0
-                time.sleep(10); continue
-
+                current_lot=base_lot; consec_losses=0; total_lost=0.0; time.sleep(10); continue
             ticks=api.get_ticks(symbol,100)
-            if len(ticks)<30:
-                add_log(st,"Pa ase ticks — tann 20sek...","WARN")
-                time.sleep(20); continue
-
+            if len(ticks)<30: add_log(st,"Pa ase ticks — tann 20sek...","WARN"); time.sleep(20); continue
             sig="NONE"; conf=0.0; contract_type=""; barrier=None
             if digit_type=="over_under":
                 action,conf=analyze_digits_ticks(ticks,threshold=4)
-                if action=="OVER":   contract_type="DIGITOVER";  barrier=4; sig="OVER 4"
+                if action=="OVER": contract_type="DIGITOVER"; barrier=4; sig="OVER 4"
                 elif action=="UNDER": contract_type="DIGITUNDER"; barrier=5; sig="UNDER 5"
             elif digit_type=="even_odd":
                 action,conf=analyze_digits_even_odd(ticks)
                 if action=="EVEN": contract_type="DIGITEVEN"; sig="EVEN"
-                elif action=="ODD":  contract_type="DIGITODD";  sig="ODD"
-
-            if sig=="NONE":
-                add_log(st,"⏭ Pa gen siyal klè — tann 15sek...")
-                time.sleep(15); continue
-
-            if conf<min_conf:
-                add_log(st,f"⏭ Conf {conf:.0%} < {min_conf:.0%} — tann 15sek...")
-                time.sleep(15); continue
-
+                elif action=="ODD": contract_type="DIGITODD"; sig="ODD"
+            if sig=="NONE": add_log(st,"⏭ Pa gen siyal klè — tann 15sek..."); time.sleep(15); continue
+            if conf<min_conf: add_log(st,f"⏭ Conf {conf:.0%} < {min_conf:.0%} — tann 15sek..."); time.sleep(15); continue
             add_log(st,f"✅ Siyal | {sig} | Conf:{conf:.0%} | Mise:${current_lot:.2f}")
-
             bal_before=st["balance"]
             try:
                 r=api.place_digits_trade(symbol,contract_type,current_lot,barrier)
                 cid=r.get("contract_id")
-                if not cid:
-                    add_log(st,f"Trade echwe — pa gen contract_id","ERROR")
-                    time.sleep(10); continue
-
-                bal_open=float(r.get("balance_after",bal_before-current_lot))
-                st["balance"]=bal_open
-                add_log(st,f"⏳ #{cid} | {sig} | Ap tann rezilta reyèl...","SUCCESS")
-
-                result=api.wait_contract_result(cid, timeout=35)
+                if not cid: add_log(st,"Trade echwe — pa gen contract_id","ERROR"); time.sleep(10); continue
+                bal_open=float(r.get("balance_after",bal_before-current_lot)); st["balance"]=bal_open
+                add_log(st,f"⏳ #{cid} | {sig} | Ap tann rezilta...","SUCCESS")
+                result=api.wait_contract_result(cid,timeout=35)
                 pnl=0.0; won=False
-
                 if result:
                     status=result.get("status","")
-                    buy_price=float(result.get("buy_price",current_lot))
-                    sell_price=float(result.get("sell_price",0))
-                    if status=="won":
-                        pnl=sell_price-buy_price; won=True
-                        add_log(st,f"✅ WON! +${pnl:.2f} | Bal:${bal_open+pnl:.2f}","SUCCESS")
-                    elif status=="lost":
-                        pnl=-buy_price; won=False
-                        add_log(st,f"❌ LOST -${buy_price:.2f} | Bal:${bal_open:.2f}","WARN")
+                    buy_price=float(result.get("buy_price",current_lot)); sell_price=float(result.get("sell_price",0))
+                    if status=="won": pnl=sell_price-buy_price; won=True; add_log(st,f"✅ WON! +${pnl:.2f}","SUCCESS")
+                    elif status=="lost": pnl=-buy_price; won=False; add_log(st,f"❌ LOST -${buy_price:.2f}","WARN")
                     else:
-                        time.sleep(5)
-                        nb=api.get_balance_sync()
-                        if nb and nb>0:
-                            pnl=nb-bal_before; st["balance"]=nb; won=pnl>0
-                        else:
-                            pnl=-current_lot
+                        time.sleep(5); nb=api.get_balance_sync()
+                        if nb and nb>0: pnl=nb-bal_before; st["balance"]=nb; won=pnl>0
+                        else: pnl=-current_lot
                 else:
-                    time.sleep(5)
-                    nb=api.get_balance_sync()
-                    if nb and nb>0:
-                        st["balance"]=nb; pnl=nb-bal_before; won=pnl>0.01
-                    else:
-                        pnl=-current_lot; won=False
-
-                if result and result.get("status")=="won":
-                    st["balance"]=bal_open+pnl
-
+                    time.sleep(5); nb=api.get_balance_sync()
+                    if nb and nb>0: st["balance"]=nb; pnl=nb-bal_before; won=pnl>0.01
+                    else: pnl=-current_lot; won=False
+                if result and result.get("status")=="won": st["balance"]=bal_open+pnl
                 if won:
                     current_lot=base_lot; consec_losses=0; total_lost=0.0
                 else:
-                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot
-                    total_lost+=loss; consec_losses+=1
+                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot; total_lost+=loss; consec_losses+=1
                     if consec_losses<=4:
-                        next_lot=round((total_lost+base_lot)/PAYOUT,2)
-                        current_lot=max(base_lot,min(next_lot,50.0))
+                        next_lot=round((total_lost+base_lot)/PAYOUT,2); current_lot=max(base_lot,min(next_lot,50.0))
                         add_log(st,f"⚠ Pèt #{consec_losses}/4 | Rekipere:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
                     else:
-                        add_log(st,f"🔄 Reset apre 4 pèt | Total pèdi:${total_lost:.2f} | Tann 90sek...","WARN")
-                        current_lot=base_lot; consec_losses=0; total_lost=0.0
-                        time.sleep(90)
-
+                        add_log(st,f"🔄 Reset apre 4 pèt | Tann 90sek...","WARN")
+                        current_lot=base_lot; consec_losses=0; total_lost=0.0; time.sleep(90)
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
                     "symbol":symbol,"side":sig,"entry":round(ticks[-1]["price"],5),
                     "conf":f"{conf:.0%}","strategy":f"Digits-{digit_type}","tf":"ticks",
-                    "stake":round(current_lot,2),"pnl":round(pnl,2),
-                    "status":"won" if won else "lost"}
+                    "stake":round(current_lot,2),"pnl":round(pnl,2),"status":"won" if won else "lost"}
                 st["trades"].insert(0,trade); st["total_pnl"]+=pnl
-
                 if won and pnl>0:
                     ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
                     if ps>=0.50:
                         try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 1%:${ps}","PROFIT")
                         except: pass
-
-                add_log(st,"⏸ Tann 10sek...")
-                time.sleep(10)
-
+                add_log(st,"⏸ Tann 10sek..."); time.sleep(10)
             except Exception as e:
-                add_log(st,f"Digits trade echwe: {e}","ERROR")
-                time.sleep(15)
-
+                add_log(st,f"Digits trade echwe: {e}","ERROR"); time.sleep(15)
         except Exception as e:
-            add_log(st,f"Erè digits loop: {e}","ERROR")
-            time.sleep(15)
-
+            add_log(st,f"Erè digits loop: {e}","ERROR"); time.sleep(15)
     add_log(st,"⏹ Digits Bot arrêté")
 
 def binance_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
-    cfg=st["config"]
-    symbol=cfg.get("symbol","BTCUSDT")
-    strategy=cfg.get("strategy","confluence")
-    lot=float(cfg.get("lot",11.0))
-    tf=int(cfg.get("tf_secs",900))
-    min_conf=float(cfg.get("min_conf",0.75))
-
-    is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper() or "XAG" in symbol.upper()
-    SL_PCT  = 0.015 if is_gold else 0.020
-    TP_PCT  = 0.030 if is_gold else 0.040
-
-    if strategy=="binance_gold" or is_gold:
-        fn = lambda c: strat_binance_gold(c)
-        add_log(st,f"🥇 Gold Mode | {symbol} | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}%")
-    elif strategy=="binance_crypto":
-        fn = lambda c: strat_binance_crypto(c)
-        add_log(st,f"🪙 Crypto Mode | {symbol} | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}%")
-    elif strategy=="confluence":
-        fn = lambda c: strat_confluence_binance(c, symbol)
-        add_log(st,f"🔥 Confluence Binance | {symbol} | 4 konfirm")
-    else:
-        fn = STRATEGIES.get(strategy, strat_confluence_elite)
-        add_log(st,f"📊 {strategy} | {symbol} | TF:{tf//60}min")
-
+    cfg=st["config"]; symbol=cfg.get("symbol","BTCUSDT"); strategy=cfg.get("strategy","confluence")
+    lot=float(cfg.get("lot",11.0)); tf=int(cfg.get("tf_secs",900)); min_conf=float(cfg.get("min_conf",0.75))
+    is_gold="XAU" in symbol.upper() or "GOLD" in symbol.upper() or "XAG" in symbol.upper()
+    SL_PCT=0.015 if is_gold else 0.020; TP_PCT=0.030 if is_gold else 0.040
+    if strategy=="binance_gold" or is_gold: fn=lambda c:strat_binance_gold(c)
+    elif strategy=="binance_crypto": fn=lambda c:strat_binance_crypto(c)
+    elif strategy=="confluence": fn=lambda c:strat_confluence_binance(c,symbol)
+    else: fn=STRATEGIES.get(strategy,strat_confluence_elite)
     iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"15m")
-    base_lot=max(11.0,lot); current_lot=base_lot
-    consec_losses=0; total_lost=0.0
-
-    add_log(st,f"🚀 Binance ELITE | Limit Order + OCO SL/TP | Base:${base_lot} | Conf:{min_conf:.0%}")
-
+    base_lot=max(11.0,lot); current_lot=base_lot; consec_losses=0; total_lost=0.0
+    add_log(st,f"🚀 Binance ELITE | {symbol} | Base:${base_lot} | Conf:{min_conf:.0%}")
     while st["running"]:
-        if bot_id and st.get("bot_id")!=bot_id:
-            add_log(st,"⏹ Bot anile","WARN"); return
-
+        if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Bot anile","WARN"); return
         _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
-            add_log(st,f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!","SUCCESS")
-            st["running"]=False; break
+            add_log(st,f"🎯 OBJEKTIF ${_target:.2f} RIVE!","SUCCESS"); st["running"]=False; break
         if _loss>0 and st["total_pnl"]<=-abs(_loss):
-            add_log(st,f"🛑 LIMIT PÈT ${_loss:.2f} RIVE! Bot kanpe!","ERROR")
-            st["running"]=False; break
-
+            add_log(st,f"🛑 LIMIT PÈT ${_loss:.2f} RIVE!","ERROR"); st["running"]=False; break
         try:
             api=st.get("binance_api")
-            if not api:
-                add_log(st,"Binance pa konekte — STOP","ERROR")
-                st["running"]=False; break
-
+            if not api: add_log(st,"Binance pa konekte — STOP","ERROR"); st["running"]=False; break
             try:
                 b=api.balance
                 if b and b>0: st["balance"]=b
             except: pass
-
             try:
                 min_notional=api.get_min_notional(symbol)
-                if current_lot < min_notional*1.05:
-                    current_lot=round(min_notional*1.1,2)
-                    add_log(st,f"ℹ Mise ajiste: ${current_lot:.2f}","WARN")
+                if current_lot<min_notional*1.05: current_lot=round(min_notional*1.1,2); add_log(st,f"ℹ Mise ajiste: ${current_lot:.2f}","WARN")
             except: min_notional=10.0
-
-            if st["balance"] < current_lot:
+            if st["balance"]<current_lot:
                 add_log(st,f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f}","WARN")
-                current_lot=base_lot; consec_losses=0; total_lost=0.0
-                time.sleep(30); continue
-
+                current_lot=base_lot; consec_losses=0; total_lost=0.0; time.sleep(30); continue
             candles=api.get_candles(symbol,iv,200)
-            if len(candles)<50:
-                add_log(st,f"Pa ase done ({len(candles)}) — tann...","WARN")
-                time.sleep(60); continue
-
+            if len(candles)<50: add_log(st,f"Pa ase done ({len(candles)}) — tann...","WARN"); time.sleep(60); continue
             cl_vals=[x["close"] for x in candles]
             e200_v=ema(cl_vals,200) if len(cl_vals)>=200 else ema(cl_vals,100)
             adx_v,pdi_v,mdi_v=calc_adx_full(candles,14)
-
-            add_log(st,f"📡 {len(candles)} bouji | {symbol} {iv} | ADX:{adx_v:.0f}")
-
             sig,conf=fn(candles)
             add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | ADX:{adx_v:.0f}")
-
-            if sig=="NONE" or conf<min_conf:
-                add_log(st,f"⏭ Siyal fèb ({conf:.0%}) — tann pwochen bouji...")
-                time.sleep(tf); continue
-
+            if sig=="NONE" or conf<min_conf: add_log(st,f"⏭ Siyal fèb — tann..."); time.sleep(tf); continue
             if e200_v:
-                if sig=="BUY" and cl_vals[-1] < e200_v[-1]*0.995:
-                    add_log(st,f"⛔ REJTE BUY — Prix ANBA EMA200","WARN")
-                    time.sleep(tf); continue
-                if sig=="SELL" and cl_vals[-1] > e200_v[-1]*1.005:
-                    add_log(st,f"⛔ REJTE SELL — Prix ANLÈ EMA200","WARN")
-                    time.sleep(tf); continue
-
-            entry=candles[-1]["close"]
-            sl_dol=round(current_lot*SL_PCT,2)
-            tp_dol=round(current_lot*TP_PCT,2)
-            add_log(st,f"⚡ {sig} @ {entry:.4f} | Conf:{conf:.0%} | Mise:${current_lot:.2f} | SL:-${sl_dol} | TP:+${tp_dol}")
-
-            bal_before=api.balance; ok=False
+                if sig=="BUY" and cl_vals[-1]<e200_v[-1]*0.995: add_log(st,"⛔ REJTE BUY — ANBA EMA200","WARN"); time.sleep(tf); continue
+                if sig=="SELL" and cl_vals[-1]>e200_v[-1]*1.005: add_log(st,"⛔ REJTE SELL — ANLÈ EMA200","WARN"); time.sleep(tf); continue
+            entry=candles[-1]["close"]; bal_before=api.balance
             try:
-                order=api.place_trade(symbol, sig, current_lot, SL_PCT, TP_PCT)
-                ok=True
+                order=api.place_trade(symbol,sig,current_lot,SL_PCT,TP_PCT)
                 add_log(st,f"✅ Limit+OCO plase | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}%","SUCCESS")
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
                     "symbol":symbol,"side":sig,"entry":round(entry,4),"conf":f"{conf:.0%}",
                     "strategy":strategy,"tf":iv,"stake":round(current_lot,2),
-                    "sl":f"{SL_PCT*100:.1f}%","tp":f"{TP_PCT*100:.1f}%",
-                    "pnl":0.0,"status":"open"}
+                    "sl":f"{SL_PCT*100:.1f}%","tp":f"{TP_PCT*100:.1f}%","pnl":0.0,"status":"open"}
                 st["trades"].insert(0,trade)
             except Exception as e:
-                add_log(st,f"Trade echwe: {e}","ERROR")
-                time.sleep(30); continue
-
+                add_log(st,f"Trade echwe: {e}","ERROR"); time.sleep(30); continue
             time.sleep(15)
             try:
-                bal_after=api.balance
-                st["balance"]=bal_after
+                bal_after=api.balance; st["balance"]=bal_after
                 pnl_chk=bal_after-bal_before
                 if abs(pnl_chk)>0.01:
-                    add_log(st,f"💹 Balans ajou: ${bal_after:.2f} ({'+' if pnl_chk>=0 else ''}{pnl_chk:.4f})","INFO")
-                    if st["trades"]:
-                        st["trades"][0]["pnl"]=round(pnl_chk,4)
-                        st["trades"][0]["status"]="won" if pnl_chk>0 else "open"
+                    if st["trades"]: st["trades"][0]["pnl"]=round(pnl_chk,4); st["trades"][0]["status"]="won" if pnl_chk>0 else "open"
                     st["total_pnl"]+=pnl_chk
                     if pnl_chk>0:
                         ps=round(pnl_chk*PROFIT_PCT,4); st["profit_sent"]+=ps
@@ -2034,235 +1694,128 @@ def binance_trading_loop(st, bot_id=None):
                             try: api.send_profit(ps)
                             except: pass
             except: pass
-
             time.sleep(tf)
-
         except Exception as e:
-            add_log(st,f"Erè binance loop: {e}","ERROR")
-            time.sleep(30)
-
+            add_log(st,f"Erè binance loop: {e}","ERROR"); time.sleep(30)
     add_log(st,"⏹ Binance Bot arrêté")
 
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
-    cfg    = st["config"]
-    symbol   = cfg.get("symbol","R_100")
-    strategy = cfg.get("strategy","confluence")
-    lot      = float(cfg.get("lot",0.5))
-    tf       = int(cfg.get("tf_secs",60))
-    min_conf = float(cfg.get("min_conf",0.65))
-
-    fn = STRATEGIES.get(strategy, strat_confluence_elite)
-
-    wait_after  = tf + 90
-    base_lot    = round(max(0.5, lot), 2)
-    current_lot = base_lot
-    consec_losses = 0
-    total_lost    = 0.0
-
-    MAX_LOSSES_BEFORE_PAUSE = 3
-    PAUSE_WAIT_SECS         = 45
-
-    add_log(st, f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st, f"📌 SuperTrend+HA+Chandelier | ADX>12 | 3 strategies minimum")
-
+    cfg=st["config"]; symbol=cfg.get("symbol","R_100"); strategy=cfg.get("strategy","confluence")
+    lot=float(cfg.get("lot",0.5)); tf=int(cfg.get("tf_secs",60)); min_conf=float(cfg.get("min_conf",0.65))
+    fn=STRATEGIES.get(strategy,strat_confluence_elite)
+    wait_after=tf+90; base_lot=round(max(0.5,lot),2); current_lot=base_lot
+    consec_losses=0; total_lost=0.0
+    MAX_LOSSES_BEFORE_PAUSE=3; PAUSE_WAIT_SECS=45
+    add_log(st,f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
     while st["running"]:
-        if bot_id and st.get("bot_id") != bot_id:
-            add_log(st, "⏹ Bot anile","WARN"); return
-
-        _target = float(cfg.get("profit_target",0))
-        _loss   = float(cfg.get("loss_limit",0))
+        if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Bot anile","WARN"); return
+        _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
         if _target>0 and st["total_pnl"]>=_target:
-            add_log(st, f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!","SUCCESS")
-            st["running"]=False; break
+            add_log(st,f"🎯 OBJEKTIF ${_target:.2f} RIVE!","SUCCESS"); st["running"]=False; break
         if _loss>0 and st["total_pnl"]<=-abs(_loss):
-            add_log(st, f"🛑 LIMIT PÈT ${_loss:.2f} RIVE! Bot kanpe!","ERROR")
-            st["running"]=False; break
-
+            add_log(st,f"🛑 LIMIT PÈT ${_loss:.2f} RIVE!","ERROR"); st["running"]=False; break
         try:
-            api = st.get("deriv_api")
-            if not api:
-                add_log(st, "Broker pa konekte — STOP","ERROR")
-                st["running"]=False; break
-
+            api=st.get("deriv_api")
+            if not api: add_log(st,"Broker pa konekte — STOP","ERROR"); st["running"]=False; break
             try:
-                b = api.get_balance_sync()
+                b=api.get_balance_sync()
                 if b and b>0: st["balance"]=b
             except:
-                add_log(st, "⚠ Koneksyon pèdi — tann...","WARN")
-                time.sleep(15); continue
-
-            candles = api.get_candles(symbol, 200, tf)
-            if len(candles) < 20:
-                add_log(st, f"Pa ase done ({len(candles)}) — tann...","WARN")
-                time.sleep(30); continue
-
-            regime, regime_score = market_regime(candles)
-            adx_val, pdi_val, mdi_val = calc_adx_full(candles, 14)
-
-            st_sig, st_c = supertrend(candles)
-            ha_sig, ha_c = heikin_ashi_trend(candles)
-            add_log(st,
-                f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | "
-                f"ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
-
-            if consec_losses >= MAX_LOSSES_BEFORE_PAUSE:
-                mache_bon = regime in ("TRENDING_UP","TRENDING_DN","RANGING") and adx_val >= 12
-                if regime == "RANGING":
-                    mache_bon = (st_sig != "NONE") and (ha_sig != "NONE") and adx_val >= 10
+                add_log(st,"⚠ Koneksyon pèdi — tann...","WARN"); time.sleep(15); continue
+            candles=api.get_candles(symbol,200,tf)
+            if len(candles)<20: add_log(st,f"Pa ase done ({len(candles)}) — tann...","WARN"); time.sleep(30); continue
+            regime,regime_score=market_regime(candles); adx_val,pdi_val,mdi_val=calc_adx_full(candles,14)
+            st_sig,st_c=supertrend(candles); ha_sig,ha_c=heikin_ashi_trend(candles)
+            add_log(st,f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
+            if consec_losses>=MAX_LOSSES_BEFORE_PAUSE:
+                mache_bon=regime in ("TRENDING_UP","TRENDING_DN","RANGING") and adx_val>=12
+                if regime=="RANGING": mache_bon=(st_sig!="NONE") and (ha_sig!="NONE") and adx_val>=10
                 if not mache_bon:
-                    add_log(st,
-                        f"⏸ PÒZ APRE {consec_losses} PÈT | "
-                        f"Mache:{regime}(ADX:{adx_val:.0f}) — "
-                        f"Ap tann siyal... ({PAUSE_WAIT_SECS}sek)", "WARN")
+                    add_log(st,f"⏸ PÒZ APRE {consec_losses} PÈT | Mache:{regime}(ADX:{adx_val:.0f}) — Ap tann... ({PAUSE_WAIT_SECS}sek)","WARN")
                     time.sleep(PAUSE_WAIT_SECS); continue
                 else:
-                    add_log(st,
-                        f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | "
-                        f"Reprann avèk ${current_lot:.2f}", "SUCCESS")
-
-            if regime == "VOLATILE":
-                add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...","WARN")
-                time.sleep(min(tf, 120)); continue
-
-            if strategy == "confluence":
-                req_strats = 3 if consec_losses==0 else (4 if consec_losses<=2 else 5)
-                sig, conf = strat_confluence_elite(candles, min_strats=req_strats, min_per_conf=0.65)
-                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Elite({req_strats}strat)")
-            elif strategy == "deriv_pro":
-                sig, conf = strat_deriv_pro_elite(candles)
-                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | DerivPro Elite")
-            elif strategy == "supertrend":
-                sig, conf = supertrend(candles)
-                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | SuperTrend")
-            elif strategy == "heikin_ashi":
-                sig, conf = heikin_ashi_trend(candles)
-                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Heikin Ashi")
-            elif strategy == "chandelier":
-                sig, conf = chandelier_exit(candles)
-                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Chandelier")
+                    add_log(st,f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | Reprann avèk ${current_lot:.2f}","SUCCESS")
+            if regime=="VOLATILE":
+                add_log(st,f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...","WARN"); time.sleep(min(tf,120)); continue
+            if strategy=="confluence":
+                req_strats=3 if consec_losses==0 else (4 if consec_losses<=2 else 5)
+                sig,conf=strat_confluence_elite(candles,min_strats=req_strats,min_per_conf=0.65)
+                add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Elite({req_strats}strat)")
+            elif strategy=="deriv_pro":
+                sig,conf=strat_deriv_pro_elite(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | DerivPro Elite")
+            elif strategy=="supertrend":
+                sig,conf=supertrend(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | SuperTrend")
+            elif strategy=="heikin_ashi":
+                sig,conf=heikin_ashi_trend(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Heikin Ashi")
+            elif strategy=="chandelier":
+                sig,conf=chandelier_exit(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Chandelier")
             else:
-                sig, conf = fn(candles)
-                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
-
-            if sig == "BUY" and regime == "TRENDING_DN":
-                add_log(st, f"⛔ REJTE BUY — Mache ap DESANN. {st_sig}/{ha_sig}","WARN")
-                time.sleep(tf); continue
-
-            if sig == "SELL" and regime == "TRENDING_UP":
-                add_log(st, f"⛔ REJTE SELL — Mache ap MONTE. {st_sig}/{ha_sig}","WARN")
-                time.sleep(tf); continue
-
-            adaptive_conf = min_conf + (0.02 if consec_losses==1 else (0.04 if consec_losses>=2 else 0))
-            if sig == "NONE" or conf < adaptive_conf:
-                reason = "Pa gen siyal" if sig=="NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
-                add_log(st, f"⏭ {reason} — tann pwochen bouji...")
-                time.sleep(tf); continue
-
-            pv_sig_dir = "TRENDING_UP" if sig=="BUY" else "TRENDING_DN"
-            in_pivot, piv_bonus = pivot_signal(candles, pv_sig_dir)
-            pivot_info = " 🎯+PIVOT" if in_pivot else ""
-
-            if st["balance"] < current_lot:
-                add_log(st, f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
+                sig,conf=fn(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
+            if sig=="BUY" and regime=="TRENDING_DN": add_log(st,f"⛔ REJTE BUY — Mache ap DESANN","WARN"); time.sleep(tf); continue
+            if sig=="SELL" and regime=="TRENDING_UP": add_log(st,f"⛔ REJTE SELL — Mache ap MONTE","WARN"); time.sleep(tf); continue
+            adaptive_conf=min_conf+(0.02 if consec_losses==1 else (0.04 if consec_losses>=2 else 0))
+            if sig=="NONE" or conf<adaptive_conf:
+                reason="Pa gen siyal" if sig=="NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
+                add_log(st,f"⏭ {reason} — tann pwochen bouji..."); time.sleep(tf); continue
+            pv_sig_dir="TRENDING_UP" if sig=="BUY" else "TRENDING_DN"
+            in_pivot,piv_bonus=pivot_signal(candles,pv_sig_dir)
+            pivot_info=" 🎯+PIVOT" if in_pivot else ""
+            if st["balance"]<current_lot:
+                add_log(st,f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
                 current_lot=base_lot; consec_losses=0; total_lost=0.0
-
-            entry = candles[-1]["close"]
-            add_log(st,
-                f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | "
-                f"ST:{st_sig} | HA:{ha_sig} | Mise:${current_lot:.2f}{pivot_info}")
-
-            bal_before = st["balance"]
-            pnl=0.0; ok=False
-
+            entry=candles[-1]["close"]
+            add_log(st,f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | ST:{st_sig} | HA:{ha_sig} | Mise:${current_lot:.2f}{pivot_info}")
+            bal_before=st["balance"]; pnl=0.0; ok=False
             try:
-                r = api.place_trade(symbol, sig, max(0.5,current_lot), duration_secs=tf)
+                r=api.place_trade(symbol,sig,max(0.5,current_lot),duration_secs=tf)
                 if r.get("contract_id"):
-                    cid = r["contract_id"]
-                    bal_open = float(r.get("balance_after", bal_before-current_lot))
-                    st["balance"] = bal_open; ok=True
-                    add_log(st, f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
+                    cid=r["contract_id"]; bal_open=float(r.get("balance_after",bal_before-current_lot))
+                    st["balance"]=bal_open; ok=True
+                    add_log(st,f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
                     time.sleep(wait_after)
-
-                    bal_close = None
+                    bal_close=None
                     for attempt in range(5):
                         try:
-                            nb = api.get_balance_sync()
-                            if nb and nb>0 and abs(nb-bal_open)>0.01:
-                                bal_close=nb; break
-                            time.sleep(max(30, tf//4))
+                            nb=api.get_balance_sync()
+                            if nb and nb>0 and abs(nb-bal_open)>0.01: bal_close=nb; break
+                            time.sleep(max(30,tf//4))
                         except: time.sleep(30)
-
                     if bal_close:
-                        st["balance"] = bal_close
-                        pnl = bal_close - bal_before
-                        if pnl>0.10: add_log(st, f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
-                        else: add_log(st, f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
+                        st["balance"]=bal_close; pnl=bal_close-bal_before
+                        if pnl>0.10: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
+                        else: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
                     else:
-                        pnl = -(bal_before - bal_open)
-                        add_log(st, f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
+                        pnl=-(bal_before-bal_open); add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
             except Exception as e:
-                add_log(st, f"Trade echwe: {e}","ERROR")
-
+                add_log(st,f"Trade echwe: {e}","ERROR")
             if ok:
-                if pnl > 0:
-                    prev_losses = consec_losses
-                    current_lot = base_lot
-                    consec_losses = 0; total_lost = 0.0
-                    if prev_losses > 0:
-                        add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}","SUCCESS")
-                    else:
-                        add_log(st, f"✅ Genyen +${pnl:.2f}","SUCCESS")
+                if pnl>0:
+                    prev_losses=consec_losses; current_lot=base_lot; consec_losses=0; total_lost=0.0
+                    if prev_losses>0: add_log(st,f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}","SUCCESS")
+                    else: add_log(st,f"✅ Genyen +${pnl:.2f}","SUCCESS")
                 else:
-                    loss = abs(pnl) if abs(pnl)>0.01 else current_lot
-                    total_lost += loss
-                    consec_losses += 1
-
-                    if consec_losses < MAX_LOSSES_BEFORE_PAUSE:
-                        next_lot = round((total_lost + base_lot) / 0.95, 2)
-                        current_lot = max(0.5, min(next_lot, 100.0))
-                        add_log(st,
-                            f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
-                            f"Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}", "WARN")
+                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot; total_lost+=loss; consec_losses+=1
+                    if consec_losses<MAX_LOSSES_BEFORE_PAUSE:
+                        next_lot=round((total_lost+base_lot)/0.95,2); current_lot=max(0.5,min(next_lot,100.0))
+                        add_log(st,f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
                     else:
-                        next_lot = round((total_lost + base_lot) / 0.95, 2)
-                        current_lot = max(0.5, min(next_lot, 100.0))
-                        add_log(st,
-                            f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | "
-                            f"Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f} | "
-                            f"Ap tann mache...", "WARN")
-
-                trade = {
-                    "id": len(st["trades"])+1,
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "symbol": symbol, "side": sig,
-                    "entry": round(entry, 5),
-                    "conf": f"{conf:.0%}",
-                    "strategy": strategy,
-                    "tf": f"{tf//60}min",
-                    "stake": round(current_lot, 2),
-                    "pnl": round(pnl, 2),
-                    "status": "won" if pnl>0 else "lost",
-                    "regime": regime,
-                }
-                st["trades"].insert(0, trade)
-                st["total_pnl"] += pnl
-
-                if pnl > 0:
-                    ps = round(pnl * PROFIT_PCT, 2)
-                    st["profit_sent"] += ps
-                    if ps >= 0.5:
-                        try:
-                            api.transfer_to_account("CR9560099", ps)
-                            add_log(st, f"💸 1%:${ps} → CR9560099","PROFIT")
-                        except Exception as e:
-                            add_log(st, f"Transfer echwe: {e}","ERROR")
-
+                        next_lot=round((total_lost+base_lot)/0.95,2); current_lot=max(0.5,min(next_lot,100.0))
+                        add_log(st,f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f} | Ap tann mache...","WARN")
+                trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
+                    "symbol":symbol,"side":sig,"entry":round(entry,5),"conf":f"{conf:.0%}",
+                    "strategy":strategy,"tf":f"{tf//60}min","stake":round(current_lot,2),
+                    "pnl":round(pnl,2),"status":"won" if pnl>0 else "lost","regime":regime}
+                st["trades"].insert(0,trade); st["total_pnl"]+=pnl
+                if pnl>0:
+                    ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
+                    if ps>=0.5:
+                        try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 1%:${ps} → CR9560099","PROFIT")
+                        except Exception as e: add_log(st,f"Transfer echwe: {e}","ERROR")
         except Exception as e:
-            add_log(st, f"Erè: {e}","ERROR")
+            add_log(st,f"Erè: {e}","ERROR")
         time.sleep(tf)
-
-    add_log(st, "⏹ BonheurBot ELITE v6 arrêté")
+    add_log(st,"⏹ BonheurBot ELITE v6 arrêté")
 
 # ═══════════════════════════════════════════════════════════
 # API ROUTES
@@ -2274,44 +1827,50 @@ def api_connect():
         d=request.json; broker=d.get("broker")
         if broker=="deriv":
             import websocket
-            raw_token = d["token"].strip()
-            app_id    = d.get("app_id","1089")
-            is_pat    = raw_token.lower().startswith("pat_")
+            raw_token=d["token"].strip()
+            app_id=d.get("app_id","1089")
+            is_pat=raw_token.lower().startswith("pat_")
 
             if is_pat:
-                # ── pat_ token: eseye echange l pou session token ──
-                ok, session_tok, bal = exchange_pat_token(raw_token, app_id, timeout=20)
+                # ── Nouvo OTP flow pou pat_ token ──
+                add_log(st,"🔑 Token pat_ detekte — ap eseye OTP flow...","INFO")
+                ok, final_token, account_id, bal = resolve_pat_token_rest(raw_token, timeout=20)
                 if not ok:
                     return jsonify({
                         "ok": False,
                         "error": (
-                            f"❌ Token pat_ pa mache: {session_tok}\n\n"
-                            "💡 SOLISYON: Deriv pat_ tokens bezwen yon app OAuth espesyal.\n"
-                            "Pou BonheurBot, kreye yon token API KLASIK:\n"
+                            f"❌ Token pat_ pa mache: {final_token}\n\n"
+                            "💡 SOLISYON: Kreye yon token API KLASIK:\n"
                             "1. Ale sou app.deriv.com\n"
                             "2. Klike sou foto ou (anlè adwat) → API Token\n"
                             "3. Klike 'Create' — bay yon nòm (ex: BonheurBot)\n"
                             "4. Kopye token an (pa kòmanse ak pat_)\n"
-                            "5. Kole l nan chan 'Token Klasik' la"
+                            "5. Kole l nan chan token klasik la"
                         )
                     })
-                # Itilize session_tok si diferan, sinon itilize pat_ dirèkteman
-                final_token = session_tok if (session_tok and session_tok != raw_token) else raw_token
-                api = DerivClient(final_token, app_id)
+                # Itilize token ki retounen (kapab se pat_ orijinal la oswa OTP)
+                use_token = final_token if final_token else raw_token
+                # Si balans 0, eseye konekte pou jwenn balans reyèl
+                if bal == 0:
+                    try:
+                        api_tmp = DerivClient(use_token, PAT_APP_ID)
+                        bal = api_tmp.connect()
+                    except: pass
+                api = DerivClient(use_token, PAT_APP_ID)
                 api._bal = bal
                 st["deriv_api"] = api
-                st["deriv_digits_api"] = DerivDigitsClient(final_token, app_id)
-                st["broker"] = "deriv"; st["balance"] = bal; st["connected"] = True
-                return jsonify({"ok": True, "balance": bal, "broker": "deriv",
-                               "note": "✓ pat_ token konekte!"})
+                st["deriv_digits_api"] = DerivDigitsClient(use_token, PAT_APP_ID)
+                st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
+                note = f"✓ pat_ konekte via OTP | AccID:{account_id}" if account_id else "✓ pat_ konekte!"
+                return jsonify({"ok":True,"balance":bal,"broker":"deriv","note":note})
             else:
-                # Token klasik — metòd nòmal
-                api = DerivClient(raw_token, app_id)
-                bal = api.connect()
-                st["deriv_api"] = api
-                st["deriv_digits_api"] = DerivDigitsClient(raw_token, app_id)
-                st["broker"] = "deriv"; st["balance"] = bal; st["connected"] = True
-                return jsonify({"ok": True, "balance": bal, "broker": "deriv"})
+                # ── Token klasik — metòd nòmal ──
+                api=DerivClient(raw_token,app_id)
+                bal=api.connect()
+                st["deriv_api"]=api
+                st["deriv_digits_api"]=DerivDigitsClient(raw_token,app_id)
+                st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
+                return jsonify({"ok":True,"balance":bal,"broker":"deriv"})
 
         elif broker=="binance":
             api=BinanceClient(d["api_key"],d["api_secret"])
@@ -2341,23 +1900,16 @@ def api_start():
     d=request.json or {}
     tf_map={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}
     st["config"]={
-        "broker":st["broker"],
-        "symbol":d.get("symbol","R_100"),
-        "strategy":d.get("strategy","confluence"),
-        "lot":d.get("lot",0.5),
-        "tf_secs":tf_map.get(d.get("tf","15m"),900),
-        "min_conf":d.get("min_conf",0.65),
-        "profit_target":float(d.get("profit_target",0)),
-        "loss_limit":float(d.get("loss_limit",0)),
-        "mode":d.get("mode","forex"),
-        "digit_type":d.get("digit_type","over_under"),
+        "broker":st["broker"],"symbol":d.get("symbol","R_100"),
+        "strategy":d.get("strategy","confluence"),"lot":d.get("lot",0.5),
+        "tf_secs":tf_map.get(d.get("tf","15m"),900),"min_conf":d.get("min_conf",0.65),
+        "profit_target":float(d.get("profit_target",0)),"loss_limit":float(d.get("loss_limit",0)),
+        "mode":d.get("mode","forex"),"digit_type":d.get("digit_type","over_under"),
     }
     import random,string
     bot_id=''.join(random.choices(string.ascii_uppercase+string.digits,k=8))
     st["running"]=True; st["bot_id"]=bot_id
-    mode=d.get("mode","forex")
-    broker=st["broker"]
-
+    mode=d.get("mode","forex"); broker=st["broker"]
     if mode=="digits":
         threading.Thread(target=digits_trading_loop,args=(st,bot_id),daemon=True).start()
         add_log(st,"🎲 Digits mode démarre","INFO")
@@ -2370,8 +1922,7 @@ def api_start():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    st=get_state()
-    st["running"]=False; st["bot_id"]=None
+    st=get_state(); st["running"]=False; st["bot_id"]=None
     return jsonify({"ok":True})
 
 @app.route("/api/status")
@@ -2403,8 +1954,7 @@ def api_backtest():
 def api_login():
     st=get_state()
     d=request.json or {}
-    token=d.get("session_token","").strip()
-    code=d.get("code","").strip().upper()
+    token=d.get("session_token","").strip(); code=d.get("code","").strip().upper()
     if token:
         ok,msg_text=validate_session(token)
         if ok:
@@ -2414,16 +1964,13 @@ def api_login():
         else:
             st["access"]=False
             return jsonify({"ok":False,"msg":msg_text,"need_code":True})
-    if not code:
-        return jsonify({"ok":False,"msg":"Mete kòd aksè ou a","need_code":True})
+    if not code: return jsonify({"ok":False,"msg":"Mete kòd aksè ou a","need_code":True})
     ok,msg_text=check_access(code)
     if ok:
-        use_code(code)
-        new_token,expire=create_session()
+        use_code(code); new_token,expire=create_session()
         is_adm=ACCESS_CODES.get(code,{}).get("is_adm",False) or ACCESS_CODES.get(code,{}).get("created_at") is None
         with _sess_lock:
-            _sessions[new_token]["is_admin"]=is_adm
-            _save_sessions()
+            _sessions[new_token]["is_admin"]=is_adm; _save_sessions()
         st["access"]=True; st["session_token"]=new_token; st["is_admin"]=is_adm
         msg_out="✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete"
         return jsonify({"ok":True,"msg":msg_out,"session_token":new_token,"expire":expire,"is_admin":is_adm})
@@ -2506,12 +2053,10 @@ def admin_get_users():
 def admin_stop_user():
     d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    uid_prefix=d.get("uid","").replace("...","")
-    stopped=0
+    uid_prefix=d.get("uid","").replace("...",""); stopped=0
     with _user_lock:
         for uid,st in _user_states.items():
-            if uid.startswith(uid_prefix):
-                st["running"]=False; st["bot_id"]=None; stopped+=1
+            if uid.startswith(uid_prefix): st["running"]=False; st["bot_id"]=None; stopped+=1
     return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
 
 @app.route("/api/admin/sessions", methods=["POST"])
@@ -2538,40 +2083,32 @@ def admin_clean_sessions():
         if count: _save_sessions()
     return jsonify({"ok":True,"msg":f"✓ {count} sesyon ekspire efase"})
 
-@app.route("/")
-def index(): return render_template_string(HTML)
-
 @app.route("/api/admin/clear_user", methods=["POST"])
 def admin_clear_user():
-    d = request.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    uid_prefix = d.get("uid","").replace("...","")
-    cleared = 0
+    uid_prefix=d.get("uid","").replace("...",""); cleared=0
     with _user_lock:
-        for uid, st in _user_states.items():
+        for uid,st in _user_states.items():
             if uid.startswith(uid_prefix):
-                st["trades"]=[]
-                st["total_pnl"]=0.0
-                st["profit_sent"]=0.0
-                st["log"]=[]
-                cleared+=1
+                st["trades"]=[]; st["total_pnl"]=0.0; st["profit_sent"]=0.0; st["log"]=[]; cleared+=1
     return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè efase"})
 
 @app.route("/api/admin/clear_trades", methods=["POST"])
 def admin_clear_trades():
-    d = request.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    uid_prefix = d.get("uid","").replace("...","")
-    cleared = 0
+    uid_prefix=d.get("uid","").replace("...",""); cleared=0
     with _user_lock:
-        for uid, st in _user_states.items():
-            if uid.startswith(uid_prefix):
-                st["trades"] = []
-                cleared += 1
+        for uid,st in _user_states.items():
+            if uid.startswith(uid_prefix): st["trades"]=[]; cleared+=1
     return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè: trades efase (log + pnl konsève)"})
 
+@app.route("/")
+def index(): return render_template_string(HTML)
+
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — Ajoute selecteur tip token Deriv
+# HTML INTERFACE
 # ═══════════════════════════════════════════════════════════
 HTML=r"""<!DOCTYPE html>
 <html>
@@ -2707,33 +2244,37 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 
       <!-- ══ DERIV FIELDS ══ -->
       <div id="fd">
-        <!-- Selecteur tip token -->
         <div class="iw">
           <div class="il">TIP TOKEN DERIV</div>
           <select id="d-token-type" onchange="togTokenType()">
             <option value="classic">🔑 Token Klasik (rekòmande)</option>
-            <option value="pat">🆕 Nouvo Token pat_ (OAuth)</option>
+            <option value="pat">🆕 Nouvo Token pat_ (OTP/OAuth)</option>
           </select>
         </div>
 
-        <!-- Info tip token klasik -->
+        <!-- Info token klasik -->
         <div id="d-classic-info" style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#4A7080;line-height:1.7">
           ✅ <span style="color:#00FF88">Token Klasik</span> — Meyè chwa pou BonheurBot<br>
-          Jwenn li: <span style="color:#C8E8F0">app.deriv.com → foto ou → API Token</span><br>
-          Fòma: alphanumerik, ~15 karaktè (pa kòmanse ak pat_)
+          Jwenn li: <span style="color:#C8E8F0">app.deriv.com → foto ou → API Token → Create</span><br>
+          Fòma: alphanumerik ~15 karaktè (pa kòmanse ak pat_)
         </div>
 
-        <!-- Info tip token pat_ -->
-        <div id="d-pat-info" style="display:none;background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600;line-height:1.7">
-          ⚠️ <span style="color:#FFD600">Token pat_ (OAuth)</span> — Sijè a gen limit<br>
-          <span style="color:#4A7080">Sèten pat_ token pa aksepte pa WebSocket Deriv.<br>
-          Si w jwenn erè, itilize yon Token Klasik pito.</span>
+        <!-- Info token pat_ -->
+        <div id="d-pat-info" style="display:none;background:#00D4FF10;border:1px solid #00D4FF30;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#4A7080;line-height:1.7">
+          🆕 <span style="color:#00D4FF">Token pat_ (Nouvo OTP Sistèm)</span><br>
+          App ID <span style="color:#00FF88;font-weight:700">33h9RL9bbCjURr4MO3PQ0</span> ap itilize otomatikman.<br>
+          <span style="color:#FFD600">⚠ Si pat_ pa mache: itilize Token Klasik pito.</span>
         </div>
 
-        <div class="iw"><div class="il" id="d-token-label">API TOKEN DERIV</div>
-          <input id="d-tk" type="password" placeholder="Kole token ou a isit">
+        <div class="iw"><div class="il" id="d-token-label">API TOKEN DERIV (Klasik)</div>
+          <input id="d-tk" type="password" placeholder="Kole token klasik ou a isit">
         </div>
-        <div class="iw"><div class="il">APP ID</div><input id="d-ai" value="1089"></div>
+
+        <!-- App ID — kache pou pat_, afiche pou klasik -->
+        <div class="iw" id="d-appid-row">
+          <div class="il">APP ID</div>
+          <input id="d-ai" value="1089">
+        </div>
       </div>
 
       <!-- ══ BINANCE FIELDS ══ -->
@@ -2741,7 +2282,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="iw"><div class="il">API KEY</div><input id="b-k" type="password"></div>
         <div class="iw"><div class="il">API SECRET</div><input id="b-s" type="password"></div>
         <div id="fb-note" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600">
-          🇺🇸 Binance US — Konekte sou api.binance.us | Kreye kle sou: binance.us
+          🇺🇸 Binance US — Konekte sou api.binance.us
         </div>
       </div>
 
@@ -3077,6 +2618,9 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 
 <script>
 const SESSION_KEY="bb_session_v6";
+// App ID pa defot pou pat_ token
+const PAT_APP_ID="33h9RL9bbCjURr4MO3PQ0";
+
 function saveToken(t){try{localStorage.setItem(SESSION_KEY,t);}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t);}catch(e){}try{const exp=new Date();exp.setDate(exp.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${exp.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
 function clearToken(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}try{sessionStorage.removeItem(SESSION_KEY);}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;}catch(e){}}
@@ -3135,17 +2679,21 @@ function togTokenType(){
   const patInfo=document.getElementById("d-pat-info");
   const lbl=document.getElementById("d-token-label");
   const inp=document.getElementById("d-tk");
+  const appidRow=document.getElementById("d-appid-row");
 
   if(v==="pat"){
     classicInfo.style.display="none";
     patInfo.style.display="block";
-    lbl.textContent="NOUVO TOKEN pat_ (OAuth)";
+    lbl.textContent="NOUVO TOKEN pat_ (OAuth/OTP)";
     inp.placeholder="pat_XXXXXXXXXXXXXXXXXXXXXXXX";
+    // Kache champ App ID — app_id defot ap itilize otomatikman
+    if(appidRow) appidRow.style.display="none";
   } else {
     classicInfo.style.display="block";
     patInfo.style.display="none";
     lbl.textContent="API TOKEN DERIV (Klasik)";
     inp.placeholder="Kole token klasik ou a isit";
+    if(appidRow) appidRow.style.display="block";
   }
 }
 
@@ -3184,17 +2732,17 @@ function getStartParams(){
 }
 
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"v6 NOUVO: SuperTrend(pwa 2.5x) + HeikinAshi(pwa 2.5x) + Chandelier(pwa 2.5x) + 10 strategies klasik. ADX≥12, 3 strat minimòm, RANGING oke si ST+HA dakò.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
-  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"v6: Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. EMA 1 bouji sèlman. Plis siyal, menm presizyon.",tags:["score 5/15","ADX≥12","ST bonus","1 bouji EMA"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0 multiplier. Siyal klè BUY/SELL. Travèse bann = siyal solid. Pi reliable pou Deriv synthetic.",tags:["ATR×3","bann sup/res","travèse=BUY","conf 75-92%"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid. Filtre bwi mache. Bouji grandi = plis konfidans.",tags:["5 bouji","filtre bwi","bouji grandi","conf 72-83%"]},
-  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short). Chanjman trend detekte an tan reyèl.",tags:["HH-ATR×3","LL+ATR×3","chanjman trend","conf 75-90%"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend. Score nòmalize.",tags:["8 faktè","pwa","score nòm","conf 68-92%"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre. Siyal presiz.",tags:["BOS","swing","EMA50","conf 84%"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"v6 NOUVO: SuperTrend(pwa 2.5x) + HeikinAshi(pwa 2.5x) + Chandelier(pwa 2.5x) + 10 strategies klasik. ADX≥12, 3 strat minimòm.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"v6: Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. Plis siyal, menm presizyon.",tags:["score 5/15","ADX≥12","ST bonus","1 bouji EMA"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0 multiplier. Siyal klè BUY/SELL. Pi reliable pou Deriv synthetic.",tags:["ATR×3","bann sup/res","travèse=BUY","conf 75-92%"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid. Filtre bwi mache.",tags:["5 bouji","filtre bwi","bouji grandi","conf 72-83%"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short). Chanjman trend detekte.",tags:["HH-ATR×3","LL+ATR×3","chanjman trend","conf 75-90%"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["8 faktè","pwa","score nòm","conf 68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre.",tags:["BOS","swing","EMA50","conf 84%"]},
   scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
   rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
-  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA+RSI+MACD+BB+Stoch. 6+ pts.",tags:["EMA 20/50/200","RSI+Stoch","BB","6+ pts"]},
-  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: Trend+Volume+RSI+MACD+Breakout. 7+ pts.",tags:["EMA 9/21/50","Volume","MACD+BB","Breakout"]},
+  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA+RSI+MACD+BB+Stoch.",tags:["EMA 20/50/200","RSI+Stoch","BB","6+ pts"]},
+  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: Trend+Volume+RSI+MACD+Breakout.",tags:["EMA 9/21/50","Volume","MACD+BB","Breakout"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
@@ -3224,21 +2772,25 @@ async function doConn(){
   const br=document.getElementById("d-br").value;
   const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
   const brokerLabel={"deriv":"Deriv","binance":"Binance Global","binance_us":"Binance US"}[br]||br;
-  msg("cm",`⏳ Ap konekte ${brokerLabel} — tann 15 segonn...`,"ok");
 
   const body={broker:br};
   if(br=="deriv"){
+    const tokenType=document.getElementById("d-token-type").value;
     body.token=document.getElementById("d-tk").value.trim();
-    body.app_id=document.getElementById("d-ai").value||"1089";
-    // Detekte si se pat_ token pou bay info pi klè
-    const isPat=body.token.toLowerCase().startsWith("pat_");
+    const isPat=tokenType==="pat"||body.token.toLowerCase().startsWith("pat_");
     if(isPat){
-      msg("cm",`⏳ Token pat_ detekte — Ap tann koneksyon... (20 sek max)`,"ok");
+      // Pou pat_: itilize PAT_APP_ID otomatikman
+      body.app_id=PAT_APP_ID;
+      msg("cm","⏳ Token pat_ detekte — OTP flow ap kòmanse... (20 sek max)","ok");
+    } else {
+      body.app_id=document.getElementById("d-ai").value||"1089";
+      msg("cm",`⏳ Ap konekte ${brokerLabel} — tann 15 segonn...`,"ok");
     }
   }
   if(br=="binance"||br=="binance_us"){
     body.api_key=document.getElementById("b-k").value;
     body.api_secret=document.getElementById("b-s").value;
+    msg("cm",`⏳ Ap konekte ${brokerLabel} — tann...`,"ok");
   }
 
   try{
@@ -3249,7 +2801,6 @@ async function doConn(){
       msg("cm",`✓ Konekte ${brokerLabel} | $${d.balance.toFixed(2)}${noteMsg}`,"ok");
       document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${brokerLabel}</b> | $${d.balance.toFixed(2)}${noteMsg}</div>`;
     } else {
-      // Si erè sou token, afiche mesaj detaye
       msg("cm",`✗ Echwe\n${d.error}`,false);
     }
   }catch(e){msg("cm","✗ "+e.message,false);}

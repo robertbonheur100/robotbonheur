@@ -124,6 +124,58 @@ def get_state():
     return _user_states[uid]
 
 # ═══════════════════════════════════════════════════════════
+# ██  NOUVO: DERIV pat_ TOKEN HELPER  ██
+# Konvèti pat_ token → session token via Deriv REST API
+# ═══════════════════════════════════════════════════════════
+def resolve_deriv_token(raw_token):
+    """
+    Si token kòmanse ak 'pat_' se yon Personal Access Token.
+    Eseye itilize l dirèkteman nan WebSocket — si li echwe
+    retounen yon mesaj erè klè.
+    Retounen: (token_pou_websocket, is_pat)
+    """
+    raw_token = raw_token.strip()
+    is_pat = raw_token.lower().startswith("pat_")
+    return raw_token, is_pat
+
+def test_deriv_token_ws(token, app_id="1089", timeout=15):
+    """
+    Teste token nan WebSocket Deriv.
+    Retounen: (ok, balance_or_error)
+    """
+    import websocket
+    done  = threading.Event()
+    result = [None, None]  # [ok, val]
+
+    def on_open(ws):
+        ws.send(json.dumps({"authorize": token}))
+
+    def on_msg(ws, msg):
+        d = json.loads(msg)
+        if d.get("msg_type") == "authorize":
+            if "error" in d:
+                result[0] = False
+                result[1] = d["error"].get("message", "Token invalib")
+            else:
+                result[0] = True
+                result[1] = float(d["authorize"].get("balance", 0))
+            done.set()
+
+    def on_err(ws, e):
+        result[0] = False
+        result[1] = str(e)
+        done.set()
+
+    url = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+    ws = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
+    threading.Thread(target=ws.run_forever, daemon=True).start()
+    done.wait(timeout=timeout)
+
+    if result[0] is None:
+        return False, "Timeout — pa jwenn repons Deriv"
+    return result[0], result[1]
+
+# ═══════════════════════════════════════════════════════════
 # INDIKATÈ TEKNIK — Oryajinal + amelyore
 # ═══════════════════════════════════════════════════════════
 def ema(prices, p):
@@ -182,7 +234,6 @@ def calc_adx_full(candles, p=14):
 
 # ═══════════════════════════════════════════════════════════
 # ██  NOUVO: SUPERTREND INDIKATÈ  ██
-# Plis reliable pou Deriv synthetic — siyal klè
 # ═══════════════════════════════════════════════════════════
 def supertrend(candles, p=10, mult=3.0):
     if len(candles) < p+5:
@@ -357,7 +408,7 @@ def vwap_signal(candles, lookback=20):
     return "NONE", 0.0
 
 # ═══════════════════════════════════════════════════════════
-# STRATEGIES ORYAJINAL (pa chanje — konsève done)
+# STRATEGIES ORYAJINAL (pa chanje)
 # ═══════════════════════════════════════════════════════════
 def strat_ema(c):
     cl=[x["close"] for x in c]
@@ -524,9 +575,8 @@ def strat_scalping(c):
     return "NONE",0
 
 # ═══════════════════════════════════════════════════════════
-# ██████  NOUVO: CONFLUENCE ELITE v6  ██████
+# CONFLUENCE ELITE v6
 # ═══════════════════════════════════════════════════════════
-
 def calc_pivot_points(candles):
     if len(candles) < 20:
         return None
@@ -698,7 +748,7 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     return "NONE", 0
 
 # ═══════════════════════════════════════════════════════════
-# ██████  NOUVO: DERIV PRO ELITE v6  ██████
+# DERIV PRO ELITE v6
 # ═══════════════════════════════════════════════════════════
 def strat_deriv_pro_elite(c):
     if len(c)<50: return "NONE",0
@@ -757,48 +807,37 @@ def strat_deriv_pro_elite(c):
 
     if trend_up:
         score=0.0
-
         bo_score=0.0
         if cl[-1]>hi20 and cl[-2]<=hi20:  bo_score+=2.0
         elif cl[-1]>hi20*0.997:            bo_score+=0.8
         if cl[-1]>hi10 and cl[-2]<=hi10:  bo_score+=1.0
         elif cl[-1]>hi10*0.998:            bo_score+=0.4
         score+=min(3.5, bo_score)
-
         if 25<=r<=45:       score+=3.0
         elif 45<r<=55:      score+=2.0
         elif 55<r<=65:      score+=1.2
         elif r<25:          score+=2.5
         elif r<70:          score+=0.8
-
         macd_ok=(m>sig_ and macd_hist>macd_hist_prev)
         if macd_ok and m>0: score+=2.5
         elif macd_ok:       score+=1.8
         elif m>sig_:        score+=1.0
-
         if k<25 and k>kp:   score+=2.5
         elif k<35 and k>kp: score+=1.5
         elif k>kp:          score+=0.8
-
         if lo_bb and cl[-1]<=lo_bb*1.005:  score+=2.0
         elif mid_bb and cl[-1]<mid_bb:     score+=0.8
-
         if roc3>0 and roc5v>0: score+=1.5
         elif roc3>0:           score+=0.7
-
         if body_ratio>=0.60 and cl[-1]>c[-1]["open"]: score+=1.5
         elif body_ratio>=0.40 and cl[-1]>c[-1]["open"]: score+=0.8
-
         if adx>=45:   score+=2.0
         elif adx>=35: score+=1.5
         elif adx>=25: score+=0.8
         elif adx>=12: score+=0.3
-
         if st_sig == "BUY": score += 2.0
-
         in_piv, piv_b = pivot_signal(c, "TRENDING_UP")
         if in_piv: score += 1.5
-
         if score >= 5.0:
             pct = score/15.0
             conf = min(0.95, 0.76 + pct*0.25)
@@ -807,48 +846,37 @@ def strat_deriv_pro_elite(c):
 
     if trend_down:
         score=0.0
-
         bo_score=0.0
         if cl[-1]<lo20 and cl[-2]>=lo20:  bo_score+=2.0
         elif cl[-1]<lo20*1.003:            bo_score+=0.8
         if cl[-1]<lo10 and cl[-2]>=lo10:  bo_score+=1.0
         elif cl[-1]<lo10*1.002:            bo_score+=0.4
         score+=min(3.5, bo_score)
-
         if 55<=r<=75:       score+=3.0
         elif 45<=r<55:      score+=2.0
         elif 35<=r<45:      score+=1.2
         elif r>75:          score+=2.5
         elif r>30:          score+=0.8
-
         macd_ok=(m<sig_ and macd_hist<macd_hist_prev)
         if macd_ok and m<0: score+=2.5
         elif macd_ok:       score+=1.8
         elif m<sig_:        score+=1.0
-
         if k>75 and k<kp:   score+=2.5
         elif k>65 and k<kp: score+=1.5
         elif k<kp:          score+=0.8
-
         if up_bb and cl[-1]>=up_bb*0.995:  score+=2.0
         elif mid_bb and cl[-1]>mid_bb:     score+=0.8
-
         if roc3<0 and roc5v<0: score+=1.5
         elif roc3<0:           score+=0.7
-
         if body_ratio>=0.60 and cl[-1]<c[-1]["open"]: score+=1.5
         elif body_ratio>=0.40 and cl[-1]<c[-1]["open"]: score+=0.8
-
         if adx>=45:   score+=2.0
         elif adx>=35: score+=1.5
         elif adx>=25: score+=0.8
         elif adx>=12: score+=0.3
-
         if st_sig == "SELL": score += 2.0
-
         in_piv, piv_b = pivot_signal(c, "TRENDING_DN")
         if in_piv: score += 1.5
-
         if score >= 5.0:
             pct = score/15.0
             conf = min(0.95, 0.76 + pct*0.25)
@@ -858,90 +886,52 @@ def strat_deriv_pro_elite(c):
     return "NONE", 0
 
 # ═══════════════════════════════════════════════════════════
-# STRATEGY ESPESYAL BINANCE (konsève oryajinal)
+# BINANCE STRATEGIES
 # ═══════════════════════════════════════════════════════════
 def strat_binance_gold(c):
-    """
-    Gold/Metals — AMELYORE:
-    1. EMA200 filtre obligatwa (trend long term)
-    2. ADX>20 — pa trade mache fèb
-    3. Volume konfirmasyon
-    4. Pullback entry (pa chase prix)
-    5. Sèyil 7pts (pi strik)
-    """
     if len(c)<60: return "NONE",0
     cl=[x["close"] for x in c]
     hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
     vol=[x.get("volume",0) for x in c]
-
     e20=ema(cl,20); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
     if not e20 or not e50 or not e200: return "NONE",0
     r=rsi(cl,14); at=atr(c); m,sig_=macd(cl)
     up,mid,lo=bb(cl,20,2.0); k=stoch_k(c,14)
     adx_v,pdi_v,mdi_v = calc_adx_full(c,14)
-
     if not at or not mid: return "NONE",0
-
-    # ── Filtre 1: ADX > 20 (trend ase fò) ─────────────────
     if adx_v < 20: return "NONE", 0
-
-    # ── Filtre 2: Volume ok (pa mache dòmi) ───────────────
     avg_vol = sum(vol[-20:])/20 if len(vol)>=20 else 1
     if avg_vol > 0 and vol[-1] < avg_vol * 0.5: return "NONE", 0
-
-    # ── Trend long term (EMA200) ───────────────────────────
     trend_up = e20[-1]>e50[-1] and e50[-1]>e200[-1] and cl[-1]>e200[-1]
     trend_dn = e20[-1]<e50[-1] and e50[-1]<e200[-1] and cl[-1]<e200[-1]
-
-    # ── Filtre 3: Pa trade kont EMA200 ────────────────────
     if not trend_up and not trend_dn: return "NONE", 0
-
     atr_pct = at/mid*100
-    if atr_pct < 0.03: return "NONE", 0  # Mache twò kalm
-
+    if atr_pct < 0.03: return "NONE", 0
     buy_pts=0; sell_pts=0
-
-    # Trend (pwa wo)
     if trend_up: buy_pts+=3
     if trend_dn: sell_pts+=3
-
-    # ADX fò = plis pwen
     if adx_v>=35: buy_pts+=2 if trend_up else 0; sell_pts+=2 if trend_dn else 0
     elif adx_v>=25: buy_pts+=1 if trend_up else 0; sell_pts+=1 if trend_dn else 0
-
-    # RSI — chèche pullback (zone 35-55 pou BUY, 45-65 pou SELL)
-    if trend_up and 30<=r<=55: buy_pts+=3    # Pullback BUY
-    elif trend_up and r<30:    buy_pts+=2    # Oversold BUY
-    if trend_dn and 45<=r<=70: sell_pts+=3   # Pullback SELL
-    elif trend_dn and r>70:    sell_pts+=2   # Overbought SELL
-
-    # MACD
+    if trend_up and 30<=r<=55: buy_pts+=3
+    elif trend_up and r<30:    buy_pts+=2
+    if trend_dn and 45<=r<=70: sell_pts+=3
+    elif trend_dn and r>70:    sell_pts+=2
     if m>sig_ and m>0: buy_pts+=2
     if m<sig_ and m<0: sell_pts+=2
-
-    # Bollinger — pullback vè mwayen
-    if lo and cl[-1]<=lo*1.002: buy_pts+=3   # Touche bann anba
+    if lo and cl[-1]<=lo*1.002: buy_pts+=3
     elif mid and cl[-1]<mid*1.005: buy_pts+=1
-    if up and cl[-1]>=up*0.998: sell_pts+=3   # Touche bann anlè
+    if up and cl[-1]>=up*0.998: sell_pts+=3
     elif mid and cl[-1]>mid*0.995: sell_pts+=1
-
-    # Stochastic
     if k<25: buy_pts+=2
     elif k<35: buy_pts+=1
     if k>75: sell_pts+=2
     elif k>65: sell_pts+=1
-
-    # Volume surge = konfirmasyon
     if vol[-1] > avg_vol*1.8:
         if buy_pts > sell_pts: buy_pts+=2
         elif sell_pts > buy_pts: sell_pts+=2
-
-    # SuperTrend konfimasyon
     st_sig, st_c = supertrend(c, p=10, mult=3.0)
     if st_sig=="BUY": buy_pts+=2
     if st_sig=="SELL": sell_pts+=2
-
-    # Sèyil 7pts (pi strik ke anvan — te 6)
     if buy_pts>=7 and buy_pts>sell_pts+2 and trend_up:
         return "BUY", min(0.91, 0.72+buy_pts*0.018)
     if sell_pts>=7 and sell_pts>buy_pts+2 and trend_dn:
@@ -949,104 +939,65 @@ def strat_binance_gold(c):
     return "NONE",0
 
 def strat_binance_crypto(c):
-    """
-    Crypto — AMELYORE:
-    1. EMA200 filtre (pa trade kont trend long)
-    2. ADX>18 minimòm
-    3. Volume surge obligatwa pou breakout
-    4. Pullback entry — pa chase prix
-    5. Sèyil 8pts
-    """
     if len(c)<50: return "NONE",0
     cl=[x["close"] for x in c]
     hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
     vol=[x.get("volume",0) for x in c]
-
     e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50)
     e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
     if not e9 or not e21 or not e50: return "NONE",0
     r=rsi(cl,14); at=atr(c); m,sig_=macd(cl)
     up,mid,lo=bb(cl,20,2.0); k=stoch_k(c,14)
     adx_v,pdi_v,mdi_v = calc_adx_full(c,14)
-
     avg_vol=sum(vol[-20:])/20 if len(vol)>=20 else 1
     curr_vol=vol[-1] if vol[-1]>0 else avg_vol
-
-    # ── Filtre 1: ADX > 18 ────────────────────────────────
     if adx_v < 18: return "NONE", 0
-
-    # ── Filtre 2: Volume minnimòm ─────────────────────────
     if avg_vol > 0 and curr_vol < avg_vol * 0.4: return "NONE", 0
-
-    # ── Filtre 3: EMA200 — pa trade kont trend long ───────
     long_bull = e200 and cl[-1] > e200[-1]
     long_bear = e200 and cl[-1] < e200[-1]
-
     buy_pts=0; sell_pts=0
-
-    # Trend EMA 9/21/50
     if e9[-1]>e21[-1]>e50[-1]:
         buy_pts+=3
-        if long_bull: buy_pts+=2   # EMA200 konfime
+        if long_bull: buy_pts+=2
     if e9[-1]<e21[-1]<e50[-1]:
         sell_pts+=3
         if long_bear: sell_pts+=2
-
-    # Kwa EMA (siyal ki pi fò)
     if len(e9)>=2 and e9[-2]<e21[-2] and e9[-1]>e21[-1]: buy_pts+=3
     if len(e9)>=2 and e9[-2]>e21[-2] and e9[-1]<e21[-1]: sell_pts+=3
-
-    # ADX fò
     if adx_v>=35: buy_pts+=2 if pdi_v>mdi_v else 0; sell_pts+=2 if mdi_v>pdi_v else 0
     elif adx_v>=25: buy_pts+=1 if pdi_v>mdi_v else 0; sell_pts+=1 if mdi_v>pdi_v else 0
-
-    # RSI — pullback zone
     if 30<=r<=50 and long_bull: buy_pts+=3
     elif r<30: buy_pts+=2
     elif r<45: buy_pts+=1
     if 50<=r<=70 and long_bear: sell_pts+=3
     elif r>70: sell_pts+=2
     elif r>55: sell_pts+=1
-
-    # MACD
     if m>sig_ and m>0: buy_pts+=2
     elif m>sig_: buy_pts+=1
     if m<sig_ and m<0: sell_pts+=2
     elif m<sig_: sell_pts+=1
-
-    # Bollinger
     if lo and cl[-1]<=lo: buy_pts+=3
     elif lo and cl[-1]<=lo*1.01: buy_pts+=1
     if up and cl[-1]>=up: sell_pts+=3
     elif up and cl[-1]>=up*0.99: sell_pts+=1
-
-    # Stochastic
     if k<20: buy_pts+=2
     elif k<35: buy_pts+=1
     if k>80: sell_pts+=2
     elif k>65: sell_pts+=1
-
-    # Volume surge = konfirmasyon solid
     vol_surge = curr_vol > avg_vol * 2.0
     if vol_surge:
         if buy_pts > sell_pts: buy_pts+=3
         elif sell_pts > buy_pts: sell_pts+=3
-
-    # Breakout (volume obligatwa pou breakout reyèl)
     hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
     if cl[-1]>hi20 and cl[-2]<=hi20:
-        if curr_vol > avg_vol * 1.5: buy_pts+=3  # Breakout + volume
-        else: buy_pts+=1  # Breakout san volume = fèb
+        if curr_vol > avg_vol * 1.5: buy_pts+=3
+        else: buy_pts+=1
     if cl[-1]<lo20 and cl[-2]>=lo20:
         if curr_vol > avg_vol * 1.5: sell_pts+=3
         else: sell_pts+=1
-
-    # SuperTrend
     st_sig, _ = supertrend(c, p=10, mult=3.0)
     if st_sig=="BUY": buy_pts+=2
     if st_sig=="SELL": sell_pts+=2
-
-    # Sèyil 8pts (pi strik)
     if buy_pts>=8 and buy_pts>sell_pts+2:
         return "BUY", min(0.92, 0.70+buy_pts*0.016)
     if sell_pts>=8 and sell_pts>buy_pts+2:
@@ -1132,28 +1083,49 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# CLIENTS BROKER (konsève oryajinal — pa chanje)
+# DERIV CLIENT — Sipòte tou de tip token (ansyen + pat_)
 # ═══════════════════════════════════════════════════════════
 class DerivClient:
     def __init__(self, token, app_id="1089"):
-        self.token=token; self.app_id=app_id; self._bal=0.0
+        self.token  = token
+        self.app_id = app_id
+        self._bal   = 0.0
 
     def connect(self):
         import websocket
-        done=threading.Event(); err=[None]
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
-                if "error" in d: err[0]=d["error"]["message"]
-                else: self._bal=float(d["authorize"].get("balance",0))
+        done = threading.Event()
+        err  = [None]
+
+        def on_open(ws):
+            ws.send(json.dumps({"authorize": self.token}))
+
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize":
+                if "error" in d:
+                    err[0] = d["error"]["message"]
+                else:
+                    self._bal = float(d["authorize"].get("balance", 0))
                 done.set()
-        def on_err(ws,e): err[0]=str(e); done.set()
-        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_msg,on_error=on_err)
-        threading.Thread(target=ws.run_forever,daemon=True).start()
+
+        def on_err(ws, e):
+            err[0] = str(e)
+            done.set()
+
+        url = f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
+        threading.Thread(target=ws.run_forever, daemon=True).start()
         done.wait(timeout=15)
-        if err[0]: raise Exception(f"Deriv: {err[0]}")
+
+        if err[0]:
+            # ── Si se yon pat_ token ki echwe, bay mesaj espesifik ──
+            is_pat = self.token.lower().startswith("pat_")
+            if is_pat:
+                raise Exception(
+                    f"Token pat_ refize pa Deriv WebSocket: {err[0]}. "
+                    "Silvouplè kreye yon token API klasik (pa OAuth) nan app.deriv.com → API Token."
+                )
+            raise Exception(f"Deriv: {err[0]}")
         return self._bal
 
     def get_candles(self, symbol="R_100", count=200, gran=60):
@@ -1240,26 +1212,49 @@ class DerivClient:
     @property
     def balance(self): return self._bal
 
+# ═══════════════════════════════════════════════════════════
+# DERIV DIGITS CLIENT — Sipòte tou de tip token
+# ═══════════════════════════════════════════════════════════
 class DerivDigitsClient:
     def __init__(self, token, app_id="1089"):
-        self.token=token; self.app_id=app_id; self._bal=0.0
+        self.token  = token
+        self.app_id = app_id
+        self._bal   = 0.0
 
     def connect(self):
         import websocket
-        done=threading.Event(); err=[None]
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
-                if "error" in d: err[0]=d["error"]["message"]
-                else: self._bal=float(d["authorize"].get("balance",0))
+        done = threading.Event()
+        err  = [None]
+
+        def on_open(ws):
+            ws.send(json.dumps({"authorize": self.token}))
+
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize":
+                if "error" in d:
+                    err[0] = d["error"]["message"]
+                else:
+                    self._bal = float(d["authorize"].get("balance", 0))
                 done.set()
-        def on_err(ws,e): err[0]=str(e); done.set()
-        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_msg,on_error=on_err)
-        threading.Thread(target=ws.run_forever,daemon=True).start()
+
+        def on_err(ws, e):
+            err[0] = str(e)
+            done.set()
+
+        url = f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
+        threading.Thread(target=ws.run_forever, daemon=True).start()
         done.wait(timeout=15)
-        if err[0]: raise Exception(f"Deriv: {err[0]}")
+
+        if err[0]:
+            is_pat = self.token.lower().startswith("pat_")
+            if is_pat:
+                raise Exception(
+                    f"Token pat_ refize: {err[0]}. "
+                    "Kreye yon token API klasik nan app.deriv.com → API Token."
+                )
+            raise Exception(f"Deriv: {err[0]}")
         return self._bal
 
     def get_ticks(self, symbol="R_10", count=100):
@@ -1365,6 +1360,9 @@ class DerivDigitsClient:
     @property
     def balance(self): return self._bal
 
+# ═══════════════════════════════════════════════════════════
+# BINANCE CLIENTS (pa chanje)
+# ═══════════════════════════════════════════════════════════
 class BinanceClient:
     def __init__(self, key, secret):
         from binance.client import Client
@@ -1432,12 +1430,7 @@ class BinanceClient:
                 else: return 4
         return 2
 
-    def place_trade(self, symbol, direction, amount_usdt=10.0,
-                    sl_pct=0.018, tp_pct=0.035):
-        """
-        Limit order entry + OCO (Stop Loss + Take Profit) otomatik.
-        sl_pct=1.8%  Stop Loss  |  tp_pct=3.5%  Take Profit
-        """
+    def place_trade(self, symbol, direction, amount_usdt=10.0, sl_pct=0.018, tp_pct=0.035):
         from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
         ticker  = self.c.get_symbol_ticker(symbol=symbol)
         price   = float(ticker["price"])
@@ -1445,34 +1438,25 @@ class BinanceClient:
         qp      = self.get_qty_precision(symbol)
         min_qty = self.get_min_qty(symbol)
         min_not = self.get_min_notional(symbol)
-
-        # Kalkil qty
         qty = round(amount_usdt / price, qp)
         qty = max(qty, min_qty)
         if qty * price < min_not:
             qty = round(min_not / price * 1.01, qp)
             qty = max(qty, min_qty)
-
         side = SIDE_BUY if direction == "BUY" else SIDE_SELL
-
-        # ── Limit entry: 0.05% meyè ke mache ──────────────
         if direction == "BUY":
-            limit_price = round(price * 1.0005, pp)   # yon ti kras anlè pou fill rapid
+            limit_price = round(price * 1.0005, pp)
             sl_price    = round(price * (1 - sl_pct), pp)
             tp_price    = round(price * (1 + tp_pct), pp)
         else:
             limit_price = round(price * 0.9995, pp)
             sl_price    = round(price * (1 + sl_pct), pp)
             tp_price    = round(price * (1 - tp_pct), pp)
-
-        # ── Plase Limit order ──────────────────────────────
         entry_order = self.c.order_limit(
             symbol=symbol, side=side, quantity=qty,
             price=str(limit_price), timeInForce=TIME_IN_FORCE_GTC
         )
         logger.info(f"Binance LIMIT {direction} {symbol} qty={qty} @ {limit_price} | SL={sl_price} TP={tp_price}")
-
-        # ── Tann fill (max 90 sek) ─────────────────────────
         oid = entry_order.get("orderId")
         filled = False
         for _ in range(18):
@@ -1484,36 +1468,24 @@ class BinanceClient:
                 elif status["status"] in ("CANCELED","EXPIRED","REJECTED"):
                     break
             except: pass
-
         if not filled:
-            # Anile limit si pa fill — tonbe sou market
             try: self.c.cancel_order(symbol=symbol, orderId=oid)
             except: pass
             logger.info(f"Limit pa fill — market order fallback {symbol}")
             return self.c.order_market(symbol=symbol, side=side, quantity=qty)
-
-        # ── Plase OCO (SL + TP) ────────────────────────────
-        opp_side = SIDE_SELL if direction == "BUY" else SIDE_BUY
         try:
             oco = self.c.order_oco_sell(
-                symbol=symbol,
-                quantity=qty,
-                price=str(tp_price),
-                stopPrice=str(sl_price),
+                symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
                 stopLimitPrice=str(round(sl_price * (0.998 if direction=="BUY" else 1.002), pp)),
                 stopLimitTimeInForce=TIME_IN_FORCE_GTC
             ) if direction == "BUY" else self.c.order_oco_buy(
-                symbol=symbol,
-                quantity=qty,
-                price=str(tp_price),
-                stopPrice=str(sl_price),
+                symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
                 stopLimitPrice=str(round(sl_price * 1.002, pp)),
                 stopLimitTimeInForce=TIME_IN_FORCE_GTC
             )
             logger.info(f"OCO plase: TP={tp_price} SL={sl_price}")
         except Exception as e:
             logger.warning(f"OCO echwe ({e}) — SL/TP manyèl")
-
         return entry_order
 
     def send_profit(self, amount):
@@ -1524,13 +1496,7 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"Profit transfer: {e}"); return None
 
-# ═══════════════════════════════════════════════════════════
-# ██  NOUVO: BINANCE US CLIENT  ██
-# Menm fonksyonalite kòm BinanceClient men konekte sou
-# api.binance.us (Binance US — pour itilizatè Ameriken)
-# ═══════════════════════════════════════════════════════════
 class BinanceUSClient:
-    """Binance.US — Konekte sou api.binance.us via tld='us'"""
     def __init__(self, key, secret):
         from binance.client import Client
         self.c = Client(key, secret, tld="us")
@@ -1597,12 +1563,7 @@ class BinanceUSClient:
                 else: return 4
         return 2
 
-    def place_trade(self, symbol, direction, amount_usdt=10.0,
-                    sl_pct=0.018, tp_pct=0.035):
-        """
-        Limit order entry + OCO (Stop Loss + Take Profit) otomatik.
-        sl_pct=1.8%  Stop Loss  |  tp_pct=3.5%  Take Profit
-        """
+    def place_trade(self, symbol, direction, amount_usdt=10.0, sl_pct=0.018, tp_pct=0.035):
         from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
         ticker  = self.c.get_symbol_ticker(symbol=symbol)
         price   = float(ticker["price"])
@@ -1610,15 +1571,12 @@ class BinanceUSClient:
         qp      = self.get_qty_precision(symbol)
         min_qty = self.get_min_qty(symbol)
         min_not = self.get_min_notional(symbol)
-
         qty = round(amount_usdt / price, qp)
         qty = max(qty, min_qty)
         if qty * price < min_not:
             qty = round(min_not / price * 1.01, qp)
             qty = max(qty, min_qty)
-
         side = SIDE_BUY if direction == "BUY" else SIDE_SELL
-
         if direction == "BUY":
             limit_price = round(price * 1.0005, pp)
             sl_price    = round(price * (1 - sl_pct), pp)
@@ -1627,13 +1585,11 @@ class BinanceUSClient:
             limit_price = round(price * 0.9995, pp)
             sl_price    = round(price * (1 + sl_pct), pp)
             tp_price    = round(price * (1 - tp_pct), pp)
-
         entry_order = self.c.order_limit(
             symbol=symbol, side=side, quantity=qty,
             price=str(limit_price), timeInForce=TIME_IN_FORCE_GTC
         )
         logger.info(f"BinanceUS LIMIT {direction} {symbol} qty={qty} @ {limit_price} | SL={sl_price} TP={tp_price}")
-
         oid = entry_order.get("orderId")
         filled = False
         for _ in range(18):
@@ -1645,30 +1601,24 @@ class BinanceUSClient:
                 elif status["status"] in ("CANCELED","EXPIRED","REJECTED"):
                     break
             except: pass
-
         if not filled:
             try: self.c.cancel_order(symbol=symbol, orderId=oid)
             except: pass
             logger.info(f"Limit pa fill — market fallback {symbol}")
             return self.c.order_market(symbol=symbol, side=side, quantity=qty)
-
-        opp_side = SIDE_SELL if direction == "BUY" else SIDE_BUY
         try:
             oco = self.c.order_oco_sell(
-                symbol=symbol, quantity=qty,
-                price=str(tp_price), stopPrice=str(sl_price),
+                symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
                 stopLimitPrice=str(round(sl_price * (0.998 if direction=="BUY" else 1.002), pp)),
                 stopLimitTimeInForce=TIME_IN_FORCE_GTC
             ) if direction == "BUY" else self.c.order_oco_buy(
-                symbol=symbol, quantity=qty,
-                price=str(tp_price), stopPrice=str(sl_price),
+                symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
                 stopLimitPrice=str(round(sl_price * 1.002, pp)),
                 stopLimitTimeInForce=TIME_IN_FORCE_GTC
             )
             logger.info(f"OCO plase: TP={tp_price} SL={sl_price}")
         except Exception as e:
             logger.warning(f"OCO echwe ({e}) — SL/TP manyèl")
-
         return entry_order
 
     def send_profit(self, amount):
@@ -1680,7 +1630,7 @@ class BinanceUSClient:
             logger.error(f"Profit transfer BinanceUS: {e}"); return None
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS — konsève oryajinal (pa chanje)
+# DIGITS LOGIC (pa chanje)
 # ═══════════════════════════════════════════════════════════
 def get_last_digit(price):
     s=f"{price:.5f}".replace('.','')
@@ -1728,7 +1678,7 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS TRADING LOOP (konsève oryajinal)
+# TRADING LOOPS (pa chanje)
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1880,9 +1830,6 @@ def digits_trading_loop(st, bot_id=None):
 
     add_log(st,"⏹ Digits Bot arrêté")
 
-# ═══════════════════════════════════════════════════════════
-# BINANCE TRADING LOOP (konsève oryajinal)
-# ═══════════════════════════════════════════════════════════
 def binance_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
     cfg=st["config"]
@@ -1892,9 +1839,6 @@ def binance_trading_loop(st, bot_id=None):
     tf=int(cfg.get("tf_secs",900))
     min_conf=float(cfg.get("min_conf",0.75))
 
-    # ── SL/TP pousantaj ────────────────────────────────────
-    # Or/metals: SL 1.5% / TP 3.0% (mwens volatil)
-    # Crypto:    SL 2.0% / TP 4.0% (plis volatil)
     is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper() or "XAG" in symbol.upper()
     SL_PCT  = 0.015 if is_gold else 0.020
     TP_PCT  = 0.030 if is_gold else 0.040
@@ -1953,13 +1897,11 @@ def binance_trading_loop(st, bot_id=None):
                 current_lot=base_lot; consec_losses=0; total_lost=0.0
                 time.sleep(30); continue
 
-            # ── Pran bouji + kouri strategy ────────────────
             candles=api.get_candles(symbol,iv,200)
             if len(candles)<50:
                 add_log(st,f"Pa ase done ({len(candles)}) — tann...","WARN")
                 time.sleep(60); continue
 
-            # ── Filtre trend long term (EMA200) ───────────
             cl_vals=[x["close"] for x in candles]
             e200_v=ema(cl_vals,200) if len(cl_vals)>=200 else ema(cl_vals,100)
             adx_v,pdi_v,mdi_v=calc_adx_full(candles,14)
@@ -1973,44 +1915,34 @@ def binance_trading_loop(st, bot_id=None):
                 add_log(st,f"⏭ Siyal fèb ({conf:.0%}) — tann pwochen bouji...")
                 time.sleep(tf); continue
 
-            # ── Filtre final: pa trade kont EMA200 ────────
             if e200_v:
                 if sig=="BUY" and cl_vals[-1] < e200_v[-1]*0.995:
-                    add_log(st,f"⛔ REJTE BUY — Prix ANBA EMA200 (trend long = SELL)","WARN")
+                    add_log(st,f"⛔ REJTE BUY — Prix ANBA EMA200","WARN")
                     time.sleep(tf); continue
                 if sig=="SELL" and cl_vals[-1] > e200_v[-1]*1.005:
-                    add_log(st,f"⛔ REJTE SELL — Prix ANLÈ EMA200 (trend long = BUY)","WARN")
+                    add_log(st,f"⛔ REJTE SELL — Prix ANLÈ EMA200","WARN")
                     time.sleep(tf); continue
 
             entry=candles[-1]["close"]
             sl_dol=round(current_lot*SL_PCT,2)
             tp_dol=round(current_lot*TP_PCT,2)
-            add_log(st,
-                f"⚡ {sig} @ {entry:.4f} | Conf:{conf:.0%} | "
-                f"Mise:${current_lot:.2f} | SL:-${sl_dol} | TP:+${tp_dol}")
+            add_log(st,f"⚡ {sig} @ {entry:.4f} | Conf:{conf:.0%} | Mise:${current_lot:.2f} | SL:-${sl_dol} | TP:+${tp_dol}")
 
             bal_before=api.balance; ok=False
             try:
-                # Plase Limit order + OCO SL/TP — Binance jere poukont li
                 order=api.place_trade(symbol, sig, current_lot, SL_PCT, TP_PCT)
                 ok=True
-                add_log(st,
-                    f"✅ Limit+OCO plase | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}% | "
-                    f"Binance ap jere — kontinye imedyatman","SUCCESS")
-
-                # Mete trade nan istorik san tann rezilta
+                add_log(st,f"✅ Limit+OCO plase | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}%","SUCCESS")
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
                     "symbol":symbol,"side":sig,"entry":round(entry,4),"conf":f"{conf:.0%}",
                     "strategy":strategy,"tf":iv,"stake":round(current_lot,2),
                     "sl":f"{SL_PCT*100:.1f}%","tp":f"{TP_PCT*100:.1f}%",
                     "pnl":0.0,"status":"open"}
                 st["trades"].insert(0,trade)
-
             except Exception as e:
                 add_log(st,f"Trade echwe: {e}","ERROR")
                 time.sleep(30); continue
 
-            # Tcheke balans apre 15 sek pou wè chanjman
             time.sleep(15)
             try:
                 bal_after=api.balance
@@ -2029,7 +1961,6 @@ def binance_trading_loop(st, bot_id=None):
                             except: pass
             except: pass
 
-            # Kontinye imedyatman — pa gen poz long
             time.sleep(tf)
 
         except Exception as e:
@@ -2038,9 +1969,6 @@ def binance_trading_loop(st, bot_id=None):
 
     add_log(st,"⏹ Binance Bot arrêté")
 
-# ═══════════════════════════════════════════════════════════
-# ██████  DERIV TRADING LOOP v6 ELITE  ██████
-# ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
     cfg    = st["config"]
@@ -2108,20 +2036,16 @@ def trading_loop(st, bot_id=None):
                 mache_bon = regime in ("TRENDING_UP","TRENDING_DN","RANGING") and adx_val >= 12
                 if regime == "RANGING":
                     mache_bon = (st_sig != "NONE") and (ha_sig != "NONE") and adx_val >= 10
-
                 if not mache_bon:
                     add_log(st,
                         f"⏸ PÒZ APRE {consec_losses} PÈT | "
                         f"Mache:{regime}(ADX:{adx_val:.0f}) — "
-                        f"Ap tann siyal... ({PAUSE_WAIT_SECS}sek)",
-                        "WARN")
-                    time.sleep(PAUSE_WAIT_SECS)
-                    continue
+                        f"Ap tann siyal... ({PAUSE_WAIT_SECS}sek)", "WARN")
+                    time.sleep(PAUSE_WAIT_SECS); continue
                 else:
                     add_log(st,
                         f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | "
-                        f"Reprann avèk ${current_lot:.2f}",
-                        "SUCCESS")
+                        f"Reprann avèk ${current_lot:.2f}", "SUCCESS")
 
             if regime == "VOLATILE":
                 add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...","WARN")
@@ -2225,18 +2149,14 @@ def trading_loop(st, bot_id=None):
                         current_lot = max(0.5, min(next_lot, 100.0))
                         add_log(st,
                             f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
-                            f"Total:${total_lost:.2f} | "
-                            f"Prochèn:${current_lot:.2f}",
-                            "WARN")
+                            f"Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}", "WARN")
                     else:
                         next_lot = round((total_lost + base_lot) / 0.95, 2)
                         current_lot = max(0.5, min(next_lot, 100.0))
                         add_log(st,
                             f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | "
-                            f"Total:${total_lost:.2f} | "
-                            f"Mise rekipere:${current_lot:.2f} | "
-                            f"Ap tann mache...",
-                            "WARN")
+                            f"Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f} | "
+                            f"Ap tann mache...", "WARN")
 
                 trade = {
                     "id": len(st["trades"])+1,
@@ -2271,7 +2191,7 @@ def trading_loop(st, bot_id=None):
     add_log(st, "⏹ BonheurBot ELITE v6 arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# API ROUTES (konsève oryajinal + mise a jou strategies)
+# API ROUTES
 # ═══════════════════════════════════════════════════════════
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
@@ -2280,25 +2200,56 @@ def api_connect():
         d=request.json; broker=d.get("broker")
         if broker=="deriv":
             import websocket
-            api=DerivClient(d["token"],d.get("app_id","1089"))
-            bal=api.connect()
-            st["deriv_api"]=api
-            st["deriv_digits_api"]=DerivDigitsClient(d["token"],d.get("app_id","1089"))
-            st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
-            return jsonify({"ok":True,"balance":bal,"broker":"deriv"})
+            raw_token = d["token"].strip()
+            app_id    = d.get("app_id","1089")
+            is_pat    = raw_token.lower().startswith("pat_")
+
+            # ── Si pat_ token: teste dirèkteman epi bay mesaj klè ──
+            if is_pat:
+                ok, val = test_deriv_token_ws(raw_token, app_id, timeout=15)
+                if not ok:
+                    return jsonify({
+                        "ok": False,
+                        "error": (
+                            f"❌ Token pat_ pa aksepte pa Deriv WebSocket API: {val}\n"
+                            "👉 Pou itilize BonheurBot, kreye yon token API KLASIK:\n"
+                            "1. Ale sou app.deriv.com\n"
+                            "2. Klike sou foto ou → API Token\n"
+                            "3. Kreye token ak nòm ou vle (pa OAuth/pat_)\n"
+                            "4. Kopye token an (pa kòmanse ak pat_) epi kole l isit"
+                        )
+                    })
+                # Si pat_ mache (kek versyon Deriv aksepte l)
+                api = DerivClient(raw_token, app_id)
+                api._bal = val
+                st["deriv_api"] = api
+                st["deriv_digits_api"] = DerivDigitsClient(raw_token, app_id)
+                st["broker"] = "deriv"; st["balance"] = val; st["connected"] = True
+                return jsonify({"ok": True, "balance": val, "broker": "deriv",
+                               "note": "✓ pat_ token aksepte"})
+            else:
+                # Token klasik — metòd nòmal
+                api = DerivClient(raw_token, app_id)
+                bal = api.connect()
+                st["deriv_api"] = api
+                st["deriv_digits_api"] = DerivDigitsClient(raw_token, app_id)
+                st["broker"] = "deriv"; st["balance"] = bal; st["connected"] = True
+                return jsonify({"ok": True, "balance": bal, "broker": "deriv"})
+
         elif broker=="binance":
             api=BinanceClient(d["api_key"],d["api_secret"])
             bal=api.connect()
             st["binance_api"]=api; st["broker"]="binance"
             st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"binance"})
-        # ── NOUVO:Binance US ──────────────────────────────────
+
         elif broker=="binance_us":
             api=BinanceUSClient(d["api_key"],d["api_secret"])
             bal=api.connect()
             st["binance_api"]=api; st["broker"]="binance_us"
             st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"binance_us"})
+
         return jsonify({"ok":False,"error":"Broker enkoni"})
     except Exception as e:
         logger.error(f"Connect: {e}",exc_info=True)
@@ -2529,10 +2480,8 @@ def admin_clear_user():
                 cleared+=1
     return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè efase"})
 
-# ── NOUVO: Efase trades sèlman (pa log, pa pnl) ───────────────────────────
 @app.route("/api/admin/clear_trades", methods=["POST"])
 def admin_clear_trades():
-    """Efase sèlman listè trades itilizatè — konsève log ak pnl"""
     d = request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     uid_prefix = d.get("uid","").replace("...","")
@@ -2544,6 +2493,9 @@ def admin_clear_trades():
                 cleared += 1
     return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè: trades efase (log + pnl konsève)"})
 
+# ═══════════════════════════════════════════════════════════
+# HTML INTERFACE — Ajoute selecteur tip token Deriv
+# ═══════════════════════════════════════════════════════════
 HTML=r"""<!DOCTYPE html>
 <html>
 <head>
@@ -2582,10 +2534,11 @@ select option{background:#071219}
 .btn.r{border-color:#FF3B6B;color:#FF3B6B}.btn.r:hover{background:#FF3B6B22}
 .btn.y{border-color:#FFD600;color:#FFD600}.btn.y:hover{background:#FFD60022}
 .btn.fw{width:100%}
-.al{padding:8px 12px;border-radius:6px;font-size:11px;margin-bottom:10px;line-height:1.5}
+.al{padding:8px 12px;border-radius:6px;font-size:11px;margin-bottom:10px;line-height:1.5;white-space:pre-wrap}
 .al.ok{background:#00FF8815;color:#00FF88;border:1px solid #00FF8833}
 .al.er{background:#FF3B6B15;color:#FF3B6B;border:1px solid #FF3B6B33}
 .al.in{background:#00D4FF15;color:#00D4FF;border:1px solid #00D4FF33}
+.al.wa{background:#FFD60015;color:#FFD600;border:1px solid #FFD60033}
 .tag{border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700}
 .tg{background:#4A708022;border:1px solid #4A708044;color:#4A7080}
 .tb{background:#00FF8822;border:1px solid #00FF8844;color:#00FF88}
@@ -2674,10 +2627,39 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <option value="binance_us">Binance US (Crypto/Gold)</option>
         </select>
       </div>
+
+      <!-- ══ DERIV FIELDS ══ -->
       <div id="fd">
-        <div class="iw"><div class="il">API TOKEN DERIV</div><input id="d-tk" type="password" placeholder="app.deriv.com → API Token"></div>
+        <!-- Selecteur tip token -->
+        <div class="iw">
+          <div class="il">TIP TOKEN DERIV</div>
+          <select id="d-token-type" onchange="togTokenType()">
+            <option value="classic">🔑 Token Klasik (rekòmande)</option>
+            <option value="pat">🆕 Nouvo Token pat_ (OAuth)</option>
+          </select>
+        </div>
+
+        <!-- Info tip token klasik -->
+        <div id="d-classic-info" style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#4A7080;line-height:1.7">
+          ✅ <span style="color:#00FF88">Token Klasik</span> — Meyè chwa pou BonheurBot<br>
+          Jwenn li: <span style="color:#C8E8F0">app.deriv.com → foto ou → API Token</span><br>
+          Fòma: alphanumerik, ~15 karaktè (pa kòmanse ak pat_)
+        </div>
+
+        <!-- Info tip token pat_ -->
+        <div id="d-pat-info" style="display:none;background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600;line-height:1.7">
+          ⚠️ <span style="color:#FFD600">Token pat_ (OAuth)</span> — Sijè a gen limit<br>
+          <span style="color:#4A7080">Sèten pat_ token pa aksepte pa WebSocket Deriv.<br>
+          Si w jwenn erè, itilize yon Token Klasik pito.</span>
+        </div>
+
+        <div class="iw"><div class="il" id="d-token-label">API TOKEN DERIV</div>
+          <input id="d-tk" type="password" placeholder="Kole token ou a isit">
+        </div>
         <div class="iw"><div class="il">APP ID</div><input id="d-ai" value="1089"></div>
       </div>
+
+      <!-- ══ BINANCE FIELDS ══ -->
       <div id="fb" style="display:none">
         <div class="iw"><div class="il">API KEY</div><input id="b-k" type="password"></div>
         <div class="iw"><div class="il">API SECRET</div><input id="b-s" type="password"></div>
@@ -2685,6 +2667,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           🇺🇸 Binance US — Konekte sou api.binance.us | Kreye kle sou: binance.us
         </div>
       </div>
+
       <div id="cm"></div>
       <button class="btn b fw" onclick="doConn()">⚡ KONEKTE</button>
       <div id="cs" style="margin-top:10px"></div>
@@ -2709,34 +2692,26 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
       <div>
         <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 SuperTrend</div>
-        ATR x3.0 multiplier<br>
-        Siyal klè BUY/SELL<br>
+        ATR x3.0 multiplier<br>Siyal klè BUY/SELL<br>
         <span style="color:#00FF88">Pwa: 2.5x (pi wo)</span><br>
-        Travèse = siyal solid<br>
-        <span style="color:#00FF88">→ Pi reliable pou synthetic</span>
+        Travèse = siyal solid<br><span style="color:#00FF88">→ Pi reliable pou synthetic</span>
       </div>
       <div>
         <div style="color:#FFD600;font-weight:700;margin-bottom:4px">🕯 Heikin Ashi</div>
-        5 bouji konsekitif<br>
-        Filtre bwi mache<br>
+        5 bouji konsekitif<br>Filtre bwi mache<br>
         <span style="color:#FFD600">Pwa: 2.5x (pi wo)</span><br>
-        Grandi = plis konfidans<br>
-        <span style="color:#FFD600">→ Trend pi klè</span>
+        Grandi = plis konfidans<br><span style="color:#FFD600">→ Trend pi klè</span>
       </div>
       <div>
         <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🔔 Chandelier Exit</div>
-        Highest high/lowest low<br>
-        Chanjman trend detekte<br>
+        Highest high/lowest low<br>Chanjman trend detekte<br>
         <span style="color:#00D4FF">Pwa: 2.5x (pi wo)</span><br>
-        ATR x3.0 distans<br>
-        <span style="color:#00D4FF">→ Siyal konfimasyon</span>
+        ATR x3.0 distans<br><span style="color:#00D4FF">→ Siyal konfimasyon</span>
       </div>
       <div>
         <div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛡 ADX 12 + 3 strat</div>
-        ADX sèyil: 12 (vs 18)<br>
-        3 strategies dakò (vs 4)<br>
-        RANGING oke si ST+HA<br>
-        Pause 3 pèt konsève<br>
+        ADX sèyil: 12 (vs 18)<br>3 strategies dakò (vs 4)<br>
+        RANGING oke si ST+HA<br>Pause 3 pèt konsève<br>
         <span style="color:#FF3B6B">→ Plis siyal, menm presizyon</span>
       </div>
     </div>
@@ -2792,11 +2767,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               <option value="rsi">📉 RSI Classic</option>
             </select>
           </div>
-        </div>
-        <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:10px;font-size:10px;color:#4A7080;line-height:1.8">
-          ★★★ <span style="color:#00FF88">Confluence ELITE</span> = SuperTrend + HA + Chandelier + 10 strat<br>
-          ★★★ <span style="color:#FFD600">15min/1h</span> = pi bon timeframe pou synthetic<br>
-          💡 ADX≥12 + 3 strat dakò → siyal souvan e presiz
         </div>
       </div>
       <div id="opts-digits" style="display:none">
@@ -3023,14 +2993,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div id="adm-users-list"><div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH</div></div>
   </div>
-  <div class="box" style="background:#FFD60008;border-color:#FFD60022">
-    <div class="bt" style="color:#FFD600">📊 LEJANN BOUTON AKSYON ITILIZATÈ</div>
-    <div style="font-size:11px;color:#4A7080;line-height:2.0">
-      <span style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 8px">📊🗑</span> — Efase <b style="color:#FFD600">trades sèlman</b> (log + pnl konsève)<br>
-      <span style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 8px">🗑</span> — Efase <b style="color:#C8E8F0">TOUT</b> (trades + log + pnl reset)<br>
-      <span style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 8px">■ STOP</span> — Kanpe bot itilizatè a
-    </div>
-  </div>
 </div>
 
 </div>
@@ -3080,12 +3042,34 @@ async function doLogin(){
 }
 function doLogout(){clearToken();showLogin("Ou dekonekte.");}
 
+// ══ Toggle broker fields ══
 function tog(){
   const v=document.getElementById("d-br").value;
   document.getElementById("fd").style.display=v=="deriv"?"block":"none";
   document.getElementById("fb").style.display=(v=="binance"||v=="binance_us")?"block":"none";
   const note=document.getElementById("fb-note");
   if(note) note.style.display=v=="binance_us"?"block":"none";
+}
+
+// ══ Toggle token type (klasik vs pat_) ══
+function togTokenType(){
+  const v=document.getElementById("d-token-type").value;
+  const classicInfo=document.getElementById("d-classic-info");
+  const patInfo=document.getElementById("d-pat-info");
+  const lbl=document.getElementById("d-token-label");
+  const inp=document.getElementById("d-tk");
+
+  if(v==="pat"){
+    classicInfo.style.display="none";
+    patInfo.style.display="block";
+    lbl.textContent="NOUVO TOKEN pat_ (OAuth)";
+    inp.placeholder="pat_XXXXXXXXXXXXXXXXXXXXXXXX";
+  } else {
+    classicInfo.style.display="block";
+    patInfo.style.display="none";
+    lbl.textContent="API TOKEN DERIV (Klasik)";
+    inp.placeholder="Kole token klasik ou a isit";
+  }
 }
 
 function toggleMode(){
@@ -3151,13 +3135,6 @@ function renderS(){
 }
 renderS();
 
-function tog(){
-  const v=document.getElementById("d-br").value;
-  document.getElementById("fd").style.display=v=="deriv"?"block":"none";
-  document.getElementById("fb").style.display=(v=="binance"||v=="binance_us")?"block":"none";
-  const note=document.getElementById("fb-note");
-  if(note) note.style.display=v=="binance_us"?"block":"none";
-}
 function sw(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
@@ -3171,14 +3148,33 @@ async function doConn(){
   const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
   const brokerLabel={"deriv":"Deriv","binance":"Binance Global","binance_us":"Binance US"}[br]||br;
   msg("cm",`⏳ Ap konekte ${brokerLabel} — tann 15 segonn...`,"ok");
+
   const body={broker:br};
-  if(br=="deriv"){body.token=document.getElementById("d-tk").value;body.app_id=document.getElementById("d-ai").value;}
-  if(br=="binance"||br=="binance_us"){body.api_key=document.getElementById("b-k").value;body.api_secret=document.getElementById("b-s").value;}
+  if(br=="deriv"){
+    body.token=document.getElementById("d-tk").value.trim();
+    body.app_id=document.getElementById("d-ai").value||"1089";
+    // Detekte si se pat_ token pou bay info pi klè
+    const isPat=body.token.toLowerCase().startsWith("pat_");
+    if(isPat){
+      msg("cm",`⏳ Token pat_ detekte — Ap tann koneksyon... (20 sek max)`,"ok");
+    }
+  }
+  if(br=="binance"||br=="binance_us"){
+    body.api_key=document.getElementById("b-k").value;
+    body.api_secret=document.getElementById("b-s").value;
+  }
+
   try{
     const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const d=await r.json();
-    if(d.ok){msg("cm",`✓ Konekte ${brokerLabel} | $${d.balance.toFixed(2)}`,"ok");document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${brokerLabel}</b> | $${d.balance.toFixed(2)}</div>`;}
-    else msg("cm","✗ "+d.error,false);
+    if(d.ok){
+      const noteMsg=d.note?` | ${d.note}`:"";
+      msg("cm",`✓ Konekte ${brokerLabel} | $${d.balance.toFixed(2)}${noteMsg}`,"ok");
+      document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${brokerLabel}</b> | $${d.balance.toFixed(2)}${noteMsg}</div>`;
+    } else {
+      // Si erè sou token, afiche mesaj detaye
+      msg("cm",`✗ Echwe\n${d.error}`,false);
+    }
   }catch(e){msg("cm","✗ "+e.message,false);}
   btn.textContent="⚡ KONEKTE";btn.disabled=false;
 }
@@ -3334,24 +3330,8 @@ async function admRevoke(code){if(!confirm(`Revoke ${code}?`))return;const token
 async function admReset(code){const token=getStoredToken();const r=await fetch("/api/admin/reset_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-
-async function admClearUser(uid){
-  if(!confirm(`Efase TOUT istorik ${uid}?\n(trades + log + pnl reset)`))return;
-  const token=getStoredToken();
-  const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();
-  alert(d.ok?d.msg:d.error);
-  if(d.ok)admRefresh();
-}
-
-async function admClearTrades(uid){
-  if(!confirm(`Efase trades sèlman pou ${uid}?\n(log + pnl ap konsève)`))return;
-  const token=getStoredToken();
-  const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();
-  alert(d.ok?d.msg:d.error);
-  if(d.ok)admRefresh();
-}
+async function admClearUser(uid){if(!confirm(`Efase TOUT istorik ${uid}?\n(trades + log + pnl reset)`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
+async function admClearTrades(uid){if(!confirm(`Efase trades sèlman pou ${uid}?\n(log + pnl ap konsève)`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
 function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}

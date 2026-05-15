@@ -3,11 +3,12 @@
 ║                  BONHEURBOT PRO v6 ELITE                     ║
 ║         Multi-User Trading Bot — Deriv + Binance            ║
 ║   Trend + Ranging | Smart Entry | 3-Loss Pause              ║
-║   OAuth2+PKCE+OTP | Token Klasik | pat_ Token              ║
+║   PAT Token REST Auth | OAuth2+PKCE+OTP | Token Klasik      ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
 import os, json, time, threading, logging, math, uuid, secrets, hashlib, base64, re
+import urllib.request, urllib.parse
 from datetime import datetime, timedelta, date
 from flask import Flask, request, jsonify, render_template_string, session, redirect
 
@@ -18,14 +19,21 @@ PROFIT_WALLET = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
 PROFIT_PCT    = 0.05
 
 # ═══════════════════════════════════════════════════════════
-# DERIV OAUTH2 CONFIG
+# DERIV CONFIG
 # ═══════════════════════════════════════════════════════════
-DERIV_CLIENT_ID   = "33h9RL9bbCjURr4MO3PQ0"
+DERIV_CLIENT_ID    = "33h9RL9bbCjURr4MO3PQ0"
 DERIV_REDIRECT_URI = "https://robotbonheur.onrender.com/callback"
-DERIV_AUTH_URL    = "https://oauth.deriv.com/oauth2/authorize"
-DERIV_TOKEN_URL   = "https://oauth.deriv.com/oauth2/token"
-DERIV_WS_OTP_URL  = "https://api.deriv.com/trading/v1/options/accounts/{account_id}/otp"
-DERIV_ACCOUNTS_URL = "https://api.deriv.com/trading/v1/options/accounts"
+DERIV_AUTH_URL     = "https://oauth.deriv.com/oauth2/authorize"
+DERIV_TOKEN_URL    = "https://oauth.deriv.com/oauth2/token"
+
+# ── NEW Deriv REST API v2 endpoints (PAT compatible) ──
+DERIV_REST_BASE      = "https://api.deriv.com/v1"
+DERIV_REST_ACCOUNTS  = "https://api.deriv.com/v1/accounts"
+DERIV_REST_BALANCE   = "https://api.deriv.com/v1/accounts/{account_id}/balance"
+DERIV_REST_ORDERS    = "https://api.deriv.com/v1/orders"
+
+# Legacy WS app IDs to try
+DERIV_WS_APP_IDS = ["36544", "1089", "16929", DERIV_CLIENT_ID]
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
@@ -117,8 +125,6 @@ app.secret_key = _secret
 
 _user_states = {}
 _user_lock = threading.Lock()
-
-# Stockage temporaire PKCE verifiers par state
 _pkce_store = {}
 _pkce_lock  = threading.Lock()
 
@@ -134,21 +140,152 @@ def get_state():
                 "balance": 0.0, "total_pnl": 0.0, "profit_sent": 0.0,
                 "trades": [], "log": [], "config": {},
                 "deriv_api": None, "binance_api": None, "deriv_digits_api": None,
+                "_pat_token": None, "_pat_account_id": None, "_pat_currency": "USD",
             }
     return _user_states[uid]
+
+# ═══════════════════════════════════════════════════════════
+# ── NEW: DERIV PAT REST AUTH HELPERS ──
+# ═══════════════════════════════════════════════════════════
+
+def _deriv_rest_request(url, method="GET", data=None, pat_token=None, timeout=20):
+    """
+    Generic Deriv REST API request using PAT Bearer auth.
+    Returns (ok, response_dict_or_error_str)
+    """
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if pat_token:
+        headers["Authorization"] = f"Bearer {pat_token}"
+    body = json.dumps(data).encode() if data else None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return True, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read())
+        except:
+            err_body = {"raw": str(e)}
+        return False, err_body
+    except Exception as e:
+        return False, str(e)
+
+def pat_verify_and_get_account(pat_token):
+    """
+    Verify a PAT token via Deriv REST API v1.
+    Returns (ok, account_info_dict_or_error)
+    account_info = {"account_id", "balance", "currency", "status", "email"}
+    """
+    # Try new REST v1 accounts endpoint
+    ok, resp = _deriv_rest_request(DERIV_REST_ACCOUNTS, "GET", pat_token=pat_token)
+    if ok:
+        # Response may be list or dict with accounts key
+        accounts = []
+        if isinstance(resp, list):
+            accounts = resp
+        elif isinstance(resp, dict):
+            accounts = resp.get("accounts", resp.get("data", []))
+            if not accounts and resp.get("account_id"):
+                accounts = [resp]
+        if accounts:
+            acct = accounts[0]
+            return True, {
+                "account_id": acct.get("account_id") or acct.get("id", ""),
+                "balance":    float(acct.get("balance", 0)),
+                "currency":   acct.get("currency", "USD"),
+                "status":     acct.get("status", "active"),
+                "email":      acct.get("email", ""),
+                "all_accounts": accounts,
+            }
+        # Empty accounts list — token valid but no accounts?
+        return True, {"account_id": "", "balance": 0.0, "currency": "USD", "status": "active", "all_accounts": []}
+
+    # REST failed — fall back to WebSocket authorize
+    logger.info(f"REST accounts failed ({resp}), trying WS authorize fallback...")
+    return _pat_verify_via_websocket(pat_token)
+
+def _pat_verify_via_websocket(pat_token):
+    """
+    Fallback: verify PAT via WebSocket authorize message.
+    Tries multiple app_ids.
+    """
+    try:
+        import websocket as ws_lib
+    except ImportError:
+        return False, "websocket-client library not installed"
+
+    for app_id in DERIV_WS_APP_IDS:
+        done  = threading.Event()
+        result = [None]
+
+        def on_open(ws):
+            ws.send(json.dumps({"authorize": pat_token}))
+
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize":
+                if "error" in d:
+                    result[0] = {"ok": False, "error": d["error"].get("message", "Token invalib")}
+                else:
+                    auth = d["authorize"]
+                    result[0] = {
+                        "ok": True,
+                        "account_id": auth.get("loginid", auth.get("account_id", "")),
+                        "balance":    float(auth.get("balance", 0)),
+                        "currency":   auth.get("currency", "USD"),
+                        "status":     "active",
+                        "email":      auth.get("email", ""),
+                        "all_accounts": auth.get("account_list", []),
+                    }
+                done.set()
+
+        def on_err(ws, e):
+            result[0] = {"ok": False, "error": str(e)}
+            done.set()
+
+        url = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+        try:
+            ws = ws_lib.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
+            t  = threading.Thread(target=ws.run_forever, daemon=True)
+            t.start()
+            done.wait(timeout=15)
+            try: ws.close()
+            except: pass
+            r = result[0]
+            if r and r.get("ok"):
+                logger.info(f"PAT WS verify ok via app_id={app_id}")
+                return True, r
+            elif r:
+                logger.info(f"PAT WS app_id={app_id} error: {r.get('error')}")
+        except Exception as e:
+            logger.info(f"PAT WS app_id={app_id} exception: {e}")
+
+    return False, "PAT token invalib oswa rejte pa tout app_id Deriv"
+
+def pat_get_balance(pat_token, account_id):
+    """Fetch balance for a specific account via REST."""
+    if account_id:
+        url = DERIV_REST_BALANCE.format(account_id=account_id)
+        ok, resp = _deriv_rest_request(url, "GET", pat_token=pat_token)
+        if ok:
+            bal = resp.get("balance", resp.get("amount", 0))
+            return True, float(bal)
+    # Fallback: re-verify which also returns balance
+    ok, info = pat_verify_and_get_account(pat_token)
+    if ok:
+        return True, info.get("balance", 0.0)
+    return False, 0.0
 
 # ═══════════════════════════════════════════════════════════
 # OAUTH2 + PKCE HELPERS
 # ═══════════════════════════════════════════════════════════
 def _pkce_pair():
-    """Jenere code_verifier ak code_challenge pou PKCE."""
     verifier  = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b'=').decode()
     digest    = hashlib.sha256(verifier.encode()).digest()
     challenge = base64.urlsafe_b64encode(digest).rstrip(b'=').decode()
     return verifier, challenge
 
 def build_oauth_url(uid):
-    """Konstwi URL OAuth2 Deriv pou redirecte itilizatè a."""
     verifier, challenge = _pkce_pair()
     state = secrets.token_hex(16)
     with _pkce_lock:
@@ -165,11 +302,6 @@ def build_oauth_url(uid):
     return DERIV_AUTH_URL + params, state
 
 def exchange_oauth_code(code, state):
-    """
-    Echange authorization code pou access_token via REST.
-    Retounen: (ok, access_token_or_error)
-    """
-    import urllib.request, urllib.parse
     with _pkce_lock:
         entry = _pkce_store.pop(state, None)
     if not entry:
@@ -184,10 +316,8 @@ def exchange_oauth_code(code, state):
         "redirect_uri":  DERIV_REDIRECT_URI,
     }).encode()
     req = urllib.request.Request(
-        DERIV_TOKEN_URL,
-        data=payload,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST"
+        DERIV_TOKEN_URL, data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -200,104 +330,469 @@ def exchange_oauth_code(code, state):
         body = getattr(e, 'read', lambda: b'')()
         return False, f"Echange kòd echwe: {e} | {body}"
 
-def get_deriv_accounts(access_token):
-    """
-    Jwenn lis kont Deriv via REST API.
-    Retounen: (ok, accounts_list_or_error)
-    """
-    import urllib.request
-    req = urllib.request.Request(
-        DERIV_ACCOUNTS_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-        method="GET"
+def get_deriv_accounts_oauth(access_token):
+    ok, resp = _deriv_rest_request(
+        "https://api.deriv.com/trading/v1/options/accounts", "GET",
+        pat_token=access_token
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        accounts = data.get("accounts", data.get("data", []))
-        if not accounts:
-            accounts = [data] if data.get("account_id") else []
-        return True, accounts
-    except Exception as e:
-        return False, str(e)
+    if not ok:
+        return False, str(resp)
+    accounts = resp.get("accounts", resp.get("data", []))
+    if not accounts and resp.get("account_id"):
+        accounts = [resp]
+    return True, accounts
 
 def get_deriv_otp(access_token, account_id):
-    """
-    Jwenn OTP pou WebSocket Deriv pou yon kont espesifik.
-    Retounen: (ok, ws_url_or_error, balance)
-    """
-    import urllib.request
-    url = DERIV_WS_OTP_URL.format(account_id=account_id)
-    req = urllib.request.Request(
-        url,
-        data=b'{}',
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type":  "application/json",
-        },
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        ws_url  = data.get("ws_url") or data.get("websocket_url") or data.get("url")
-        otp     = data.get("otp") or data.get("token")
-        balance = float(data.get("balance", 0))
-        if ws_url:
-            return True, ws_url, balance
-        if otp:
-            # Konstwi URL WebSocket ak OTP
-            ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_CLIENT_ID}&otp={otp}"
-            return True, ws_url, balance
-        return False, f"Pa jwenn ws_url nan repons: {data}", 0.0
-    except Exception as e:
-        body = getattr(e, 'read', lambda: b'')()
-        return False, f"OTP echwe: {e} | {body}", 0.0
+    url = f"https://api.deriv.com/trading/v1/options/accounts/{account_id}/otp"
+    ok, resp = _deriv_rest_request(url, "POST", data={}, pat_token=access_token)
+    if not ok:
+        return False, f"OTP echwe: {resp}", 0.0
+    ws_url  = resp.get("ws_url") or resp.get("websocket_url") or resp.get("url")
+    otp     = resp.get("otp") or resp.get("token")
+    balance = float(resp.get("balance", 0))
+    if ws_url:
+        return True, ws_url, balance
+    if otp:
+        ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_CLIENT_ID}&otp={otp}"
+        return True, ws_url, balance
+    return False, f"Pa jwenn ws_url: {resp}", 0.0
 
 # ═══════════════════════════════════════════════════════════
-# DERIV pat_ TOKEN HELPER (konsève pou retwokonpatibilite)
+# DERIV WebSocket CLIENT — PAT + OAuth2 + Classic
 # ═══════════════════════════════════════════════════════════
-def exchange_pat_token(pat_token, app_id="1089", timeout=20):
-    import websocket
-    OAUTH_APP_IDS = ["36544", "1089", "16929"]
-    for aid in OAUTH_APP_IDS:
-        done   = threading.Event()
-        result = [None, None, 0.0]
-        def on_open(ws): ws.send(json.dumps({"authorize": pat_token}))
+class DerivClient:
+    """
+    Unified Deriv client.
+    - pat_token: PAT token (pat_...) — uses REST for auth, WS for candles/trading
+    - token: classic WS authorize token
+    - ws_url: OAuth2 OTP WebSocket URL
+    """
+    def __init__(self, token, app_id="1089", ws_url=None, pat_token=None):
+        self.token      = token      # WS authorize token (classic or PAT as fallback)
+        self.app_id     = app_id
+        self.ws_url     = ws_url
+        self.pat_token  = pat_token  # original PAT for REST calls
+        self._bal       = 0.0
+        self._account_id = ""
+        self._currency   = "USD"
+
+    def _get_ws_url(self):
+        if self.ws_url:
+            return self.ws_url
+        return f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+
+    def connect(self):
+        """
+        Connect: PAT tries REST first, then WS fallback.
+        Classic token goes straight to WS.
+        """
+        if self.pat_token:
+            ok, info = pat_verify_and_get_account(self.pat_token)
+            if ok:
+                self._bal        = info.get("balance", 0.0)
+                self._account_id = info.get("account_id", "")
+                self._currency   = info.get("currency", "USD")
+                # Also set token for WS trading (PAT works as authorize token in WS)
+                if not self.token or self.token == self.pat_token:
+                    self.token = self.pat_token
+                logger.info(f"PAT REST auth ok | balance={self._bal} {self._currency}")
+                return self._bal
+            else:
+                raise Exception(f"PAT invalib: {info}")
+
+        # Classic or OAuth2 token — use WS authorize
+        import websocket
+        done = threading.Event(); err = [None]
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
         def on_msg(ws, msg):
             d = json.loads(msg)
             if d.get("msg_type") == "authorize":
-                if "error" in d:
-                    result[0] = False
-                    result[1] = d["error"].get("message", "Token invalib")
+                if "error" in d: err[0] = d["error"]["message"]
                 else:
-                    auth = d["authorize"]
-                    result[0] = True
-                    result[1] = auth.get("token", pat_token)
-                    result[2] = float(auth.get("balance", 0))
+                    a = d["authorize"]
+                    self._bal        = float(a.get("balance", 0))
+                    self._account_id = a.get("loginid", "")
+                    self._currency   = a.get("currency", "USD")
                 done.set()
-        def on_err(ws, e):
-            result[0] = False; result[1] = str(e); done.set()
-        url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
-        try:
-            ws = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
-            t  = threading.Thread(target=ws.run_forever, daemon=True)
-            t.start()
-            done.wait(timeout=timeout)
-            if result[0] is True:
-                logger.info(f"pat_ token aksepte avèk app_id={aid}")
-                return True, result[1], result[2]
-            else:
-                logger.info(f"pat_ echwe app_id={aid}: {result[1]}")
-        except Exception as e:
-            logger.info(f"pat_ erè app_id={aid}: {e}")
-        finally:
+        def on_err(ws, e): err[0] = str(e); done.set()
+
+        app_ids_to_try = DERIV_WS_APP_IDS if not self.ws_url else [self.app_id]
+        for aid in app_ids_to_try:
+            done.clear(); err[0] = None
+            url = self.ws_url or f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
+            ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
+            threading.Thread(target=ws.run_forever, daemon=True).start()
+            done.wait(timeout=15)
             try: ws.close()
             except: pass
-    return False, "Token pat_ pa aksepte pa okenn app_id Deriv", 0.0
+            if not err[0]:
+                self.app_id = aid
+                return self._bal
+        if err[0]: raise Exception(f"Deriv: {err[0]}")
+        return self._bal
+
+    def get_balance_sync(self):
+        """Refresh balance — PAT uses REST, others use WS."""
+        if self.pat_token and self._account_id:
+            ok, bal = pat_get_balance(self.pat_token, self._account_id)
+            if ok:
+                self._bal = bal
+                return bal
+        # WS balance
+        import websocket as wsl
+        res = [None]; done = threading.Event()
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize" and "error" not in d:
+                ws.send(json.dumps({"balance": 1, "account": "current"}))
+            elif d.get("msg_type") == "balance":
+                b = d.get("balance", {}).get("balance")
+                if b is not None: res[0] = float(b); done.set()
+            elif "error" in d: done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=15)
+        if res[0]: self._bal = res[0]
+        return res[0] or self._bal
+
+    def get_candles(self, symbol="R_100", count=200, gran=60):
+        import websocket as wsl
+        res = [None]; done = threading.Event()
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize":
+                ws.send(json.dumps({"ticks_history": symbol, "count": count,
+                    "end": "latest", "granularity": gran, "style": "candles", "adjust_start_time": 1}))
+            elif "candles" in d: res[0] = d["candles"]; done.set()
+            elif "error" in d: done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=25)
+        if not res[0]: return []
+        return [{"open": float(c["open"]), "high": float(c["high"]),
+                 "low": float(c["low"]), "close": float(c["close"]),
+                 "volume": 1000, "time": c["epoch"]} for c in res[0]]
+
+    def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
+        import websocket as wsl
+        res = [None]; err = [None]; done = threading.Event()
+        ct = "CALL" if direction == "BUY" else "PUT"
+        if duration_secs <= 60: dur_val, dur_unit = 1, "m"
+        elif duration_secs <= 300: dur_val, dur_unit = 5, "m"
+        elif duration_secs <= 900: dur_val, dur_unit = 15, "m"
+        elif duration_secs <= 3600: dur_val, dur_unit = 1, "h"
+        else: dur_val, dur_unit = 4, "h"
+        def on_msg(ws, msg):
+            d = json.loads(msg); mt = d.get("msg_type", "")
+            if mt == "authorize" and "error" not in d:
+                ws.send(json.dumps({"proposal": 1, "amount": max(0.5, float(amount)),
+                    "basis": "stake", "contract_type": ct, "currency": "USD",
+                    "symbol": symbol, "duration": dur_val, "duration_unit": dur_unit}))
+            elif mt == "proposal":
+                if "error" in d: err[0] = d["error"]["message"]; done.set(); return
+                ws.send(json.dumps({"buy": d["proposal"]["id"], "price": d["proposal"]["ask_price"]}))
+            elif mt == "buy":
+                if "error" in d: err[0] = d["error"]["message"]; done.set(); return
+                res[0] = d.get("buy", {}); done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=30)
+        if err[0]: raise Exception(err[0])
+        return res[0] or {}
+
+    def transfer_to_account(self, account_id, amount):
+        import websocket as wsl
+        res = [None]; err = [None]; done = threading.Event()
+        def on_msg(ws, msg):
+            d = json.loads(msg); mt = d.get("msg_type", "")
+            if mt == "authorize" and "error" not in d:
+                ws.send(json.dumps({"transfer_between_accounts": 1, "account_to": account_id,
+                    "amount": round(float(amount), 2), "currency": "USD"}))
+            elif mt == "transfer_between_accounts":
+                if "error" in d: err[0] = d["error"]["message"]; done.set(); return
+                res[0] = d; done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=20)
+        if err[0]: raise Exception(err[0])
+        return res[0]
+
+    @property
+    def balance(self): return self._bal
+    @property
+    def account_id(self): return self._account_id
+    @property
+    def currency(self): return self._currency
 
 # ═══════════════════════════════════════════════════════════
-# INDIKATÈ TEKNIK
+# DERIV DIGITS CLIENT — PAT compatible
+# ═══════════════════════════════════════════════════════════
+class DerivDigitsClient:
+    def __init__(self, token, app_id="1089", ws_url=None, pat_token=None):
+        self.token     = token
+        self.app_id    = app_id
+        self.ws_url    = ws_url
+        self.pat_token = pat_token
+        self._bal      = 0.0
+
+    def _get_ws_url(self):
+        if self.ws_url: return self.ws_url
+        return f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+
+    def connect(self):
+        if self.pat_token:
+            ok, info = pat_verify_and_get_account(self.pat_token)
+            if ok:
+                self._bal = info.get("balance", 0.0)
+                if not self.token or self.token == self.pat_token:
+                    self.token = self.pat_token
+                return self._bal
+            raise Exception(f"Digits PAT invalib: {info}")
+        import websocket
+        done = threading.Event(); err = [None]
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize":
+                if "error" in d: err[0] = d["error"]["message"]
+                else: self._bal = float(d["authorize"].get("balance", 0))
+                done.set()
+        def on_err(ws, e): err[0] = str(e); done.set()
+        app_ids_to_try = DERIV_WS_APP_IDS if not self.ws_url else [self.app_id]
+        for aid in app_ids_to_try:
+            done.clear(); err[0] = None
+            url = self.ws_url or f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
+            ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
+            threading.Thread(target=ws.run_forever, daemon=True).start()
+            done.wait(timeout=15)
+            try: ws.close()
+            except: pass
+            if not err[0]: self.app_id = aid; return self._bal
+        if err[0]: raise Exception(f"Deriv Digits: {err[0]}")
+        return self._bal
+
+    def get_ticks(self, symbol="R_10", count=100):
+        import websocket as wsl
+        res = [None]; done = threading.Event()
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize":
+                ws.send(json.dumps({"ticks_history": symbol, "count": count, "end": "latest", "style": "ticks"}))
+            elif d.get("msg_type") == "history": res[0] = d.get("history", {}); done.set()
+            elif "error" in d: done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=25)
+        if not res[0]: return []
+        prices = res[0].get("prices", []); times = res[0].get("times", [])
+        return [{"price": float(p), "time": t} for p, t in zip(prices, times)]
+
+    def place_digits_trade(self, symbol, contract_type, amount=0.35, barrier=None):
+        import websocket as wsl
+        res = [None]; err = [None]; done = threading.Event()
+        proposal = {"proposal": 1, "amount": max(0.35, float(amount)), "basis": "stake",
+                    "contract_type": contract_type, "currency": "USD",
+                    "symbol": symbol, "duration": 5, "duration_unit": "t"}
+        if barrier is not None: proposal["barrier"] = str(barrier)
+        def on_msg(ws, msg):
+            d = json.loads(msg); mt = d.get("msg_type", "")
+            if mt == "authorize" and "error" not in d: ws.send(json.dumps(proposal))
+            elif mt == "proposal":
+                if "error" in d: err[0] = d["error"]["message"]; done.set(); return
+                ws.send(json.dumps({"buy": d["proposal"]["id"], "price": d["proposal"]["ask_price"]}))
+            elif mt == "buy":
+                if "error" in d: err[0] = d["error"]["message"]; done.set(); return
+                res[0] = d.get("buy", {}); done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=30)
+        if err[0]: raise Exception(err[0])
+        return res[0] or {}
+
+    def wait_contract_result(self, contract_id, timeout=30):
+        import websocket as wsl
+        res = [None]; done = threading.Event()
+        def on_msg(ws, msg):
+            d = json.loads(msg); mt = d.get("msg_type", "")
+            if mt == "authorize" and "error" not in d:
+                ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
+            elif mt == "proposal_open_contract":
+                poc = d.get("proposal_open_contract", {}); status = poc.get("status", "")
+                if status in ("won", "lost", "sold"): res[0] = poc; done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=timeout)
+        return res[0]
+
+    def get_balance_sync(self):
+        if self.pat_token:
+            ok, bal = pat_get_balance(self.pat_token, "")
+            if ok: self._bal = bal; return bal
+        import websocket as wsl
+        res = [None]; done = threading.Event()
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize" and "error" not in d:
+                ws.send(json.dumps({"balance": 1, "account": "current"}))
+            elif d.get("msg_type") == "balance":
+                b = d.get("balance", {}).get("balance")
+                if b is not None: res[0] = float(b); done.set()
+            elif "error" in d: done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=15)
+        if res[0]: self._bal = res[0]
+        return res[0] or self._bal
+
+    def transfer_to_account(self, account_id, amount):
+        import websocket as wsl
+        res = [None]; err = [None]; done = threading.Event()
+        def on_msg(ws, msg):
+            d = json.loads(msg); mt = d.get("msg_type", "")
+            if mt == "authorize" and "error" not in d:
+                ws.send(json.dumps({"transfer_between_accounts": 1, "account_to": account_id,
+                    "amount": round(float(amount), 2), "currency": "USD"}))
+            elif mt == "transfer_between_accounts":
+                if "error" in d: err[0] = d["error"]["message"]; done.set(); return
+                res[0] = d; done.set()
+        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
+        url = self._get_ws_url()
+        w = wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
+        done.wait(timeout=20)
+        if err[0]: raise Exception(err[0])
+        return res[0]
+
+    @property
+    def balance(self): return self._bal
+
+# ═══════════════════════════════════════════════════════════
+# BINANCE CLIENTS (unchanged)
+# ═══════════════════════════════════════════════════════════
+class BinanceClient:
+    def __init__(self, key, secret):
+        from binance.client import Client; self.c = Client(key, secret)
+    def connect(self):
+        for b in self.c.get_account()["balances"]:
+            if b["asset"] == "USDT": return float(b["free"])
+        return 0.0
+    @property
+    def balance(self):
+        try:
+            for b in self.c.get_account()["balances"]:
+                if b["asset"] == "USDT": return float(b["free"])
+        except: pass
+        return 0.0
+    def get_candles(self, symbol="BTCUSDT", interval="15m", limit=200):
+        k = self.c.get_klines(symbol=symbol, interval=interval, limit=limit)
+        return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]),
+                 "close": float(x[4]), "volume": float(x[5]), "time": x[0]} for x in k]
+    def get_symbol_info_cached(self, symbol):
+        try: return self.c.get_symbol_info(symbol)
+        except: return None
+    def get_min_notional(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 10.0
+        for f in info.get("filters", []):
+            if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL"): return float(f.get("minNotional", "10"))
+        return 10.0
+    def get_qty_precision(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 3
+        for f in info.get("filters", []):
+            if f["filterType"] == "LOT_SIZE":
+                step = float(f["stepSize"])
+                if step >= 1: return 0
+                elif step >= 0.1: return 1
+                elif step >= 0.01: return 2
+                elif step >= 0.001: return 3
+                else: return 4
+        return 3
+    def get_min_qty(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 0.001
+        for f in info.get("filters", []):
+            if f["filterType"] == "LOT_SIZE": return float(f["minQty"])
+        return 0.001
+    def get_price_precision(self, symbol):
+        info = self.get_symbol_info_cached(symbol)
+        if not info: return 2
+        for f in info.get("filters", []):
+            if f["filterType"] == "PRICE_FILTER":
+                tick = float(f["tickSize"])
+                if tick >= 1: return 0
+                elif tick >= 0.1: return 1
+                elif tick >= 0.01: return 2
+                elif tick >= 0.001: return 3
+                else: return 4
+        return 2
+    def place_trade(self, symbol, direction, amount_usdt=10.0, sl_pct=0.018, tp_pct=0.035):
+        from binance.enums import SIDE_BUY, SIDE_SELL, TIME_IN_FORCE_GTC
+        ticker = self.c.get_symbol_ticker(symbol=symbol); price = float(ticker["price"])
+        pp = self.get_price_precision(symbol); qp = self.get_qty_precision(symbol)
+        min_qty = self.get_min_qty(symbol); min_not = self.get_min_notional(symbol)
+        qty = round(amount_usdt / price, qp); qty = max(qty, min_qty)
+        if qty * price < min_not: qty = round(min_not / price * 1.01, qp); qty = max(qty, min_qty)
+        side = SIDE_BUY if direction == "BUY" else SIDE_SELL
+        if direction == "BUY":
+            limit_price = round(price * 1.0005, pp); sl_price = round(price * (1 - sl_pct), pp); tp_price = round(price * (1 + tp_pct), pp)
+        else:
+            limit_price = round(price * 0.9995, pp); sl_price = round(price * (1 + sl_pct), pp); tp_price = round(price * (1 - tp_pct), pp)
+        entry_order = self.c.order_limit(symbol=symbol, side=side, quantity=qty, price=str(limit_price), timeInForce=TIME_IN_FORCE_GTC)
+        oid = entry_order.get("orderId"); filled = False
+        for _ in range(18):
+            time.sleep(5)
+            try:
+                status = self.c.get_order(symbol=symbol, orderId=oid)
+                if status["status"] == "FILLED": filled = True; break
+                elif status["status"] in ("CANCELED", "EXPIRED", "REJECTED"): break
+            except: pass
+        if not filled:
+            try: self.c.cancel_order(symbol=symbol, orderId=oid)
+            except: pass
+            return self.c.order_market(symbol=symbol, side=side, quantity=qty)
+        try:
+            if direction == "BUY":
+                self.c.order_oco_sell(symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
+                    stopLimitPrice=str(round(sl_price * 0.998, pp)), stopLimitTimeInForce=TIME_IN_FORCE_GTC)
+            else:
+                self.c.order_oco_buy(symbol=symbol, quantity=qty, price=str(tp_price), stopPrice=str(sl_price),
+                    stopLimitPrice=str(round(sl_price * 1.002, pp)), stopLimitTimeInForce=TIME_IN_FORCE_GTC)
+        except Exception as e: logger.warning(f"OCO echwe ({e})")
+        return entry_order
+    def send_profit(self, amount):
+        try:
+            r = self.c.withdraw(coin="USDT", address=PROFIT_WALLET, amount=amount, network="ERC20")
+            logger.info(f"Profit sent: ${amount}"); return r
+        except Exception as e: logger.error(f"Profit transfer: {e}"); return None
+
+class BinanceUSClient(BinanceClient):
+    def __init__(self, key, secret):
+        from binance.client import Client; self.c = Client(key, secret, tld="us")
+    def send_profit(self, amount):
+        try:
+            r = self.c.withdraw(coin="USDT", address=PROFIT_WALLET, amount=amount, network="ERC20")
+            logger.info(f"Profit sent (BinanceUS): ${amount}"); return r
+        except Exception as e: logger.error(f"Profit transfer BinanceUS: {e}"); return None
+
+# ═══════════════════════════════════════════════════════════
+# TECHNICAL INDICATORS (unchanged)
 # ═══════════════════════════════════════════════════════════
 def ema(prices, p):
     if len(prices) < p: return []
@@ -789,8 +1284,6 @@ def strat_binance_gold(c):
     trend_up=e20[-1]>e50[-1] and e50[-1]>e200[-1] and cl[-1]>e200[-1]
     trend_dn=e20[-1]<e50[-1] and e50[-1]<e200[-1] and cl[-1]<e200[-1]
     if not trend_up and not trend_dn: return "NONE",0
-    atr_pct=at/mid*100
-    if atr_pct<0.03: return "NONE",0
     buy_pts=0; sell_pts=0
     if trend_up: buy_pts+=3
     if trend_dn: sell_pts+=3
@@ -939,471 +1432,6 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
             "equity":equity[-50:]}
 
 # ═══════════════════════════════════════════════════════════
-# DERIV CLIENT — sipòte token klasik + pat_ + OAuth2 ws_url
-# ═══════════════════════════════════════════════════════════
-class DerivClient:
-    def __init__(self, token, app_id="1089", ws_url=None):
-        self.token   = token
-        self.app_id  = app_id
-        self.ws_url  = ws_url   # URL WebSocket spesyal (OAuth2 OTP)
-        self._bal    = 0.0
-
-    def _get_ws_url(self):
-        """Retounen URL WebSocket kòrèk selon tip koneksyon."""
-        if self.ws_url:
-            return self.ws_url
-        return f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-
-    def connect(self):
-        import websocket
-        done=threading.Event(); err=[None]
-        def on_open(ws): ws.send(json.dumps({"authorize": self.token}))
-        def on_msg(ws, msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
-                if "error" in d: err[0]=d["error"]["message"]
-                else: self._bal=float(d["authorize"].get("balance",0))
-                done.set()
-        def on_err(ws, e): err[0]=str(e); done.set()
-
-        # Si pat_, eseye plizyè app_id
-        if self.token.lower().startswith("pat_") and not self.ws_url:
-            app_ids_to_try=["36544",self.app_id,"16929"]
-        else:
-            app_ids_to_try=[self.app_id]
-
-        for aid in app_ids_to_try:
-            done.clear(); err[0]=None
-            url=self.ws_url or f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
-            ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_msg,on_error=on_err)
-            threading.Thread(target=ws.run_forever,daemon=True).start()
-            done.wait(timeout=15)
-            try: ws.close()
-            except: pass
-            if not err[0]:
-                self.app_id=aid; return self._bal
-
-        if err[0]:
-            if self.token.lower().startswith("pat_"):
-                raise Exception("Token pat_ refize — eseye Token Klasik oswa OAuth2")
-            raise Exception(f"Deriv: {err[0]}")
-        return self._bal
-
-    def get_candles(self, symbol="R_100", count=200, gran=60):
-        import websocket as wsl
-        res=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
-                ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","granularity":gran,"style":"candles","adjust_start_time":1}))
-            elif "candles" in d: res[0]=d["candles"]; done.set()
-            elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=25)
-        if not res[0]: return []
-        return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),"close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
-
-    def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
-        import websocket as wsl
-        res=[None]; err=[None]; done=threading.Event()
-        ct="CALL" if direction=="BUY" else "PUT"
-        if duration_secs<=60: dur_val,dur_unit=1,"m"
-        elif duration_secs<=300: dur_val,dur_unit=5,"m"
-        elif duration_secs<=900: dur_val,dur_unit=15,"m"
-        elif duration_secs<=3600: dur_val,dur_unit=1,"h"
-        else: dur_val,dur_unit=4,"h"
-        def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal":1,"amount":max(0.5,float(amount)),"basis":"stake","contract_type":ct,"currency":"USD","symbol":symbol,"duration":dur_val,"duration_unit":dur_unit}))
-            elif mt=="proposal":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
-            elif mt=="buy":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                res[0]=d.get("buy",{}); done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=30)
-        if err[0]: raise Exception(err[0])
-        return res[0] or {}
-
-    def transfer_to_account(self, account_id, amount):
-        import websocket as wsl
-        res=[None]; err=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"transfer_between_accounts":1,"account_to":account_id,"amount":round(float(amount),2),"currency":"USD"}))
-            elif mt=="transfer_between_accounts":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                res[0]=d; done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=20)
-        if err[0]: raise Exception(err[0])
-        return res[0]
-
-    def get_balance_sync(self):
-        import websocket as wsl
-        res=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize" and "error" not in d:
-                ws.send(json.dumps({"balance":1,"account":"current"}))
-            elif d.get("msg_type")=="balance":
-                b=d.get("balance",{}).get("balance")
-                if b is not None: res[0]=float(b); done.set()
-            elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=15)
-        if res[0]: self._bal=res[0]
-        return res[0] or self._bal
-
-    @property
-    def balance(self): return self._bal
-
-# ═══════════════════════════════════════════════════════════
-# DERIV DIGITS CLIENT
-# ═══════════════════════════════════════════════════════════
-class DerivDigitsClient:
-    def __init__(self, token, app_id="1089", ws_url=None):
-        self.token  = token
-        self.app_id = app_id
-        self.ws_url = ws_url
-        self._bal   = 0.0
-
-    def _get_ws_url(self):
-        if self.ws_url: return self.ws_url
-        return f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-
-    def connect(self):
-        import websocket
-        done=threading.Event(); err=[None]
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
-                if "error" in d: err[0]=d["error"]["message"]
-                else: self._bal=float(d["authorize"].get("balance",0))
-                done.set()
-        def on_err(ws,e): err[0]=str(e); done.set()
-        app_ids_to_try=["36544",self.app_id,"16929"] if (self.token.lower().startswith("pat_") and not self.ws_url) else [self.app_id]
-        for aid in app_ids_to_try:
-            done.clear(); err[0]=None
-            url=self.ws_url or f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
-            ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_msg,on_error=on_err)
-            threading.Thread(target=ws.run_forever,daemon=True).start()
-            done.wait(timeout=15)
-            try: ws.close()
-            except: pass
-            if not err[0]: self.app_id=aid; return self._bal
-        if err[0]: raise Exception(f"Deriv Digits: {err[0]}")
-        return self._bal
-
-    def get_ticks(self, symbol="R_10", count=100):
-        import websocket as wsl
-        res=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize":
-                ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","style":"ticks"}))
-            elif d.get("msg_type")=="history": res[0]=d.get("history",{}); done.set()
-            elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=25)
-        if not res[0]: return []
-        prices=res[0].get("prices",[]); times=res[0].get("times",[])
-        return [{"price":float(p),"time":t} for p,t in zip(prices,times)]
-
-    def place_digits_trade(self, symbol, contract_type, amount=0.35, barrier=None):
-        import websocket as wsl
-        res=[None]; err=[None]; done=threading.Event()
-        proposal={"proposal":1,"amount":max(0.35,float(amount)),"basis":"stake",
-                  "contract_type":contract_type,"currency":"USD","symbol":symbol,"duration":5,"duration_unit":"t"}
-        if barrier is not None: proposal["barrier"]=str(barrier)
-        def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize" and "error" not in d: ws.send(json.dumps(proposal))
-            elif mt=="proposal":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
-            elif mt=="buy":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                res[0]=d.get("buy",{}); done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=30)
-        if err[0]: raise Exception(err[0])
-        return res[0] or {}
-
-    def wait_contract_result(self, contract_id, timeout=30):
-        import websocket as wsl
-        res=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal_open_contract":1,"contract_id":contract_id,"subscribe":1}))
-            elif mt=="proposal_open_contract":
-                poc=d.get("proposal_open_contract",{}); status=poc.get("status","")
-                if status in ("won","lost","sold"): res[0]=poc; done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=timeout)
-        return res[0]
-
-    def get_balance_sync(self):
-        import websocket as wsl
-        res=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg)
-            if d.get("msg_type")=="authorize" and "error" not in d:
-                ws.send(json.dumps({"balance":1,"account":"current"}))
-            elif d.get("msg_type")=="balance":
-                b=d.get("balance",{}).get("balance")
-                if b is not None: res[0]=float(b); done.set()
-            elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=15)
-        if res[0]: self._bal=res[0]
-        return res[0] or self._bal
-
-    def transfer_to_account(self, account_id, amount):
-        import websocket as wsl
-        res=[None]; err=[None]; done=threading.Event()
-        def on_msg(ws,msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"transfer_between_accounts":1,"account_to":account_id,"amount":round(float(amount),2),"currency":"USD"}))
-            elif mt=="transfer_between_accounts":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                res[0]=d; done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
-        url=self._get_ws_url()
-        w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
-        threading.Thread(target=w.run_forever,daemon=True).start()
-        done.wait(timeout=20)
-        if err[0]: raise Exception(err[0])
-        return res[0]
-
-    @property
-    def balance(self): return self._bal
-
-# ═══════════════════════════════════════════════════════════
-# BINANCE CLIENTS (pa chanje)
-# ═══════════════════════════════════════════════════════════
-class BinanceClient:
-    def __init__(self,key,secret):
-        from binance.client import Client; self.c=Client(key,secret)
-    def connect(self):
-        for b in self.c.get_account()["balances"]:
-            if b["asset"]=="USDT": return float(b["free"])
-        return 0.0
-    @property
-    def balance(self):
-        try:
-            for b in self.c.get_account()["balances"]:
-                if b["asset"]=="USDT": return float(b["free"])
-        except: pass
-        return 0.0
-    def get_candles(self,symbol="BTCUSDT",interval="15m",limit=200):
-        k=self.c.get_klines(symbol=symbol,interval=interval,limit=limit)
-        return [{"open":float(x[1]),"high":float(x[2]),"low":float(x[3]),"close":float(x[4]),"volume":float(x[5]),"time":x[0]} for x in k]
-    def get_symbol_info_cached(self,symbol):
-        try: return self.c.get_symbol_info(symbol)
-        except: return None
-    def get_min_notional(self,symbol):
-        info=self.get_symbol_info_cached(symbol)
-        if not info: return 10.0
-        for f in info.get("filters",[]):
-            if f["filterType"]=="MIN_NOTIONAL": return float(f.get("minNotional","10"))
-            if f["filterType"]=="NOTIONAL": return float(f.get("minNotional","10"))
-        return 10.0
-    def get_qty_precision(self,symbol):
-        info=self.get_symbol_info_cached(symbol)
-        if not info: return 3
-        for f in info.get("filters",[]):
-            if f["filterType"]=="LOT_SIZE":
-                step=float(f["stepSize"])
-                if step>=1: return 0
-                elif step>=0.1: return 1
-                elif step>=0.01: return 2
-                elif step>=0.001: return 3
-                else: return 4
-        return 3
-    def get_min_qty(self,symbol):
-        info=self.get_symbol_info_cached(symbol)
-        if not info: return 0.001
-        for f in info.get("filters",[]):
-            if f["filterType"]=="LOT_SIZE": return float(f["minQty"])
-        return 0.001
-    def get_price_precision(self,symbol):
-        info=self.get_symbol_info_cached(symbol)
-        if not info: return 2
-        for f in info.get("filters",[]):
-            if f["filterType"]=="PRICE_FILTER":
-                tick=float(f["tickSize"])
-                if tick>=1: return 0
-                elif tick>=0.1: return 1
-                elif tick>=0.01: return 2
-                elif tick>=0.001: return 3
-                else: return 4
-        return 2
-    def place_trade(self,symbol,direction,amount_usdt=10.0,sl_pct=0.018,tp_pct=0.035):
-        from binance.enums import SIDE_BUY,SIDE_SELL,ORDER_TYPE_LIMIT,TIME_IN_FORCE_GTC
-        ticker=self.c.get_symbol_ticker(symbol=symbol); price=float(ticker["price"])
-        pp=self.get_price_precision(symbol); qp=self.get_qty_precision(symbol)
-        min_qty=self.get_min_qty(symbol); min_not=self.get_min_notional(symbol)
-        qty=round(amount_usdt/price,qp); qty=max(qty,min_qty)
-        if qty*price<min_not: qty=round(min_not/price*1.01,qp); qty=max(qty,min_qty)
-        side=SIDE_BUY if direction=="BUY" else SIDE_SELL
-        if direction=="BUY":
-            limit_price=round(price*1.0005,pp); sl_price=round(price*(1-sl_pct),pp); tp_price=round(price*(1+tp_pct),pp)
-        else:
-            limit_price=round(price*0.9995,pp); sl_price=round(price*(1+sl_pct),pp); tp_price=round(price*(1-tp_pct),pp)
-        entry_order=self.c.order_limit(symbol=symbol,side=side,quantity=qty,price=str(limit_price),timeInForce=TIME_IN_FORCE_GTC)
-        logger.info(f"Binance LIMIT {direction} {symbol} qty={qty} @ {limit_price} | SL={sl_price} TP={tp_price}")
-        oid=entry_order.get("orderId"); filled=False
-        for _ in range(18):
-            time.sleep(5)
-            try:
-                status=self.c.get_order(symbol=symbol,orderId=oid)
-                if status["status"]=="FILLED": filled=True; break
-                elif status["status"] in ("CANCELED","EXPIRED","REJECTED"): break
-            except: pass
-        if not filled:
-            try: self.c.cancel_order(symbol=symbol,orderId=oid)
-            except: pass
-            return self.c.order_market(symbol=symbol,side=side,quantity=qty)
-        try:
-            oco=self.c.order_oco_sell(symbol=symbol,quantity=qty,price=str(tp_price),stopPrice=str(sl_price),
-                stopLimitPrice=str(round(sl_price*(0.998 if direction=="BUY" else 1.002),pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC
-            ) if direction=="BUY" else self.c.order_oco_buy(symbol=symbol,quantity=qty,price=str(tp_price),stopPrice=str(sl_price),
-                stopLimitPrice=str(round(sl_price*1.002,pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC)
-        except Exception as e: logger.warning(f"OCO echwe ({e})")
-        return entry_order
-    def send_profit(self,amount):
-        try:
-            r=self.c.withdraw(coin="USDT",address=PROFIT_WALLET,amount=amount,network="ERC20")
-            logger.info(f"Profit sent: ${amount}"); return r
-        except Exception as e: logger.error(f"Profit transfer: {e}"); return None
-
-class BinanceUSClient:
-    def __init__(self,key,secret):
-        from binance.client import Client; self.c=Client(key,secret,tld="us")
-    def connect(self):
-        for b in self.c.get_account()["balances"]:
-            if b["asset"]=="USDT": return float(b["free"])
-        return 0.0
-    @property
-    def balance(self):
-        try:
-            for b in self.c.get_account()["balances"]:
-                if b["asset"]=="USDT": return float(b["free"])
-        except: pass
-        return 0.0
-    def get_candles(self,symbol="BTCUSDT",interval="15m",limit=200):
-        k=self.c.get_klines(symbol=symbol,interval=interval,limit=limit)
-        return [{"open":float(x[1]),"high":float(x[2]),"low":float(x[3]),"close":float(x[4]),"volume":float(x[5]),"time":x[0]} for x in k]
-    def get_symbol_info_cached(self,symbol):
-        try: return self.c.get_symbol_info(symbol)
-        except: return None
-    def get_min_notional(self,symbol):
-        info=self.get_symbol_info_cached(symbol)
-        if not info: return 10.0
-        for f in info.get("filters",[]):
-            if f["filterType"]=="MIN_NOTIONAL": return float(f.get("minNotional","10"))
-            if f["filterType"]=="NOTIONAL": return float(f.get("minNotional","10"))
-        return 10.0
-    def get_qty_precision(self,symbol):
-        info=self.get_symbol_info_cached(symbol)
-        if not info: return 3
-        for f in info.get("filters",[]):
-            if f["filterType"]=="LOT_SIZE":
-                step=float(f["stepSize"])
-                if step>=1: return 0
-                elif step>=0.1: return 1
-                elif step>=0.01: return 2
-                elif step>=0.001: return 3
-                else: return 4
-        return 3
-    def get_min_qty(self,symbol):
-        info=self.get_symbol_info_cached(symbol)
-        if not info: return 0.001
-        for f in info.get("filters",[]):
-            if f["filterType"]=="LOT_SIZE": return float(f["minQty"])
-        return 0.001
-    def get_price_precision(self,symbol):
-        info=self.get_symbol_info_cached(symbol)
-        if not info: return 2
-        for f in info.get("filters",[]):
-            if f["filterType"]=="PRICE_FILTER":
-                tick=float(f["tickSize"])
-                if tick>=1: return 0
-                elif tick>=0.1: return 1
-                elif tick>=0.01: return 2
-                elif tick>=0.001: return 3
-                else: return 4
-        return 2
-    def place_trade(self,symbol,direction,amount_usdt=10.0,sl_pct=0.018,tp_pct=0.035):
-        from binance.enums import SIDE_BUY,SIDE_SELL,ORDER_TYPE_LIMIT,TIME_IN_FORCE_GTC
-        ticker=self.c.get_symbol_ticker(symbol=symbol); price=float(ticker["price"])
-        pp=self.get_price_precision(symbol); qp=self.get_qty_precision(symbol)
-        min_qty=self.get_min_qty(symbol); min_not=self.get_min_notional(symbol)
-        qty=round(amount_usdt/price,qp); qty=max(qty,min_qty)
-        if qty*price<min_not: qty=round(min_not/price*1.01,qp); qty=max(qty,min_qty)
-        side=SIDE_BUY if direction=="BUY" else SIDE_SELL
-        if direction=="BUY":
-            limit_price=round(price*1.0005,pp); sl_price=round(price*(1-sl_pct),pp); tp_price=round(price*(1+tp_pct),pp)
-        else:
-            limit_price=round(price*0.9995,pp); sl_price=round(price*(1+sl_pct),pp); tp_price=round(price*(1-tp_pct),pp)
-        entry_order=self.c.order_limit(symbol=symbol,side=side,quantity=qty,price=str(limit_price),timeInForce=TIME_IN_FORCE_GTC)
-        oid=entry_order.get("orderId"); filled=False
-        for _ in range(18):
-            time.sleep(5)
-            try:
-                status=self.c.get_order(symbol=symbol,orderId=oid)
-                if status["status"]=="FILLED": filled=True; break
-                elif status["status"] in ("CANCELED","EXPIRED","REJECTED"): break
-            except: pass
-        if not filled:
-            try: self.c.cancel_order(symbol=symbol,orderId=oid)
-            except: pass
-            return self.c.order_market(symbol=symbol,side=side,quantity=qty)
-        try:
-            oco=self.c.order_oco_sell(symbol=symbol,quantity=qty,price=str(tp_price),stopPrice=str(sl_price),
-                stopLimitPrice=str(round(sl_price*(0.998 if direction=="BUY" else 1.002),pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC
-            ) if direction=="BUY" else self.c.order_oco_buy(symbol=symbol,quantity=qty,price=str(tp_price),stopPrice=str(sl_price),
-                stopLimitPrice=str(round(sl_price*1.002,pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC)
-        except Exception as e: logger.warning(f"OCO echwe ({e})")
-        return entry_order
-    def send_profit(self,amount):
-        try:
-            r=self.c.withdraw(coin="USDT",address=PROFIT_WALLET,amount=amount,network="ERC20")
-            logger.info(f"Profit sent (BinanceUS): ${amount}"); return r
-        except Exception as e: logger.error(f"Profit transfer BinanceUS: {e}"); return None
-
-# ═══════════════════════════════════════════════════════════
 # DIGITS LOGIC
 # ═══════════════════════════════════════════════════════════
 def get_last_digit(price):
@@ -1445,7 +1473,7 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 # ═══════════════════════════════════════════════════════════
-# TRADING LOOPS (pa chanje)
+# TRADING LOOPS (unchanged)
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1488,7 +1516,7 @@ def digits_trading_loop(st, bot_id=None):
                 cid=r.get("contract_id")
                 if not cid: add_log(st,"Trade echwe — pa gen contract_id","ERROR"); time.sleep(10); continue
                 bal_open=float(r.get("balance_after",bal_before-current_lot)); st["balance"]=bal_open
-                add_log(st,f"⏳ #{cid} | {sig} | Ap tann rezilta reyèl...","SUCCESS")
+                add_log(st,f"⏳ #{cid} | {sig} | Ap tann rezilta...","SUCCESS")
                 result=api.wait_contract_result(cid,timeout=35); pnl=0.0; won=False
                 if result:
                     status=result.get("status",""); buy_price=float(result.get("buy_price",current_lot)); sell_price=float(result.get("sell_price",0))
@@ -1517,7 +1545,7 @@ def digits_trading_loop(st, bot_id=None):
                 if won and pnl>0:
                     ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
                     if ps>=0.50:
-                        try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 1%:${ps}","PROFIT")
+                        try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 5%:${ps}","PROFIT")
                         except: pass
                 add_log(st,"⏸ Tann 10sek..."); time.sleep(10)
             except Exception as e: add_log(st,f"Digits trade echwe: {e}","ERROR"); time.sleep(15)
@@ -1568,9 +1596,9 @@ def binance_trading_loop(st, bot_id=None):
                 if sig=="SELL" and cl_vals[-1]>e200_v[-1]*1.005: add_log(st,"⛔ REJTE SELL — Prix ANLÈ EMA200","WARN"); time.sleep(tf); continue
             entry=candles[-1]["close"]; sl_dol=round(current_lot*SL_PCT,2); tp_dol=round(current_lot*TP_PCT,2)
             add_log(st,f"⚡ {sig} @ {entry:.4f} | Conf:{conf:.0%} | Mise:${current_lot:.2f} | SL:-${sl_dol} | TP:+${tp_dol}")
-            bal_before=api.balance; ok=False
+            bal_before=api.balance
             try:
-                order=api.place_trade(symbol,sig,current_lot,SL_PCT,TP_PCT); ok=True
+                order=api.place_trade(symbol,sig,current_lot,SL_PCT,TP_PCT)
                 add_log(st,f"✅ Limit+OCO plase | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}%","SUCCESS")
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),"symbol":symbol,"side":sig,"entry":round(entry,4),"conf":f"{conf:.0%}","strategy":strategy,"tf":iv,"stake":round(current_lot,2),"sl":f"{SL_PCT*100:.1f}%","tp":f"{TP_PCT*100:.1f}%","pnl":0.0,"status":"open"}
                 st["trades"].insert(0,trade)
@@ -1600,7 +1628,6 @@ def trading_loop(st, bot_id=None):
     base_lot=round(max(0.5,lot),2); current_lot=base_lot; consec_losses=0; total_lost=0.0
     MAX_LOSSES_BEFORE_PAUSE=3; PAUSE_WAIT_SECS=45
     add_log(st,f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st,f"📌 SuperTrend+HA+Chandelier | ADX>12 | 3 strategies minimum")
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Bot anile","WARN"); return
         _target=float(cfg.get("profit_target",0)); _loss=float(cfg.get("loss_limit",0))
@@ -1686,111 +1713,68 @@ def trading_loop(st, bot_id=None):
                 if pnl>0:
                     ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
                     if ps>=0.5:
-                        try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 1%:${ps} → CR9560099","PROFIT")
+                        try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 5%:${ps} → CR9560099","PROFIT")
                         except Exception as e: add_log(st,f"Transfer echwe: {e}","ERROR")
         except Exception as e: add_log(st,f"Erè: {e}","ERROR")
         time.sleep(tf)
     add_log(st,"⏹ BonheurBot ELITE v6 arrêté")
 
 # ═══════════════════════════════════════════════════════════
-# OAUTH2 CALLBACK ROUTE — /callback
+# OAUTH2 CALLBACK
 # ═══════════════════════════════════════════════════════════
 @app.route("/callback")
 def oauth_callback():
-    """
-    Deriv rele URL sa apre OAuth2 login.
-    Jwenn code + state, echange pou access_token, jwenn OTP, konekte.
-    """
     code  = request.args.get("code","").strip()
     state = request.args.get("state","").strip()
     error = request.args.get("error","")
-
     if error:
-        return f"""
-        <html><head><title>Erè OAuth</title>
+        return f"""<html><head><title>Erè OAuth</title>
         <style>body{{font-family:monospace;background:#040A0F;color:#FF3B6B;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;flex-direction:column}}</style></head>
         <body><h2>❌ Erè OAuth: {error}</h2><p>Tounen sou BonheurBot epi eseye ankò.</p>
-        <script>setTimeout(()=>window.location.href="/",4000);</script></body></html>
-        """, 400
-
+        <script>setTimeout(()=>window.location.href="/",4000);</script></body></html>""", 400
     if not code or not state:
         return redirect("/")
-
-    # Echange code pou access_token
     result = exchange_oauth_code(code, state)
     if len(result) == 2:
         ok, msg = result; uid = ""
     else:
         ok, msg, uid = result
-
     if not ok:
-        return f"""
-        <html><head><title>Erè Echange</title>
+        return f"""<html><head><title>Erè Echange</title>
         <style>body{{font-family:monospace;background:#040A0F;color:#FF3B6B;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;flex-direction:column;padding:20px}}</style></head>
         <body><h2>❌ Echange token echwe</h2><pre style="color:#C8E8F0;font-size:12px">{msg}</pre>
-        <script>setTimeout(()=>window.location.href="/",6000);</script></body></html>
-        """, 400
-
+        <script>setTimeout(()=>window.location.href="/",6000);</script></body></html>""", 400
     access_token = msg
-
-    # Jwenn lis kont Deriv
-    ok2, accounts = get_deriv_accounts(access_token)
+    ok2, accounts = get_deriv_accounts_oauth(access_token)
     if not ok2 or not accounts:
-        # Eseye konekte dirèkteman ak access_token kòm authorize token
         _store_oauth_token(uid, access_token, None, 0.0)
-        return """
-        <html><head><title>Konekte!</title>
+        return """<html><head><title>Konekte!</title>
         <style>body{font-family:monospace;background:#040A0F;color:#00FF88;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;flex-direction:column}</style></head>
-        <body><h2>✅ OAuth2 konekte (mode basik)</h2><p>Ap tounen sou BonheurBot...</p>
-        <script>setTimeout(()=>window.location.href="/",2000);</script></body></html>
-        """
-
-    # Pran premye kont, jwenn OTP pou WebSocket
-    account = accounts[0]
-    account_id = account.get("account_id") or account.get("id","")
-
-    ws_url = None
-    bal    = 0.0
+        <body><h2>✅ OAuth2 konekte (mode basik)</h2><p>Ap tounen...</p>
+        <script>setTimeout(()=>window.location.href="/",2000);</script></body></html>"""
+    account = accounts[0]; account_id = account.get("account_id") or account.get("id","")
+    ws_url = None; bal = 0.0
     if account_id:
         ok3, ws_or_err, bal = get_deriv_otp(access_token, account_id)
-        if ok3:
-            ws_url = ws_or_err
-            logger.info(f"OAuth2 OTP ws_url jwenn pou kont {account_id}")
-        else:
-            logger.warning(f"OTP echwe: {ws_or_err} — ap eseye sans OTP")
-
-    # Jwenn balance si pa jwenn via OTP
-    if bal==0.0:
-        bal = float(account.get("balance", 0))
-
-    # Konsève token ak ws_url nan session itilizatè a
+        if ok3: ws_url = ws_or_err
+        else: logger.warning(f"OTP echwe: {ws_or_err}")
+    if bal==0.0: bal = float(account.get("balance", 0))
     _store_oauth_token(uid, access_token, ws_url, bal)
-
-    return """
-    <html><head><title>Konekte!</title>
+    return """<html><head><title>Konekte!</title>
     <style>body{font-family:monospace;background:#040A0F;color:#00FF88;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;flex-direction:column;gap:12px}</style></head>
-    <body>
-    <div style="font-size:32px">✅</div>
-    <h2 style="margin:0">OAuth2 Deriv — Koneksyon reyisi!</h2>
+    <body><div style="font-size:32px">✅</div><h2 style="margin:0">OAuth2 Deriv — Koneksyon reyisi!</h2>
     <p style="color:#C8E8F0">Balans: <strong>$""" + f"{bal:.2f}" + """</strong></p>
-    <p style="color:#4A7080;font-size:12px">Ap tounen sou BonheurBot nan 2 segonn...</p>
-    <script>setTimeout(()=>window.location.href="/",2000);</script>
-    </body></html>
-    """
+    <p style="color:#4A7080;font-size:12px">Ap tounen nan BonheurBot nan 2 segonn...</p>
+    <script>setTimeout(()=>window.location.href="/",2000);</script></body></html>"""
 
 def _store_oauth_token(uid, access_token, ws_url, bal):
-    """Konsève access_token OAuth2 nan état itilizatè a."""
     with _user_lock:
-        # Chèche itilizatè pa uid
         target_st = None
-        if uid and uid in _user_states:
-            target_st = _user_states[uid]
+        if uid and uid in _user_states: target_st = _user_states[uid]
         else:
-            # Pran dènye itilizatè ki pa konekte
             for u, s in _user_states.items():
                 if not s.get("connected"): target_st = s; break
         if not target_st:
-            # Kreye yon nouvo
             new_uid = uid or str(uuid.uuid4())
             _user_states[new_uid] = {
                 "uid":new_uid,"access":True,"session_token":None,
@@ -1799,34 +1783,53 @@ def _store_oauth_token(uid, access_token, ws_url, bal):
                 "trades":[],"log":[],"config":{},
                 "deriv_api":None,"binance_api":None,"deriv_digits_api":None,
                 "_oauth_token":access_token,"_oauth_ws_url":ws_url,
+                "_pat_token":None,"_pat_account_id":"","_pat_currency":"USD",
             }
             target_st = _user_states[new_uid]
         else:
             target_st["_oauth_token"] = access_token
             target_st["_oauth_ws_url"] = ws_url
-
-        # Kreye kliyan Deriv ak ws_url OTP
         api  = DerivClient(access_token, app_id=DERIV_CLIENT_ID, ws_url=ws_url)
         api._bal = bal
         digi = DerivDigitsClient(access_token, app_id=DERIV_CLIENT_ID, ws_url=ws_url)
         digi._bal = bal
         target_st["deriv_api"]        = api
         target_st["deriv_digits_api"] = digi
-        target_st["broker"]    = "deriv"
-        target_st["balance"]   = bal
-        target_st["connected"] = True
-        target_st["access"]    = True
-        logger.info(f"OAuth2 token konsève pou uid={target_st.get('uid','?')[:8]} | bal=${bal:.2f}")
+        target_st["broker"]   = "deriv"; target_st["balance"] = bal
+        target_st["connected"] = True; target_st["access"] = True
+        logger.info(f"OAuth2 token stored uid={target_st.get('uid','?')[:8]} bal=${bal:.2f}")
 
 # ═══════════════════════════════════════════════════════════
 # API ROUTES
 # ═══════════════════════════════════════════════════════════
 @app.route("/api/oauth_url", methods=["POST"])
 def api_oauth_url():
-    """Retounen URL OAuth2 pou redirecte itilizatè a."""
     st = get_state()
     url, state = build_oauth_url(st["uid"])
     return jsonify({"ok": True, "url": url, "state": state})
+
+@app.route("/api/pat_verify", methods=["POST"])
+def api_pat_verify():
+    """
+    NEW: Verify a Deriv PAT token via REST API.
+    Returns account info without modifying connection state.
+    """
+    d = request.json or {}
+    pat = d.get("pat_token","").strip()
+    if not pat:
+        return jsonify({"ok": False, "error": "Mete token PAT ou a"})
+    if not pat.startswith("pat_"):
+        return jsonify({"ok": False, "error": "Token PAT dwe kòmanse avèk pat_"})
+    ok, info = pat_verify_and_get_account(pat)
+    if ok:
+        return jsonify({
+            "ok": True,
+            "account_id": info.get("account_id",""),
+            "balance":    info.get("balance", 0.0),
+            "currency":   info.get("currency","USD"),
+            "status":     info.get("status","active"),
+        })
+    return jsonify({"ok": False, "error": str(info)})
 
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
@@ -1834,13 +1837,65 @@ def api_connect():
     try:
         d = request.json; broker = d.get("broker")
         if broker == "deriv":
-            import websocket
-            raw_token = d.get("token","").strip()
-            app_id    = d.get("app_id","1089")
-            conn_type = d.get("conn_type","classic")  # "classic", "pat", "oauth2"
+            conn_type = d.get("conn_type","classic")
 
-            # ── OAuth2: itilizatè gen deja access_token via /callback ──
-            if conn_type == "oauth2":
+            # ══ PAT Token — new REST-first flow ══
+            if conn_type == "pat":
+                pat_token = d.get("pat_token","").strip() or d.get("token","").strip()
+                if not pat_token:
+                    return jsonify({"ok": False, "error": "Mete token PAT ou a (pat_...)"})
+                if not pat_token.startswith("pat_"):
+                    return jsonify({"ok": False, "error": "Token PAT dwe kòmanse avèk 'pat_'"})
+
+                logger.info(f"PAT connect attempt uid={st['uid'][:8]}")
+                ok, info = pat_verify_and_get_account(pat_token)
+                if not ok:
+                    return jsonify({
+                        "ok": False,
+                        "error": (
+                            f"❌ Token PAT invalib: {info}\n\n"
+                            "💡 SOLISYON:\n"
+                            "• Asire token kòmanse avèk pat_\n"
+                            "• Kreye yon nouvo token: app.deriv.com → Settings → API Token\n"
+                            "• Asire token gen pèmisyon: Read, Trade, Payments\n"
+                            "• Oswa eseye OAuth2 Deriv pou koneksyon otomatik"
+                        )
+                    })
+
+                bal         = info.get("balance", 0.0)
+                account_id  = info.get("account_id","")
+                currency    = info.get("currency","USD")
+
+                # Build DerivClient with PAT — uses REST for auth, WS for trading
+                api  = DerivClient(pat_token, app_id=DERIV_CLIENT_ID, pat_token=pat_token)
+                api._bal        = bal
+                api._account_id = account_id
+                api._currency   = currency
+
+                digi = DerivDigitsClient(pat_token, app_id=DERIV_CLIENT_ID, pat_token=pat_token)
+                digi._bal = bal
+
+                st["deriv_api"]        = api
+                st["deriv_digits_api"] = digi
+                st["broker"]           = "deriv"
+                st["balance"]          = bal
+                st["connected"]        = True
+                st["_pat_token"]       = pat_token
+                st["_pat_account_id"]  = account_id
+                st["_pat_currency"]    = currency
+
+                logger.info(f"PAT connected uid={st['uid'][:8]} acct={account_id} bal=${bal:.2f} {currency}")
+                return jsonify({
+                    "ok":         True,
+                    "balance":    bal,
+                    "currency":   currency,
+                    "account_id": account_id,
+                    "broker":     "deriv",
+                    "note":       f"✓ PAT konekte! Kont: {account_id} | {currency}",
+                })
+
+            # ══ OAuth2 ══
+            elif conn_type == "oauth2":
                 oauth_tok = st.get("_oauth_token")
                 ws_url    = st.get("_oauth_ws_url")
                 bal       = st.get("balance", 0.0)
@@ -1853,40 +1908,40 @@ def api_connect():
                     st["broker"]="deriv"; st["connected"]=True
                     return jsonify({"ok":True,"balance":bal,"broker":"deriv","note":"✓ OAuth2 aktif!"})
                 else:
-                    # Itilizatè pa pase /callback — ba yo URL OAuth2
                     url, _ = build_oauth_url(st["uid"])
                     return jsonify({"ok":False,"error":"Pa gen sesyon OAuth2","oauth_url":url})
 
-            # ── pat_ token ──
-            if conn_type == "pat" or raw_token.lower().startswith("pat_"):
-                ok, session_tok, bal = exchange_pat_token(raw_token, app_id, timeout=20)
-                if not ok:
-                    return jsonify({
-                        "ok": False,
-                        "error": (
-                            f"❌ Token pat_ pa mache: {session_tok}\n\n"
-                            "💡 SOLISYON:\n"
-                            "• Eseye opsyon 'OAuth2 Deriv' pou koneksyon otomatik\n"
-                            "• Oswa kreye yon Token KLASIK:\n"
-                            "  app.deriv.com → foto ou → API Token → Create"
-                        )
-                    })
-                final_token = session_tok if (session_tok and session_tok != raw_token) else raw_token
-                api  = DerivClient(final_token, app_id)
-                api._bal = bal
-                digi = DerivDigitsClient(final_token, app_id)
-                digi._bal = bal
+            # ══ Classic token ══
+            else:
+                raw_token = d.get("token","").strip()
+                app_id    = d.get("app_id","1089")
+                if not raw_token:
+                    return jsonify({"ok": False, "error": "Mete token Deriv ou a"})
+
+                # Detect PAT accidentally sent to classic field
+                if raw_token.startswith("pat_"):
+                    # Redirect to PAT flow
+                    ok, info = pat_verify_and_get_account(raw_token)
+                    if not ok:
+                        return jsonify({"ok": False, "error": f"Token pat_ detekte men invalib: {info}"})
+                    bal        = info.get("balance", 0.0)
+                    account_id = info.get("account_id","")
+                    currency   = info.get("currency","USD")
+                    api  = DerivClient(raw_token, app_id=DERIV_CLIENT_ID, pat_token=raw_token)
+                    api._bal=bal; api._account_id=account_id; api._currency=currency
+                    digi = DerivDigitsClient(raw_token, app_id=DERIV_CLIENT_ID, pat_token=raw_token)
+                    digi._bal=bal
+                    st["deriv_api"]=api; st["deriv_digits_api"]=digi
+                    st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
+                    st["_pat_token"]=raw_token; st["_pat_account_id"]=account_id; st["_pat_currency"]=currency
+                    return jsonify({"ok":True,"balance":bal,"currency":currency,"account_id":account_id,"broker":"deriv","note":f"✓ PAT (auto-detekte) konekte! {account_id}"})
+
+                api  = DerivClient(raw_token, app_id)
+                bal  = api.connect()
+                digi = DerivDigitsClient(raw_token, app_id)
                 st["deriv_api"]=api; st["deriv_digits_api"]=digi
                 st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
-                return jsonify({"ok":True,"balance":bal,"broker":"deriv","note":"✓ pat_ token konekte!"})
-
-            # ── Token klasik ──
-            api  = DerivClient(raw_token, app_id)
-            bal  = api.connect()
-            digi = DerivDigitsClient(raw_token, app_id)
-            st["deriv_api"]=api; st["deriv_digits_api"]=digi
-            st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
-            return jsonify({"ok":True,"balance":bal,"broker":"deriv"})
+                return jsonify({"ok":True,"balance":bal,"broker":"deriv","note":"✓ Token klasik konekte!"})
 
         elif broker == "binance":
             api=BinanceClient(d["api_key"],d["api_secret"]); bal=api.connect()
@@ -1900,7 +1955,7 @@ def api_connect():
 
         return jsonify({"ok":False,"error":"Broker enkoni"})
     except Exception as e:
-        logger.error(f"Connect: {e}",exc_info=True)
+        logger.error(f"Connect error: {e}", exc_info=True)
         return jsonify({"ok":False,"error":str(e)})
 
 @app.route("/api/start", methods=["POST"])
@@ -1931,10 +1986,16 @@ def api_stop():
 @app.route("/api/status")
 def api_status():
     st=get_state()
-    return jsonify({"connected":st["connected"],"broker":st["broker"],"running":st["running"],
-        "balance":round(st["balance"],2),"pnl":round(st["total_pnl"],2),"profit_sent":round(st["profit_sent"],4),
-        "trades":st["trades"][:20],"log":st["log"][:30],"config":st["config"],
-        "oauth_ready": bool(st.get("_oauth_token"))})
+    return jsonify({
+        "connected":   st["connected"], "broker": st["broker"], "running": st["running"],
+        "balance":     round(st["balance"],2), "pnl": round(st["total_pnl"],2),
+        "profit_sent": round(st["profit_sent"],4),
+        "trades":      st["trades"][:20], "log": st["log"][:30], "config": st["config"],
+        "oauth_ready": bool(st.get("_oauth_token")),
+        "pat_ready":   bool(st.get("_pat_token")),
+        "account_id":  st.get("_pat_account_id",""),
+        "currency":    st.get("_pat_currency","USD"),
+    })
 
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():
@@ -2002,8 +2063,7 @@ def admin_add_code():
     if code in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
     is_adm=d.get("is_adm",False)
     ACCESS_CODES[code]={"created_at":None if is_adm else time.time(),"used":False,"is_adm":is_adm}
-    typ="Admin" if is_adm else "Itilizatè (1 mwa)"
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye [{typ}]"})
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye [{'Admin' if is_adm else 'Itilizatè 1 mwa'}]"})
 
 @app.route("/api/admin/revoke_code", methods=["POST"])
 def admin_revoke_code():
@@ -2035,7 +2095,8 @@ def admin_get_users():
             users.append({"uid":uid[:8]+"...","connected":st.get("connected",False),"broker":st.get("broker","—"),
                 "running":st.get("running",False),"balance":round(st.get("balance",0),2),
                 "pnl":round(st.get("total_pnl",0),2),"trades":len(st.get("trades",[])),
-                "symbol":st.get("config",{}).get("symbol","—"),"strategy":st.get("config",{}).get("strategy","—")})
+                "symbol":st.get("config",{}).get("symbol","—"),"strategy":st.get("config",{}).get("strategy","—"),
+                "auth_type": "PAT" if st.get("_pat_token") else ("OAuth2" if st.get("_oauth_token") else "Classic")})
     return jsonify({"ok":True,"users":users,"total":len(users)})
 
 @app.route("/api/admin/stop_user", methods=["POST"])
@@ -2095,7 +2156,7 @@ def admin_clear_trades():
 def index(): return render_template_string(HTML)
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — Ajoute bouton OAuth2 Deriv
+# HTML INTERFACE
 # ═══════════════════════════════════════════════════════════
 HTML=r"""<!DOCTYPE html>
 <html>
@@ -2189,6 +2250,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
+    <span id="h-acct" style="color:#4A7080;font-size:10px;display:none"></span>
   </div>
   <div style="display:flex;align-items:center;gap:16px">
     <span><span class="dot di" id="dot"></span><span id="hs" style="color:#3A6070;font-size:11px;letter-spacing:1px">IDLE</span></span>
@@ -2234,14 +2296,44 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="iw">
           <div class="il">MOD KONEKSYON DERIV</div>
           <select id="d-conn-mode" onchange="togConnMode()">
-            <option value="oauth2">🔐 OAuth2 Deriv (REKÒMANDE — Nouvo API)</option>
-            <option value="classic">🔑 Token Klasik (Ansyen API)</option>
-            <option value="pat">🆕 Token pat_ (OAuth Personal)</option>
+            <option value="pat">🔑 PAT Token (pat_...) — NOUVO REKÒMANDE</option>
+            <option value="oauth2">🔐 OAuth2 Deriv (PKCE + OTP)</option>
+            <option value="classic">🗝 Token Klasik (ansyen)</option>
           </select>
         </div>
 
-        <!-- OAuth2 Panel -->
-        <div id="d-oauth2-panel">
+        <!-- ══ PAT TOKEN PANEL (DEFAULT) ══ -->
+        <div id="d-pat-panel">
+          <div style="background:#00D4FF12;border:1px solid #00D4FF33;border-radius:8px;padding:12px;margin-bottom:10px">
+            <div style="color:#00D4FF;font-weight:700;font-size:11px;margin-bottom:6px">🔑 PAT — Personal Access Token</div>
+            <div style="color:#4A7080;font-size:10px;line-height:1.8">
+              Kreye token sou: <span style="color:#C8E8F0">app.deriv.com → Settings → API Token</span><br>
+              Pèmisyon rekèri: <span style="color:#00FF88">Read • Trade • Payments</span><br>
+              Fòma: <span style="color:#FFD600">pat_XXXXXXXXXXXXXXXXXXXXXXXXXX</span>
+            </div>
+          </div>
+          <div class="iw">
+            <div class="il">TOKEN PAT DERIV</div>
+            <div style="display:flex;gap:8px">
+              <input id="d-pat-input" type="password" placeholder="pat_XXXXXXXXXXXXXXXXXXXXXXXXXX" style="flex:1">
+              <button class="btn b" onclick="doPATVerify()" style="padding:8px 14px;font-size:11px;white-space:nowrap">✓ TEST</button>
+            </div>
+          </div>
+          <div id="d-pat-verify-result" style="display:none;margin-bottom:10px"></div>
+          <!-- PAT account info card -->
+          <div id="d-pat-info" style="display:none;background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:10px;font-size:11px">
+            <div style="color:#00FF88;font-weight:700;margin-bottom:4px">✅ Kont Deriv verifye</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;color:#C8E8F0">
+              <span>Kont ID: <strong id="pi-id">—</strong></span>
+              <span>Balans: <strong id="pi-bal" style="color:#00FF88">—</strong></span>
+              <span>Devise: <strong id="pi-cur">—</strong></span>
+              <span>Status: <strong id="pi-stat" style="color:#00FF88">—</strong></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ══ OAuth2 PANEL ══ -->
+        <div id="d-oauth2-panel" style="display:none">
           <div id="d-oauth-status" style="background:#A855F715;border:1px solid #A855F730;border-radius:6px;padding:10px;margin-bottom:10px;font-size:11px;color:#A855F7;line-height:1.8">
             🔐 <strong>OAuth2 + PKCE + OTP WebSocket</strong><br>
             <span style="color:#4A7080">Nouvo sistèm Deriv ofisyèl.<br>
@@ -2251,29 +2343,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div id="d-oauth-ready" style="display:none;margin-top:8px" class="al ok">✅ OAuth2 aktif! Klike ⚡ KONEKTE pou fini.</div>
         </div>
 
-        <!-- Token Klasik Panel -->
+        <!-- ══ CLASSIC PANEL ══ -->
         <div id="d-classic-panel" style="display:none">
-          <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#4A7080;line-height:1.7">
-            ✅ <span style="color:#00FF88">Token Klasik</span> — Toujou fonksyone<br>
-            Jwenn li: <span style="color:#C8E8F0">app.deriv.com → foto ou → API Token</span><br>
-            Fòma: alphanumerik, ~15 karaktè (pa kòmanse ak pat_)
+          <div style="background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#4A7080;line-height:1.7">
+            🗝 Token klasik — Kreye nan: <span style="color:#C8E8F0">app.deriv.com → foto → API Token</span><br>
+            Pa kòmanse ak <span style="color:#FF3B6B">pat_</span> — fòma alphanumerik ~15 karaktè
           </div>
           <div class="iw"><div class="il">API TOKEN DERIV (Klasik)</div>
             <input id="d-tk" type="password" placeholder="Kole token klasik ou a isit">
           </div>
           <div class="iw"><div class="il">APP ID</div><input id="d-ai" value="1089"></div>
-        </div>
-
-        <!-- pat_ Panel -->
-        <div id="d-pat-panel" style="display:none">
-          <div style="background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600;line-height:1.7">
-            ⚠️ <span style="color:#FFD600">Token pat_</span> — Sijè a gen limit<br>
-            <span style="color:#4A7080">Si pat_ pa mache, itilize OAuth2 oswa Token Klasik.</span>
-          </div>
-          <div class="iw"><div class="il">TOKEN pat_ (OAuth Personal)</div>
-            <input id="d-tk-pat" type="password" placeholder="pat_XXXXXXXXXXXXXXXXXXXXXXXX">
-          </div>
-          <div class="iw"><div class="il">APP ID</div><input id="d-ai-pat" value="1089"></div>
         </div>
       </div>
 
@@ -2282,7 +2361,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="iw"><div class="il">API KEY</div><input id="b-k" type="password"></div>
         <div class="iw"><div class="il">API SECRET</div><input id="b-s" type="password"></div>
         <div id="fb-note" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600">
-          🇺🇸 Binance US — Konekte sou api.binance.us | Kreye kle sou: binance.us
+          🇺🇸 Binance US — api.binance.us | Kreye kle sou: binance.us
         </div>
       </div>
 
@@ -2305,14 +2384,14 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
     </div>
   </div>
-  <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-    <div class="bt" style="color:#00FF88">🚀 SISTÈM ELITE v6 — NOUVO INDIKATÈ + OAuth2</div>
+  <div class="box" style="background:#00D4FF08;border-color:#00D4FF22">
+    <div class="bt" style="color:#00D4FF">🔑 PAT TOKEN — NOUVO SISTÈM DERIV OFISYÈL</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
       <div>
-        <div style="color:#A855F7;font-weight:700;margin-bottom:4px">🔐 OAuth2 Deriv</div>
-        PKCE + OTP WebSocket<br>Nouvo API ofisyèl<br>
-        <span style="color:#A855F7">Redirect → Login → OTP</span><br>
-        Koneksyon otomatik<br><span style="color:#A855F7">→ Pi sekirize</span>
+        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🔑 PAT Auth</div>
+        REST API v1 Bearer<br>pat_... token format<br>
+        <span style="color:#00D4FF">Otomatik REST → WS</span><br>
+        Pa bezwen app_id<br><span style="color:#00D4FF">→ Pi senp, pi solid</span>
       </div>
       <div>
         <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 SuperTrend</div>
@@ -2487,13 +2566,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
           <div class="stat"><div class="sl">PROFIT 5%</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
         </div>
+        <div id="c-acct-info" style="display:none;background:#00D4FF10;border:1px solid #00D4FF30;border-radius:6px;padding:8px;font-size:11px;color:#00D4FF">
+          Kont: <strong id="c-acct-id">—</strong> | Devise: <strong id="c-currency">USD</strong>
+        </div>
       </div>
-      <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">🧠 ELITE v6 — LOJIK SIYAL</div>
+      <div class="box" style="background:#00D4FF08;border-color:#00D4FF22">
+        <div class="bt" style="color:#00D4FF">🔑 PAT — LOJIK KONEKSYON</div>
         <div style="color:#4A7080;font-size:10px;line-height:2.1">
-          <span style="color:#A855F7">✓ OAuth2:</span> PKCE+OTP — koneksyon sekirize<br>
-          <span style="color:#00FF88">✓ SuperTrend:</span> ATR×3 — BUY/SELL klè<br>
-          <span style="color:#00FF88">✓ Heikin Ashi:</span> 5 bouji — trend konfime<br>
+          <span style="color:#00D4FF">✓ REST API:</span> Bearer pat_... auth<br>
+          <span style="color:#00D4FF">✓ Verifikasyon:</span> Balance + Account ID<br>
+          <span style="color:#00FF88">✓ WS Trading:</span> pat_ kòm authorize token<br>
           <span style="color:#FFD600">⚠ 1-2 pèt:</span> Conf+2-4%, mise monte<br>
           <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann siyal bon<br>
           <span style="color:#00D4FF">✓ RANGING:</span> Trade si ST+HA dakò
@@ -2624,15 +2706,6 @@ function clearToken(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}try{se
 function updateAdminTab(isAdmin){const tab=document.getElementById("tab-admin");if(tab)tab.style.display=isAdmin?"block":"none";}
 
 async function checkLogin(){
-  // Tcheke si retounen apre OAuth2
-  const urlP=new URLSearchParams(window.location.search);
-  if(urlP.has("oauth_ok") || window.location.pathname==="/callback"){
-    // OAuth2 reyisi — netwaye URL epi refrayi estati
-    history.replaceState({},"","/");
-    const el=document.getElementById("d-oauth-ready");
-    if(el){el.style.display="block";}
-  }
-
   const token=getStoredToken();
   if(!token){showLogin("");return;}
   try{
@@ -2653,19 +2726,6 @@ function showApp(msg){
   document.getElementById("login-page").style.display="none";
   document.getElementById("app-page").style.display="block";
   document.getElementById("sub-info").textContent=msg||"";
-  // Tcheke si OAuth2 deja aktif
-  checkOAuthStatus();
-}
-
-async function checkOAuthStatus(){
-  try{
-    const r=await fetch("/api/status");
-    const d=await r.json();
-    if(d.oauth_ready){
-      const el=document.getElementById("d-oauth-ready");
-      if(el) el.style.display="block";
-    }
-  }catch(e){}
 }
 
 async function doLogin(){
@@ -2682,20 +2742,39 @@ async function doLogin(){
 }
 function doLogout(){clearToken();showLogin("Ou dekonekte.");}
 
+// ══ PAT Token Verify ══
+async function doPATVerify(){
+  const pat=document.getElementById("d-pat-input").value.trim();
+  const resEl=document.getElementById("d-pat-verify-result");
+  const infoEl=document.getElementById("d-pat-info");
+  if(!pat){resEl.style.display="block";resEl.innerHTML='<div class="al er">⚠ Mete token PAT ou a anvan</div>';return;}
+  if(!pat.startsWith("pat_")){resEl.style.display="block";resEl.innerHTML='<div class="al er">❌ Token dwe kòmanse avèk pat_</div>';infoEl.style.display="none";return;}
+  resEl.style.display="block";resEl.innerHTML='<div class="al in">⏳ Ap verifye token PAT via Deriv REST API...</div>';
+  try{
+    const r=await fetch("/api/pat_verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pat_token:pat})});
+    const d=await r.json();
+    if(d.ok){
+      resEl.innerHTML=`<div class="al ok">✅ Token PAT valid! Kont: ${d.account_id} | ${d.balance.toFixed(2)} ${d.currency}</div>`;
+      document.getElementById("pi-id").textContent=d.account_id||"—";
+      document.getElementById("pi-bal").textContent=`${d.balance.toFixed(2)} ${d.currency}`;
+      document.getElementById("pi-cur").textContent=d.currency||"USD";
+      document.getElementById("pi-stat").textContent=d.status||"active";
+      infoEl.style.display="block";
+    } else {
+      resEl.innerHTML=`<div class="al er">❌ Token invalib\n${d.error||"Erè enkoni"}</div>`;
+      infoEl.style.display="none";
+    }
+  }catch(e){resEl.innerHTML=`<div class="al er">✗ Erè: ${e.message}</div>`;infoEl.style.display="none";}
+}
+
 // ══ OAuth2 Flow ══
 async function doOAuth2(){
-  const btn=event.target;
-  btn.textContent="⏳ Ap jenere URL...";btn.disabled=true;
+  const btn=event.target;btn.textContent="⏳ Ap jenere URL...";btn.disabled=true;
   try{
     const r=await fetch("/api/oauth_url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
     const d=await r.json();
-    if(d.ok && d.url){
-      msg("cm","⏳ Ap ouvri Deriv login — w ap retounen otomatik apre...","ok");
-      // Ouvri nan menm fenèt la pou callback fonksyone
-      window.location.href=d.url;
-    } else {
-      msg("cm","✗ Pa ka jenere URL OAuth2","");
-    }
+    if(d.ok&&d.url){msg("cm","⏳ Ap ouvri Deriv login — w ap retounen otomatik apre...","ok");window.location.href=d.url;}
+    else{msg("cm","✗ Pa ka jenere URL OAuth2","");}
   }catch(e){msg("cm","✗ "+e.message,"");}
   btn.textContent="🔐 KONEKTE VIA DERIV OAUTH2";btn.disabled=false;
 }
@@ -2709,14 +2788,14 @@ function tog(){
   if(note) note.style.display=v=="binance_us"?"block":"none";
 }
 
-// ══ Toggle connection mode ══
 function togConnMode(){
   const v=document.getElementById("d-conn-mode").value;
+  document.getElementById("d-pat-panel").style.display=v=="pat"?"block":"none";
   document.getElementById("d-oauth2-panel").style.display=v=="oauth2"?"block":"none";
   document.getElementById("d-classic-panel").style.display=v=="classic"?"block":"none";
-  document.getElementById("d-pat-panel").style.display=v=="pat"?"block":"none";
   const cBtn=document.getElementById("conn-btn");
   if(v=="oauth2") cBtn.textContent="⚡ KONEKTE (OAuth2)";
+  else if(v=="pat") cBtn.textContent="⚡ KONEKTE (PAT)";
   else cBtn.textContent="⚡ KONEKTE";
 }
 
@@ -2783,14 +2862,13 @@ async function doConn(){
   if(br=="deriv"){
     const connMode=document.getElementById("d-conn-mode").value;
     body.conn_type=connMode;
-    if(connMode=="classic"){
+    if(connMode=="pat"){
+      body.pat_token=document.getElementById("d-pat-input").value.trim();
+    } else if(connMode=="classic"){
       body.token=document.getElementById("d-tk").value.trim();
       body.app_id=document.getElementById("d-ai").value||"1089";
-    } else if(connMode=="pat"){
-      body.token=document.getElementById("d-tk-pat").value.trim();
-      body.app_id=document.getElementById("d-ai-pat").value||"1089";
     }
-    // oauth2: pa beswen token — backend deja gen li via /callback
+    // oauth2: backend gen token via /callback
   }
   if(br=="binance"||br=="binance_us"){
     body.api_key=document.getElementById("b-k").value;
@@ -2802,18 +2880,24 @@ async function doConn(){
     const d=await r.json();
     if(d.ok){
       const noteMsg=d.note?` | ${d.note}`:"";
-      msg("cm",`✓ Konekte ${brokerLabel} | $${d.balance.toFixed(2)}${noteMsg}`,"ok");
-      document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${brokerLabel}</b> | $${d.balance.toFixed(2)}${noteMsg}</div>`;
-      // Si OAuth2 te reyisi pa /callback, afiche bouton
-      if(d.note && d.note.includes("OAuth2")){
-        const el=document.getElementById("d-oauth-ready"); if(el) el.style.display="block";
+      const acctMsg=d.account_id?` | Kont: ${d.account_id}`:"";
+      const curMsg=d.currency?` ${d.currency}`:"";
+      msg("cm",`✓ Konekte ${brokerLabel} | $${d.balance.toFixed(2)}${curMsg}${acctMsg}${noteMsg}`,"ok");
+      document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${brokerLabel}</b> | $${d.balance.toFixed(2)}${curMsg}${acctMsg}${noteMsg}</div>`;
+      // Montre info kont PAT
+      if(d.account_id){
+        const acctEl=document.getElementById("c-acct-info");
+        const acctIdEl=document.getElementById("c-acct-id");
+        const curEl=document.getElementById("c-currency");
+        const hAcct=document.getElementById("h-acct");
+        if(acctEl){acctEl.style.display="block";}
+        if(acctIdEl) acctIdEl.textContent=d.account_id;
+        if(curEl) curEl.textContent=d.currency||"USD";
+        if(hAcct){hAcct.style.display="inline";hAcct.textContent=`[${d.account_id} | ${d.currency||"USD"}]`;}
       }
     } else {
       let errMsg=d.error||"Echwe";
-      // Si OAuth2 mande redirect
-      if(d.oauth_url){
-        errMsg+=`\n\n➡️ <a href="${d.oauth_url}" style="color:#A855F7">Klike isit pou konekte via OAuth2</a>`;
-      }
+      if(d.oauth_url) errMsg+=`\n\n➡️ <a href="${d.oauth_url}" style="color:#A855F7">Klike isit pou OAuth2</a>`;
       msg("cm",`✗ Echwe\n${errMsg}`,false);
     }
   }catch(e){msg("cm","✗ "+e.message,false);}
@@ -2866,8 +2950,9 @@ function drawC(vals){
 function upd(d){
   const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
   const brokerLabel={"deriv":"DERIV","binance":"BINANCE","binance_us":"BINANCE US"}[d.broker]||(d.broker?d.broker.toUpperCase():"DISCONNECTED");
+  const authLabel=d.pat_ready?"[PAT]":(d.oauth_ready?"[OAuth2]":"");
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);document.getElementById("hbal").style.color=d.connected?"#00D4FF":"#3A6070";
-  document.getElementById("hb").textContent=brokerLabel;document.getElementById("hb").style.color=d.connected?"#00FF88":"#3A6070";
+  document.getElementById("hb").textContent=brokerLabel+(authLabel?" "+authLabel:"");document.getElementById("hb").style.color=d.connected?"#00FF88":"#3A6070";
   document.getElementById("dot").className="dot "+(d.running?"dl":"di");
   document.getElementById("hs").textContent=d.running?"LIVE":"IDLE";document.getElementById("hs").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("s-bal").textContent="$"+d.balance.toFixed(2);
@@ -2882,10 +2967,14 @@ function upd(d){
   document.getElementById("c-bal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("c-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);document.getElementById("c-pnl").style.color=col;
   document.getElementById("c-sent").textContent="$"+d.profit_sent.toFixed(4);
+  // Show account info if PAT connected
+  if(d.pat_ready && d.account_id){
+    const acctEl=document.getElementById("c-acct-info");
+    if(acctEl){acctEl.style.display="block";document.getElementById("c-acct-id").textContent=d.account_id;document.getElementById("c-currency").textContent=d.currency||"USD";}
+    const hAcct=document.getElementById("h-acct");if(hAcct){hAcct.style.display="inline";hAcct.textContent=`[${d.account_id}|${d.currency||"USD"}]`;}
+  }
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
-  // Montre OAuth2 aktif si disponib
-  if(d.oauth_ready){const el=document.getElementById("d-oauth-ready");if(el)el.style.display="block";}
   if(d.trades.length>1){
     let cum=0;const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});
     const svg=document.getElementById("chart");const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;
@@ -2919,7 +3008,7 @@ async function admRefresh(){
     const d2=await r2.json();
     if(d2.ok){
       document.getElementById("adm-users-count").textContent=d2.total;
-      document.getElementById("adm-users-list").innerHTML=d2.total===0?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>':`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr><td style="color:#4A7080;font-size:10px">${u.uid}</td><td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td><td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td><td style="color:#00D4FF">$${u.balance}</td><td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td><td>${u.trades}</td><td style="display:flex;gap:4px;align-items:center">${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}<button onclick="admClearTrades('${u.uid}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button><button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button></td></tr>`).join("")}</table>`;
+      document.getElementById("adm-users-list").innerHTML=d2.total===0?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>':`<table><tr><th>UID</th><th>AUTH</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr><td style="color:#4A7080;font-size:10px">${u.uid}</td><td style="color:#00D4FF;font-size:10px">${u.auth_type||"—"}</td><td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td><td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td><td style="color:#00D4FF">$${u.balance}</td><td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td><td>${u.trades}</td><td style="display:flex;gap:4px;align-items:center">${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}<button onclick="admClearTrades('${u.uid}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button><button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button></td></tr>`).join("")}</table>`;
     }
   }catch(e){}
   try{
@@ -2956,6 +3045,6 @@ checkLogin();
 if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))
     logger.info(f"BonheurBot ELITE v6 starting on port {port}")
-    logger.info(f"OAuth2 Client ID: {DERIV_CLIENT_ID}")
-    logger.info(f"Redirect URI: {DERIV_REDIRECT_URI}")
-    app.run(host="0.0.0.0",port=port,debug=False,threaded=True)
+    logger.info(f"App ID: {DERIV_CLIENT_ID} | Redirect: {DERIV_REDIRECT_URI}")
+    logger.info(f"PAT REST Base: {DERIV_REST_BASE}")
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

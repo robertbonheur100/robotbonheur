@@ -129,18 +129,74 @@ def get_state():
 # ═══════════════════════════════════════════════════════════
 def resolve_deriv_token(raw_token):
     """
-    Si token kòmanse ak 'pat_' se yon Personal Access Token.
-    Eseye itilize l dirèkteman nan WebSocket — si li echwe
-    retounen yon mesaj erè klè.
+    Si token kòmanse ak 'pat_' se yon Personal Access Token (OAuth).
     Retounen: (token_pou_websocket, is_pat)
     """
     raw_token = raw_token.strip()
     is_pat = raw_token.lower().startswith("pat_")
     return raw_token, is_pat
 
+def exchange_pat_token(pat_token, app_id="1089", timeout=20):
+    """
+    Echange yon pat_ token pou yon session token Deriv via WebSocket OAuth flow.
+    pat_ token mande yon app_id ki gen OAuth scope — nou eseye plizyè app_id.
+    Retounen: (ok, session_token_or_error, balance)
+    """
+    import websocket
+
+    # App IDs Deriv ki sipòte OAuth / pat_ tokens
+    OAUTH_APP_IDS = ["36544", "1089", "16929"]
+
+    for aid in OAUTH_APP_IDS:
+        done   = threading.Event()
+        result = [None, None, 0.0]  # [ok, token_or_err, balance]
+
+        def on_open(ws):
+            ws.send(json.dumps({"authorize": pat_token}))
+
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize":
+                if "error" in d:
+                    result[0] = False
+                    result[1] = d["error"].get("message", "Token invalib")
+                else:
+                    auth = d["authorize"]
+                    result[0] = True
+                    result[1] = auth.get("token", pat_token)
+                    result[2] = float(auth.get("balance", 0))
+                done.set()
+
+        def on_err(ws, e):
+            result[0] = False
+            result[1] = str(e)
+            done.set()
+
+        url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
+        try:
+            ws = websocket.WebSocketApp(
+                url, on_open=on_open, on_message=on_msg, on_error=on_err
+            )
+            t = threading.Thread(target=ws.run_forever, daemon=True)
+            t.start()
+            done.wait(timeout=timeout)
+
+            if result[0] is True:
+                logger.info(f"pat_ token aksepte avèk app_id={aid}")
+                return True, result[1], result[2]
+            else:
+                logger.info(f"pat_ echwe app_id={aid}: {result[1]}")
+        except Exception as e:
+            logger.info(f"pat_ erè app_id={aid}: {e}")
+        finally:
+            try: ws.close()
+            except: pass
+
+    return False, "Token pat_ pa aksepte pa okenn app_id Deriv", 0.0
+
 def test_deriv_token_ws(token, app_id="1089", timeout=15):
     """
-    Teste token nan WebSocket Deriv.
+    Teste token klasik nan WebSocket Deriv.
     Retounen: (ok, balance_or_error)
     """
     import websocket
@@ -1112,18 +1168,27 @@ class DerivClient:
             err[0] = str(e)
             done.set()
 
-        url = f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
-        threading.Thread(target=ws.run_forever, daemon=True).start()
-        done.wait(timeout=15)
+        # Si pat_ token, eseye plizyè app_id
+        app_ids_to_try = ["36544", self.app_id, "16929"] if self.token.lower().startswith("pat_") else [self.app_id]
+
+        for aid in app_ids_to_try:
+            done.clear(); err[0] = None
+            url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
+            ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
+            threading.Thread(target=ws.run_forever, daemon=True).start()
+            done.wait(timeout=15)
+            try: ws.close()
+            except: pass
+            if not err[0]:
+                self.app_id = aid  # Konsève app_id ki mache a
+                return self._bal
 
         if err[0]:
-            # ── Si se yon pat_ token ki echwe, bay mesaj espesifik ──
             is_pat = self.token.lower().startswith("pat_")
             if is_pat:
                 raise Exception(
-                    f"Token pat_ refize pa Deriv WebSocket: {err[0]}. "
-                    "Silvouplè kreye yon token API klasik (pa OAuth) nan app.deriv.com → API Token."
+                    f"Token pat_ refize pa Deriv. "
+                    "Kreye yon token API klasik nan app.deriv.com → API Token."
                 )
             raise Exception(f"Deriv: {err[0]}")
         return self._bal
@@ -1242,16 +1307,25 @@ class DerivDigitsClient:
             err[0] = str(e)
             done.set()
 
-        url = f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-        ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
-        threading.Thread(target=ws.run_forever, daemon=True).start()
-        done.wait(timeout=15)
+        app_ids_to_try = ["36544", self.app_id, "16929"] if self.token.lower().startswith("pat_") else [self.app_id]
+
+        for aid in app_ids_to_try:
+            done.clear(); err[0] = None
+            url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
+            ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
+            threading.Thread(target=ws.run_forever, daemon=True).start()
+            done.wait(timeout=15)
+            try: ws.close()
+            except: pass
+            if not err[0]:
+                self.app_id = aid
+                return self._bal
 
         if err[0]:
             is_pat = self.token.lower().startswith("pat_")
             if is_pat:
                 raise Exception(
-                    f"Token pat_ refize: {err[0]}. "
+                    f"Token pat_ refize. "
                     "Kreye yon token API klasik nan app.deriv.com → API Token."
                 )
             raise Exception(f"Deriv: {err[0]}")
@@ -2204,29 +2278,32 @@ def api_connect():
             app_id    = d.get("app_id","1089")
             is_pat    = raw_token.lower().startswith("pat_")
 
-            # ── Si pat_ token: teste dirèkteman epi bay mesaj klè ──
             if is_pat:
-                ok, val = test_deriv_token_ws(raw_token, app_id, timeout=15)
+                # ── pat_ token: eseye echange l pou session token ──
+                ok, session_tok, bal = exchange_pat_token(raw_token, app_id, timeout=20)
                 if not ok:
                     return jsonify({
                         "ok": False,
                         "error": (
-                            f"❌ Token pat_ pa aksepte pa Deriv WebSocket API: {val}\n"
-                            "👉 Pou itilize BonheurBot, kreye yon token API KLASIK:\n"
+                            f"❌ Token pat_ pa mache: {session_tok}\n\n"
+                            "💡 SOLISYON: Deriv pat_ tokens bezwen yon app OAuth espesyal.\n"
+                            "Pou BonheurBot, kreye yon token API KLASIK:\n"
                             "1. Ale sou app.deriv.com\n"
-                            "2. Klike sou foto ou → API Token\n"
-                            "3. Kreye token ak nòm ou vle (pa OAuth/pat_)\n"
-                            "4. Kopye token an (pa kòmanse ak pat_) epi kole l isit"
+                            "2. Klike sou foto ou (anlè adwat) → API Token\n"
+                            "3. Klike 'Create' — bay yon nòm (ex: BonheurBot)\n"
+                            "4. Kopye token an (pa kòmanse ak pat_)\n"
+                            "5. Kole l nan chan 'Token Klasik' la"
                         )
                     })
-                # Si pat_ mache (kek versyon Deriv aksepte l)
-                api = DerivClient(raw_token, app_id)
-                api._bal = val
+                # Itilize session_tok si diferan, sinon itilize pat_ dirèkteman
+                final_token = session_tok if (session_tok and session_tok != raw_token) else raw_token
+                api = DerivClient(final_token, app_id)
+                api._bal = bal
                 st["deriv_api"] = api
-                st["deriv_digits_api"] = DerivDigitsClient(raw_token, app_id)
-                st["broker"] = "deriv"; st["balance"] = val; st["connected"] = True
-                return jsonify({"ok": True, "balance": val, "broker": "deriv",
-                               "note": "✓ pat_ token aksepte"})
+                st["deriv_digits_api"] = DerivDigitsClient(final_token, app_id)
+                st["broker"] = "deriv"; st["balance"] = bal; st["connected"] = True
+                return jsonify({"ok": True, "balance": bal, "broker": "deriv",
+                               "note": "✓ pat_ token konekte!"})
             else:
                 # Token klasik — metòd nòmal
                 api = DerivClient(raw_token, app_id)

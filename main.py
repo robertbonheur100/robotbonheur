@@ -18,17 +18,22 @@ logger = logging.getLogger(__name__)
 PROFIT_WALLET = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
 PROFIT_PCT    = 0.05
 
+# ════════════════════════════════════════════════════════════
+# ★ KONT PROFIT — Ranplase avèk kont Deriv ou a (CR/VRTC...)
+# ════════════════════════════════════════════════════════════
+PROFIT_ACCOUNT_ID = os.environ.get("PROFIT_ACCOUNT_ID", "VOTRE_COMPTE_ICI")
+# Exemple: PROFIT_ACCOUNT_ID = "CR9560099"
+# Ou mete variable anviwònman: export PROFIT_ACCOUNT_ID=CR9560099
+
 # ═══════════════════════════════════════════════════════════
 # DERIV CONFIG
 # ═══════════════════════════════════════════════════════════
-DERIV_APP_ID       = "36544"         # App ID pou WS connexion
-DERIV_CLIENT_ID    = "33h9RL9bbCjURr4MO3PQ0"   # OAuth2 client_id
+DERIV_APP_ID       = "1089"
+DERIV_CLIENT_ID    = "33h9RL9bbCjURr4MO3PQ0"
 DERIV_REDIRECT_URI = "https://robotbonheur.onrender.com/callback"
-# Deriv OAuth2 URL — retounen ?acct1=...&token1=... (pa PKCE code)
 DERIV_AUTH_URL     = "https://oauth.deriv.com/oauth2/authorize"
 
-# WS App IDs pou eseye
-DERIV_WS_APP_IDS = ["36544", "1089", "16929"]
+DERIV_WS_APP_IDS = ["36544", "1089", "16929""33h9RL9bbCjURr4MO3PQ0"]
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
@@ -140,17 +145,14 @@ def get_state():
     return _user_states[uid]
 
 # ═══════════════════════════════════════════════════════════
-# ── DERIV PAT — VERIFICATION VIA WEBSOCKET ──
-# PAT token (pat_xxx) = token nòmal ki ka itilize nan WS
-# authorize message exactement kòm yon token klasik.
-# Deriv REST v1 pa ofisyèlman disponib — WS sèlman.
+# DERIV PAT — VERIFICATION VIA WEBSOCKET
+# Scopes rekèri: Trade | Account Management | Application Insight
 # ═══════════════════════════════════════════════════════════
 
 def pat_verify_via_websocket(pat_token):
     """
     Verifye yon PAT token via WebSocket authorize.
-    PAT token se yon token long ki kòmanse ak pat_ 
-    men li fonksyone menm jan ak yon token nòmal nan WS API.
+    Scopes nesesè: Trade, Account Management, Application Insight
     Retounen (ok, info_dict oswa error_str)
     """
     try:
@@ -227,12 +229,11 @@ def pat_verify_via_websocket(pat_token):
         "Token PAT invalib oswa rejte pa Deriv.\n"
         "• Asire token ou a kòmanse ak pat_\n"
         "• Kreye yon nouvo token: app.deriv.com → Réglages → API Token\n"
-        "• Pèmisyon rekèri: Read, Trade, Payments"
+        "• Pèmisyon rekèri: Trade, Account Management, Application Insight"
     )
 
 
 def ws_get_balance(token, app_id="36544"):
-    """Jwenn balans via WS balance request."""
     try:
         import websocket as ws_lib
     except ImportError:
@@ -272,23 +273,13 @@ def ws_get_balance(token, app_id="36544"):
 
 
 # ═══════════════════════════════════════════════════════════
-# OAUTH2 — Deriv retounen ?acct1=CR...&token1=xxx&cur1=USD
-# Pa gen PKCE code exchange. Token dirèk nan query string.
+# OAUTH2
 # ═══════════════════════════════════════════════════════════
+_oauth_states = {}
 
 def build_oauth_url(uid):
-    """
-    Konstwui URL OAuth2 Deriv.
-    Apre login, Deriv redirijye sou redirect_uri avèk:
-      ?acct1=CRxxxxxx&token1=<ws_token>&cur1=USD
-    """
     state = secrets.token_hex(16)
-    # Sove state → uid pou retrouve user apre callback
-    with _user_lock:
-        if "_oauth_states" not in globals():
-            pass
     _oauth_states[state] = {"uid": uid, "ts": time.time()}
-
     params = urllib.parse.urlencode({
         "app_id":       DERIV_CLIENT_ID,
         "l":            "EN",
@@ -297,16 +288,11 @@ def build_oauth_url(uid):
     })
     return f"{DERIV_AUTH_URL}?{params}", state
 
-_oauth_states = {}  # state -> {uid, ts}
 
 # ═══════════════════════════════════════════════════════════
 # DERIV WebSocket CLIENT
 # ═══════════════════════════════════════════════════════════
 class DerivClient:
-    """
-    Unified Deriv client.
-    token = WS authorize token (PAT oswa OAuth2 WS token)
-    """
     def __init__(self, token, app_id="36544"):
         self.token       = token
         self.app_id      = app_id
@@ -318,7 +304,6 @@ class DerivClient:
         return f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
 
     def connect(self):
-        """Konekte epi jwenn balans via WS authorize."""
         import websocket
         done = threading.Event()
         err  = [None]
@@ -342,8 +327,7 @@ class DerivClient:
             err[0] = str(e)
             done.set()
 
-        app_ids = DERIV_WS_APP_IDS
-        for aid in app_ids:
+        for aid in DERIV_WS_APP_IDS:
             done.clear(); err[0] = None
             url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
             ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
@@ -1438,8 +1422,9 @@ def digits_trading_loop(st, bot_id=None):
                 st["trades"].insert(0,trade); st["total_pnl"]+=pnl
                 if won and pnl>0:
                     ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
-                    if ps>=0.50:
-                        try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 5%:${ps}","PROFIT")
+                    dest=PROFIT_ACCOUNT_ID
+                    if ps>=0.50 and dest and dest!="VOTRE_COMPTE_ICI":
+                        try: api.transfer_to_account(dest,ps); add_log(st,f"💸 5%:${ps} → {dest}","PROFIT")
                         except: pass
                 add_log(st,"⏸ Tann 10sek..."); time.sleep(10)
             except Exception as e: add_log(st,f"Digits trade echwe: {e}","ERROR"); time.sleep(15)
@@ -1595,8 +1580,9 @@ def trading_loop(st, bot_id=None):
                 st["trades"].insert(0,trade); st["total_pnl"]+=pnl
                 if pnl>0:
                     ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
-                    if ps>=0.5:
-                        try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 5%:${ps} → CR9560099","PROFIT")
+                    dest=PROFIT_ACCOUNT_ID
+                    if ps>=0.5 and dest and dest!="VOTRE_COMPTE_ICI":
+                        try: api.transfer_to_account(dest,ps); add_log(st,f"💸 5%:${ps} → {dest}","PROFIT")
                         except Exception as e: add_log(st,f"Transfer echwe: {e}","ERROR")
         except Exception as e: add_log(st,f"Erè: {e}","ERROR")
         time.sleep(tf)
@@ -1605,8 +1591,6 @@ def trading_loop(st, bot_id=None):
 
 # ═══════════════════════════════════════════════════════════
 # OAUTH2 CALLBACK
-# Deriv retounen: ?acct1=CR...&token1=xxx&cur1=USD
-# Li pa PKCE — token dirèk nan query string
 # ═══════════════════════════════════════════════════════════
 @app.route("/callback")
 def oauth_callback():
@@ -1617,7 +1601,6 @@ def oauth_callback():
         <body><h2>❌ Erè OAuth: {error}</h2><p>Tounen sou BonheurBot epi eseye ankò.</p>
         <script>setTimeout(()=>window.location.href="/",4000);</script></body></html>""", 400
 
-    # Kolekte tout kont Deriv retounen yo (acct1..acct10)
     accounts = []
     for i in range(1, 11):
         acct = request.args.get(f"acct{i}", "")
@@ -1627,7 +1610,6 @@ def oauth_callback():
             accounts.append({"account_id": acct, "token": tok, "currency": cur})
 
     if not accounts:
-        # Pa gen token — eseye jwenn state param pou redirecting user
         return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Erè Callback</title>
         <style>body{{font-family:monospace;background:#040A0F;color:#FF3B6B;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;flex-direction:column;padding:20px;text-align:center}}</style></head>
         <body><h2>❌ Pa jwenn token Deriv nan callback</h2>
@@ -1635,23 +1617,19 @@ def oauth_callback():
         <p style="color:#C8E8F0">Verifye App ID ou a nan Deriv Developer Hub.</p>
         <script>setTimeout(()=>window.location.href="/",6000);</script></body></html>""", 400
 
-    # Pran premye kont (kont prensipal)
     primary = accounts[0]
     ws_token    = primary["token"]
     account_id  = primary["account_id"]
     currency    = primary["currency"]
 
-    # Verifye token via WS pou jwenn balans
     logger.info(f"OAuth2 callback | accounts={[a['account_id'] for a in accounts]}")
     ok, info = pat_verify_via_websocket(ws_token)
     if ok:
         bal = info.get("balance", 0.0)
     else:
-        # Token valid men verify echwe — mete balans 0 ak konekte kanmèm
         bal = 0.0
         logger.warning(f"OAuth2 WS verify echwe: {info}, ap konekte kanmèm")
 
-    # Sove token nan sesyon itilizatè
     _store_oauth_token_in_user(ws_token, account_id, currency, bal, accounts)
 
     return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Konekte!</title>
@@ -1666,16 +1644,13 @@ def oauth_callback():
 
 
 def _store_oauth_token_in_user(ws_token, account_id, currency, bal, all_accounts):
-    """Sove OAuth2 token nan premye user state disponib."""
     with _user_lock:
         target_st = None
-        # Chèche user ki poko konekte
         for uid, s in _user_states.items():
             if not s.get("connected"):
                 target_st = s
                 break
         if not target_st:
-            # Kreye yon nouvo user state
             new_uid = str(uuid.uuid4())
             _user_states[new_uid] = {
                 "uid": new_uid, "access": True, "session_token": None,
@@ -1689,13 +1664,11 @@ def _store_oauth_token_in_user(ws_token, account_id, currency, bal, all_accounts
             }
             target_st = _user_states[new_uid]
 
-        # Sove token
         target_st["_oauth_token"]      = ws_token
         target_st["_pat_account_id"]   = account_id
         target_st["_pat_currency"]     = currency
         target_st["auth_type"]         = "oauth2"
 
-        # Kreye DerivClient
         api  = DerivClient(ws_token, DERIV_APP_ID)
         api._bal        = bal
         api._account_id = account_id
@@ -1715,12 +1688,35 @@ def _store_oauth_token_in_user(ws_token, account_id, currency, bal, all_accounts
 
 
 # ═══════════════════════════════════════════════════════════
+# API — PROFIT ACCOUNT CONFIG
+# ═══════════════════════════════════════════════════════════
+@app.route("/api/set_profit_account", methods=["POST"])
+def api_set_profit_account():
+    """Admin sèlman ka chanje kont profit la."""
+    global PROFIT_ACCOUNT_ID
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    new_id = d.get("account_id", "").strip()
+    if not new_id:
+        return jsonify({"ok": False, "error": "Mete ID kont lan"})
+    PROFIT_ACCOUNT_ID = new_id
+    logger.info(f"PROFIT_ACCOUNT_ID updated to: {new_id}")
+    return jsonify({"ok": True, "msg": f"✓ Kont profit mete: {new_id}", "account_id": new_id})
+
+@app.route("/api/get_profit_account", methods=["POST"])
+def api_get_profit_account():
+    d = request.json or {}
+    if not require_admin(d):
+        return jsonify({"ok": False, "error": "Aksè refize"})
+    return jsonify({"ok": True, "account_id": PROFIT_ACCOUNT_ID})
+
+
+# ═══════════════════════════════════════════════════════════
 # API ROUTES
 # ═══════════════════════════════════════════════════════════
-
 @app.route("/api/oauth_url", methods=["POST"])
 def api_oauth_url():
-    """Jenere URL OAuth2 Deriv pou redirijye user."""
     st = get_state()
     params = urllib.parse.urlencode({
         "app_id":       DERIV_CLIENT_ID,
@@ -1729,22 +1725,17 @@ def api_oauth_url():
         "redirect_uri": DERIV_REDIRECT_URI,
     })
     url = f"{DERIV_AUTH_URL}?{params}"
-    logger.info(f"OAuth2 URL generated for uid={st['uid'][:8]}")
     return jsonify({"ok": True, "url": url})
 
 
 @app.route("/api/pat_verify", methods=["POST"])
 def api_pat_verify():
-    """
-    Verifye yon PAT token via WebSocket Deriv.
-    Retounen account info san modifye eta koneksyon.
-    """
     d = request.json or {}
     pat = d.get("pat_token", "").strip()
     if not pat:
         return jsonify({"ok": False, "error": "Mete token PAT ou a (pat_...)"})
     if not pat.startswith("pat_"):
-        return jsonify({"ok": False, "error": "Token PAT dwe kòmanse avèk 'pat_' — egzanp: pat_abc123..."})
+        return jsonify({"ok": False, "error": "Token PAT dwe kòmanse avèk 'pat_'"})
 
     ok, info = pat_verify_via_websocket(pat)
     if ok:
@@ -1766,13 +1757,9 @@ def api_connect():
         d = request.json
         broker = d.get("broker", "")
 
-        # ══════════════════════════════════════
-        # DERIV — PAT oswa OAuth2
-        # ══════════════════════════════════════
         if broker == "deriv":
             conn_type = d.get("conn_type", "pat")
 
-            # ── PAT TOKEN ──────────────────────
             if conn_type == "pat":
                 pat_token = d.get("pat_token", "").strip()
                 if not pat_token:
@@ -1780,10 +1767,8 @@ def api_connect():
                 if not pat_token.startswith("pat_"):
                     return jsonify({"ok": False,
                         "error": "Token PAT dwe kòmanse avèk 'pat_'\n"
-                                 "Egzanp: pat_XXXXXXXXXXXXXXXXXXXXXX\n"
-                                 "Kreye token: app.deriv.com → Réglages → API Token"})
-
-                logger.info(f"PAT connect | uid={st['uid'][:8]} | token={pat_token[:12]}...")
+                                 "Kreye token: app.deriv.com → Réglages → API Token\n"
+                                 "Pèmisyon: Trade, Account Management, Application Insight"})
 
                 ok, info = pat_verify_via_websocket(pat_token)
                 if not ok:
@@ -1794,7 +1779,7 @@ def api_connect():
                             "💡 SOLISYON:\n"
                             "• Token dwe kòmanse avèk pat_\n"
                             "• Kreye nouvo token: app.deriv.com → Réglages → API Token\n"
-                            "• Pèmisyon rekèri: Read, Trade, Payments\n"
+                            "• Pèmisyon: Trade, Account Management, Application Insight\n"
                             "• Oswa eseye koneksyon OAuth2 pito"
                         )
                     })
@@ -1803,7 +1788,6 @@ def api_connect():
                 account_id = info.get("account_id", "")
                 currency   = info.get("currency", "USD")
 
-                # Kreye DerivClient — token PAT = authorize token valid pou WS
                 api  = DerivClient(pat_token, DERIV_APP_ID)
                 api._bal        = bal
                 api._account_id = account_id
@@ -1823,7 +1807,6 @@ def api_connect():
                 st["_pat_currency"]    = currency
                 st["auth_type"]        = "pat"
 
-                logger.info(f"PAT connected | uid={st['uid'][:8]} | acct={account_id} | bal=${bal:.2f} {currency}")
                 return jsonify({
                     "ok":         True,
                     "balance":    bal,
@@ -1834,9 +1817,7 @@ def api_connect():
                     "note":       f"✓ PAT konekte! Kont: {account_id} | {currency}",
                 })
 
-            # ── OAUTH2 ──────────────────────────
             elif conn_type == "oauth2":
-                # Tcheke si OAuth2 token deja sove (apre /callback)
                 oauth_tok = st.get("_oauth_token")
                 if oauth_tok:
                     api  = DerivClient(oauth_tok, DERIV_APP_ID)
@@ -1860,7 +1841,6 @@ def api_connect():
                         "note":       "✓ OAuth2 aktif!",
                     })
                 else:
-                    # Jenere URL pou redirijye user
                     params = urllib.parse.urlencode({
                         "app_id":       DERIV_CLIENT_ID,
                         "l":            "EN",
@@ -1870,34 +1850,25 @@ def api_connect():
                     url = f"{DERIV_AUTH_URL}?{params}"
                     return jsonify({
                         "ok":        False,
-                        "error":     "Pa gen sesyon OAuth2 — klike bouton la pou login nan Deriv",
+                        "error":     "Pa gen sesyon OAuth2 — klike bouton la pou login",
                         "oauth_url": url,
                         "redirect":  True,
                     })
             else:
                 return jsonify({"ok": False, "error": "Mod koneksyon enkoni"})
 
-        # ══════════════════════════════════════
-        # BINANCE
-        # ══════════════════════════════════════
         elif broker == "binance":
             api = BinanceClient(d["api_key"], d["api_secret"])
             bal = api.connect()
-            st["binance_api"] = api
-            st["broker"]      = "binance"
-            st["balance"]     = bal
-            st["connected"]   = True
-            st["auth_type"]   = "binance"
+            st["binance_api"] = api; st["broker"] = "binance"
+            st["balance"] = bal; st["connected"] = True; st["auth_type"] = "binance"
             return jsonify({"ok": True, "balance": bal, "broker": "binance"})
 
         elif broker == "binance_us":
             api = BinanceUSClient(d["api_key"], d["api_secret"])
             bal = api.connect()
-            st["binance_api"] = api
-            st["broker"]      = "binance_us"
-            st["balance"]     = bal
-            st["connected"]   = True
-            st["auth_type"]   = "binance_us"
+            st["binance_api"] = api; st["broker"] = "binance_us"
+            st["balance"] = bal; st["connected"] = True; st["auth_type"] = "binance_us"
             return jsonify({"ok": True, "balance": bal, "broker": "binance_us"})
 
         return jsonify({"ok": False, "error": "Broker enkoni"})
@@ -1953,20 +1924,21 @@ def api_stop():
 def api_status():
     st = get_state()
     return jsonify({
-        "connected":   st["connected"],
-        "broker":      st["broker"],
-        "running":     st["running"],
-        "balance":     round(st["balance"], 2),
-        "pnl":         round(st["total_pnl"], 2),
-        "profit_sent": round(st["profit_sent"], 4),
-        "trades":      st["trades"][:20],
-        "log":         st["log"][:30],
-        "config":      st["config"],
-        "auth_type":   st.get("auth_type",""),
-        "account_id":  st.get("_pat_account_id",""),
-        "currency":    st.get("_pat_currency","USD"),
-        "oauth_ready": bool(st.get("_oauth_token")),
-        "pat_ready":   bool(st.get("_pat_token")),
+        "connected":         st["connected"],
+        "broker":            st["broker"],
+        "running":           st["running"],
+        "balance":           round(st["balance"], 2),
+        "pnl":               round(st["total_pnl"], 2),
+        "profit_sent":       round(st["profit_sent"], 4),
+        "trades":            st["trades"][:20],
+        "log":               st["log"][:30],
+        "config":            st["config"],
+        "auth_type":         st.get("auth_type",""),
+        "account_id":        st.get("_pat_account_id",""),
+        "currency":          st.get("_pat_currency","USD"),
+        "oauth_ready":       bool(st.get("_oauth_token")),
+        "pat_ready":         bool(st.get("_pat_token")),
+        "profit_account_id": PROFIT_ACCOUNT_ID,
     })
 
 
@@ -2174,7 +2146,7 @@ def index():
 
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — PAT + OAuth2 sèlman (pa gen classic tab)
+# HTML INTERFACE
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
@@ -2233,8 +2205,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 .le{padding:5px 8px;border-bottom:1px solid #0D223318;font-size:11px}
 .lt{color:#4A7080;margin-right:8px}
 .lS{color:#00FF88}.lP{color:#FFD600}.lE{color:#FF3B6B}.lW{color:#FFD600}.lI{color:#C8E8F0}
-
-/* Tab switcher styles */
 .auth-tabs{display:flex;gap:0;margin-bottom:14px;border-radius:8px;overflow:hidden;border:1px solid #0D2233}
 .auth-tab{flex:1;background:transparent;border:none;color:#4A7080;padding:10px;cursor:pointer;font-family:inherit;font-size:11px;font-weight:700;letter-spacing:1px;transition:.2s;border-right:1px solid #0D2233}
 .auth-tab:last-child{border-right:none}
@@ -2244,7 +2214,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </head>
 <body>
 
-<!-- ══ LOGIN PAGE ══ -->
+<!-- LOGIN PAGE -->
 <div id="login-page" style="display:none;min-height:100vh;background:#040A0F;align-items:center;justify-content:center;flex-direction:column">
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
@@ -2277,7 +2247,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-<!-- ══ APP PAGE ══ -->
+<!-- APP PAGE -->
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
@@ -2309,9 +2279,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 
 <div class="wrap">
 
-<!-- ══════════════════════════════════════
-     DASHBOARD
-══════════════════════════════════════ -->
+<!-- DASHBOARD -->
 <div id="pg-dashboard" class="pg on">
   <div class="stats">
     <div class="stat"><div class="sl">BALANS</div><div class="sv" id="s-bal" style="color:#00D4FF">$0.00</div></div>
@@ -2322,11 +2290,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 
   <div class="g2">
-    <!-- ── KONEKSYON PANEL ── -->
     <div class="box">
       <div class="bt">KONEKSYON BROKER</div>
-
-      <!-- Broker selector -->
       <div class="iw">
         <div class="il">BROKER</div>
         <select id="d-br" onchange="toggleBroker()">
@@ -2336,9 +2301,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </select>
       </div>
 
-      <!-- ── DERIV SECTION ── -->
+      <!-- DERIV SECTION -->
       <div id="fd">
-        <!-- Auth method tabs -->
         <div class="auth-tabs">
           <button class="auth-tab on" id="tab-pat" onclick="setAuthMode('pat')">🔑 PAT TOKEN</button>
           <button class="auth-tab oauth" id="tab-oauth" onclick="setAuthMode('oauth2')">🔐 OAUTH2 DERIV</button>
@@ -2350,7 +2314,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
             <div style="color:#00D4FF;font-weight:700;font-size:11px;margin-bottom:6px">🔑 Personal Access Token (PAT)</div>
             <div style="color:#4A7080;font-size:10px;line-height:1.9">
               Kreye: <span style="color:#C8E8F0">app.deriv.com → Réglages → API Token</span><br>
-              Pèmisyon: <span style="color:#00FF88">Read • Trade • Payments</span><br>
+              Pèmisyon: <span style="color:#00FF88">Trade • Account Management • Application Insight</span><br>
               Fòma: <span style="color:#FFD600;letter-spacing:1px">pat_XXXXXXXXXXXXXXXX...</span>
             </div>
           </div>
@@ -2363,17 +2327,34 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
                 style="padding:8px 12px;font-size:11px;white-space:nowrap;flex-shrink:0">✓ TEST</button>
             </div>
           </div>
-          <!-- PAT verify result -->
           <div id="pat-verify-result" style="display:none;margin-bottom:10px"></div>
-          <!-- PAT kont info -->
-          <div id="pat-info-card" style="display:none;background:#00FF8810;border:1px solid #00FF8830;border-radius:8px;padding:10px;margin-bottom:12px">
-            <div style="color:#00FF88;font-weight:700;font-size:11px;margin-bottom:6px">✅ Kont Deriv verifye</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px">
-              <span style="color:#4A7080">Kont ID: <strong id="pi-id" style="color:#C8E8F0">—</strong></span>
-              <span style="color:#4A7080">Balans: <strong id="pi-bal" style="color:#00FF88">—</strong></span>
-              <span style="color:#4A7080">Devise: <strong id="pi-cur" style="color:#C8E8F0">—</strong></span>
-              <span style="color:#4A7080">Email: <strong id="pi-em" style="color:#C8E8F0">—</strong></span>
+
+          <!-- ★ KONT ID — ZON POU RANPLASE ★ -->
+          <div id="pat-info-card" style="display:none;background:#00FF8810;border:1px solid #00FF8830;border-radius:8px;padding:12px;margin-bottom:12px">
+            <div style="color:#00FF88;font-weight:700;font-size:11px;margin-bottom:8px">✅ Kont Deriv verifye</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px">
+              <div>
+                <div style="color:#4A7080;font-size:10px;margin-bottom:3px">KONT ID</div>
+                <div id="pi-id" style="color:#00D4FF;font-weight:700;font-size:14px;letter-spacing:1px">—</div>
+              </div>
+              <div>
+                <div style="color:#4A7080;font-size:10px;margin-bottom:3px">BALANS</div>
+                <div id="pi-bal" style="color:#00FF88;font-weight:700;font-size:14px">—</div>
+              </div>
+              <div>
+                <div style="color:#4A7080;font-size:10px;margin-bottom:3px">DEVISE</div>
+                <div id="pi-cur" style="color:#C8E8F0;font-weight:700">—</div>
+              </div>
+              <div>
+                <div style="color:#4A7080;font-size:10px;margin-bottom:3px">EMAIL</div>
+                <div id="pi-em" style="color:#C8E8F0;font-size:10px">—</div>
+              </div>
             </div>
+            <!-- Bouton kopye ID -->
+            <button onclick="copyAccountId()"
+              style="margin-top:10px;width:100%;background:#00D4FF18;border:1px solid #00D4FF44;color:#00D4FF;border-radius:5px;padding:6px;cursor:pointer;font-size:11px;font-family:inherit;font-weight:700">
+              📋 KOPYE ID KONT LA
+            </button>
           </div>
           <button class="btn b fw" id="pat-conn-btn" onclick="doConnPAT()">⚡ KONEKTE AVÈK PAT</button>
         </div>
@@ -2389,7 +2370,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               4. Klike <span style="color:#A855F7">KONEKTE OAUTH2</span> apre retou a
             </div>
           </div>
-          <!-- OAuth2 connected info (apre callback) -->
           <div id="oauth-ready-card" style="display:none;background:#A855F715;border:1px solid #A855F730;border-radius:8px;padding:10px;margin-bottom:10px">
             <div style="color:#A855F7;font-weight:700;font-size:11px;margin-bottom:4px">✅ Deriv OAuth2 — Sesyon aktif!</div>
             <div style="font-size:11px;color:#C8E8F0">Kont: <strong id="oa-acct">—</strong> | Balans: <strong id="oa-bal" style="color:#A855F7">—</strong></div>
@@ -2401,7 +2381,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
       </div>
 
-      <!-- ── BINANCE SECTION ── -->
+      <!-- BINANCE SECTION -->
       <div id="fb" style="display:none">
         <div id="fb-note-us" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:8px;margin-bottom:10px;font-size:10px;color:#FFD600">
           🇺🇸 Binance US — api.binance.us | Kreye kle sou: binance.us
@@ -2414,7 +2394,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div id="conn-msg" style="margin-top:10px"></div>
     </div>
 
-    <!-- ── CHARTS + INFO ── -->
     <div class="box">
       <div class="bt" style="display:flex;justify-content:space-between">
         <span>COURBE P&L</span>
@@ -2431,7 +2410,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
   </div>
 
-  <!-- Info panel -->
   <div class="box" style="background:#00D4FF08;border-color:#00D4FF22">
     <div class="bt" style="color:#00D4FF">📖 GIDE KONEKSYON RAPID</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:11px;color:#4A7080;line-height:1.9">
@@ -2439,9 +2417,9 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div style="color:#00D4FF;font-weight:700;margin-bottom:6px">🔑 PAT Token (Rekòmande)</div>
         1. Ale sou <span style="color:#C8E8F0">app.deriv.com</span><br>
         2. Foto → API Token<br>
-        3. Kreye token avèk Read+Trade+Payments<br>
+        3. Kreye token: <span style="color:#00FF88">Trade + Account Management + Application Insight</span><br>
         4. Kole token la isit (kòmanse avèk pat_)<br>
-        5. Klike ✓ TEST pou verifye<br>
+        5. Klike ✓ TEST pou verifye ID + Balans<br>
         6. Klike KONEKTE AVÈK PAT
       </div>
       <div>
@@ -2457,9 +2435,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-<!-- ══════════════════════════════════════
-     CONTROL
-══════════════════════════════════════ -->
+<!-- CONTROL -->
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
@@ -2472,7 +2448,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <option value="binance_crypto">🪙 Crypto USDT — Binance</option>
         </select>
       </div>
-      <!-- FOREX -->
       <div id="opts-forex">
         <div class="g2">
           <div class="iw"><div class="il">SENBOL DERIV</div>
@@ -2512,16 +2487,15 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </div>
         </div>
       </div>
-      <!-- DIGITS -->
       <div id="opts-digits" style="display:none">
         <div style="background:#FFD60010;border:1px solid #FFD60033;border-radius:8px;padding:12px;margin-bottom:10px">
           <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🎲 DIGITS MODE</div>
           <div class="g2">
             <div class="iw"><div class="il">SENBOL</div>
               <select id="c-sy-digits">
-                <option value="R_10" selected>R_10 — Volatility 10</option>
-                <option value="R_25">R_25 — Volatility 25</option>
-                <option value="R_50">R_50 — Volatility 50</option>
+                <option value="R_10" selected>R_10</option>
+                <option value="R_25">R_25</option>
+                <option value="R_50">R_50</option>
               </select>
             </div>
             <div class="iw"><div class="il">TIP DIGITS</div>
@@ -2534,15 +2508,14 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="iw"><div class="il">MISE ($) — Min $0.35</div><input id="c-lot-digits" type="number" value="0.35" step="0.10" min="0.35"></div>
         </div>
       </div>
-      <!-- GOLD -->
       <div id="opts-gold" style="display:none">
         <div style="background:#FFD60010;border:1px solid #FFD60033;border-radius:8px;padding:12px;margin-bottom:10px">
-          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🥇 GOLD / METALS — BINANCE</div>
+          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🥇 GOLD / METALS</div>
           <div class="g2">
-            <div class="iw"><div class="il">SENBOL METAL</div>
+            <div class="iw"><div class="il">SENBOL</div>
               <select id="c-sy-gold">
-                <option value="XAUUSDT">XAUUSDT — Or (Gold)</option>
-                <option value="XAGUSDT">XAGUSDT — Ajan (Silver)</option>
+                <option value="XAUUSDT">XAUUSDT — Or</option>
+                <option value="XAGUSDT">XAGUSDT — Ajan</option>
               </select>
             </div>
             <div class="iw"><div class="il">TIMEFRAME</div>
@@ -2556,20 +2529,19 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-gold" type="number" value="11" step="1" min="11"></div>
         </div>
       </div>
-      <!-- CRYPTO -->
       <div id="opts-crypto" style="display:none">
         <div style="background:#00D4FF10;border:1px solid #00D4FF33;border-radius:8px;padding:12px;margin-bottom:10px">
-          <div style="color:#00D4FF;font-size:11px;font-weight:700;margin-bottom:8px">🪙 CRYPTO — BINANCE</div>
+          <div style="color:#00D4FF;font-size:11px;font-weight:700;margin-bottom:8px">🪙 CRYPTO</div>
           <div class="g2">
-            <div class="iw"><div class="il">SENBOL KRIPTO</div>
+            <div class="iw"><div class="il">SENBOL</div>
               <select id="c-sy-crypto">
-                <option value="BTCUSDT" selected>BTCUSDT — Bitcoin</option>
-                <option value="ETHUSDT">ETHUSDT — Ethereum</option>
-                <option value="BNBUSDT">BNBUSDT — BNB</option>
-                <option value="SOLUSDT">SOLUSDT — Solana</option>
-                <option value="XRPUSDT">XRPUSDT — XRP</option>
-                <option value="ADAUSDT">ADAUSDT — Cardano</option>
-                <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
+                <option value="BTCUSDT" selected>BTCUSDT</option>
+                <option value="ETHUSDT">ETHUSDT</option>
+                <option value="BNBUSDT">BNBUSDT</option>
+                <option value="SOLUSDT">SOLUSDT</option>
+                <option value="XRPUSDT">XRPUSDT</option>
+                <option value="ADAUSDT">ADAUSDT</option>
+                <option value="DOGEUSDT">DOGEUSDT</option>
               </select>
             </div>
             <div class="iw"><div class="il">TIMEFRAME</div>
@@ -2584,25 +2556,22 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-crypto" type="number" value="11" step="1" min="11"></div>
         </div>
       </div>
-
       <div class="g2">
         <div class="iw"><div class="il">KONFIDANS MIN</div>
           <select id="c-conf">
-            <option value="0.60">60% (maksimòm siyal)</option>
-            <option value="0.65" selected>65% (rekòmande ★)</option>
-            <option value="0.70">70% (balans)</option>
-            <option value="0.75">75% (konsèvatif)</option>
-            <option value="0.80">80% (presiz)</option>
+            <option value="0.60">60%</option>
+            <option value="0.65" selected>65% ★</option>
+            <option value="0.70">70%</option>
+            <option value="0.75">75%</option>
+            <option value="0.80">80%</option>
           </select>
         </div>
         <div class="iw"><div class="il">🎯 OBJEKTIF PROFIT ($)</div>
           <input id="c-target" type="number" value="0" step="1" min="0">
-          <div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div>
         </div>
       </div>
       <div class="iw"><div class="il">🛑 LIMIT PÈT ($)</div>
         <input id="c-loss" type="number" value="0" step="1" min="0">
-        <div style="color:#FF3B6B;font-size:9px;margin-top:2px">REKÒMANDE: toujou mete yon limit pèt!</div>
       </div>
       <div id="ctm"></div>
       <div style="display:flex;gap:10px">
@@ -2629,7 +2598,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div class="box" style="background:#00D4FF08;border-color:#00D4FF22">
         <div class="bt" style="color:#00D4FF">🛡 LOJIK SEKIRITE BOT</div>
         <div style="color:#4A7080;font-size:10px;line-height:2.1">
-          <span style="color:#00D4FF">✓ PAT+OAuth2:</span> WS authorize dirèk<br>
+          <span style="color:#00D4FF">✓ Scopes:</span> Trade • Account Management • App Insight<br>
           <span style="color:#00FF88">✓ Balance:</span> Refresh apre chak trade<br>
           <span style="color:#FFD600">⚠ 1-2 pèt:</span> Conf+2-4%, mise monte<br>
           <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann siyal bon<br>
@@ -2641,17 +2610,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-<!-- ══════════════════════════════════════
-     STRATEGIES
-══════════════════════════════════════ -->
+<!-- STRATEGIES -->
 <div id="pg-strategies" class="pg">
   <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px" id="sbts"></div>
   <div class="box" id="sdet"></div>
 </div>
 
-<!-- ══════════════════════════════════════
-     BACKTEST
-══════════════════════════════════════ -->
+<!-- BACKTEST -->
 <div id="pg-backtest" class="pg">
   <div class="box">
     <div class="bt">BACKTEST ENGINE</div>
@@ -2683,9 +2648,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-<!-- ══════════════════════════════════════
-     TRADES
-══════════════════════════════════════ -->
+<!-- TRADES -->
 <div id="pg-trades" class="pg">
   <div class="box">
     <div class="bt" id="trtit">HISTOIRIK TRADES</div>
@@ -2693,9 +2656,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-<!-- ══════════════════════════════════════
-     LOGS
-══════════════════════════════════════ -->
+<!-- LOGS -->
 <div id="pg-log" class="pg">
   <div class="box">
     <div class="bt">LOGS SISTEM</div>
@@ -2703,9 +2664,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-<!-- ══════════════════════════════════════
-     ADMIN
-══════════════════════════════════════ -->
+<!-- ADMIN -->
 <div id="pg-admin" class="pg">
   <div class="stats">
     <div class="stat"><div class="sl">KÒD TOTAL</div><div class="sv" id="adm-total" style="color:#FFD600">—</div></div>
@@ -2714,6 +2673,30 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="stat"><div class="sl">SESYON AKTIF</div><div class="sv" id="adm-sess" style="color:#00D4FF">—</div></div>
     <div class="stat"><div class="sl">ITILIZATÈ</div><div class="sv" id="adm-users-count" style="color:#FFD600">—</div></div>
   </div>
+
+  <!-- ★ KONT PROFIT SECTION ★ -->
+  <div class="box" style="background:#FFD60008;border-color:#FFD60033">
+    <div class="bt" style="color:#FFD600">💸 KONT PROFIT DERIV (5%)</div>
+    <div style="background:#020C12;border:1px solid #FFD60033;border-radius:8px;padding:12px;margin-bottom:12px">
+      <div style="color:#4A7080;font-size:10px;margin-bottom:6px">ID KONT AKTIF (PROFIT 5% AP ALE ICI):</div>
+      <div id="current-profit-acct" style="color:#FFD600;font-size:18px;font-weight:700;letter-spacing:2px">—</div>
+    </div>
+    <div class="iw">
+      <div class="il">NOUVO ID KONT PROFIT (CR... oswa VRTC...)</div>
+      <div style="display:flex;gap:8px">
+        <input id="new-profit-acct" type="text" placeholder="CR9560099"
+          style="flex:1;text-transform:uppercase" oninput="this.value=this.value.toUpperCase()">
+        <button class="btn y" onclick="admSetProfitAccount()"
+          style="padding:8px 14px;font-size:11px;white-space:nowrap">💾 SOVE</button>
+      </div>
+    </div>
+    <div id="profit-acct-msg" style="margin-top:6px"></div>
+    <div style="color:#4A7080;font-size:10px;margin-top:8px;line-height:1.8">
+      ⚠ Kont sa ap resevwa 5% chak trade ki genyen.<br>
+      Token itilizatè a dwe gen pèmisyon <span style="color:#FFD600">Payments</span> pou transfer la fèt.
+    </div>
+  </div>
+
   <div class="g2">
     <div class="box">
       <div class="bt">➕ KREYE KÒD AKSÈ</div>
@@ -2750,6 +2733,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div id="adm-sessions-list" style="color:#4A7080;font-size:11px;max-height:200px;overflow-y:auto">Klike 🔄</div>
     </div>
   </div>
+
   <div class="box">
     <div class="bt" style="display:flex;justify-content:space-between;align-items:center">
       <span>📋 TOUT KÒD AKSÈ</span>
@@ -2766,18 +2750,14 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-</div><!-- end .wrap -->
-</div><!-- end #app-page -->
+</div>
+</div>
 
 <script>
-// ═══════════════════════════════════════
-// SESSION MANAGEMENT
-// ═══════════════════════════════════════
 const SK="bb_session_v6";
 function saveToken(t){try{localStorage.setItem(SK,t);}catch(e){}try{const d=new Date();d.setDate(d.getDate()+30);document.cookie=`${SK}=${t};expires=${d.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getToken(){try{const t=localStorage.getItem(SK);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SK+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
 function clearToken(){try{localStorage.removeItem(SK);}catch(e){}try{document.cookie=`${SK}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;}catch(e){}}
-
 function updateAdminTab(isAdmin){const t=document.getElementById("tab-admin");if(t)t.style.display=isAdmin?"block":"none";}
 
 async function checkLogin(){
@@ -2790,7 +2770,6 @@ async function checkLogin(){
     else{if(d.msg&&(d.msg.includes("ekspire")||d.msg.includes("valid")))clearToken();showLogin(d.msg||"");}
   }catch(e){showLogin("");}
 }
-
 function showLogin(err=""){
   document.getElementById("login-page").style.display="flex";
   document.getElementById("app-page").style.display="none";
@@ -2804,7 +2783,6 @@ function showApp(msg){
   document.getElementById("app-page").style.display="block";
   document.getElementById("sub-info").textContent=msg||"";
 }
-
 async function doLogin(){
   const code=document.getElementById("login-code").value.trim().toUpperCase();
   if(!code){document.getElementById("login-err").innerHTML='<div class="al er">⚠ Mete kòd aksè ou</div>';return;}
@@ -2819,11 +2797,7 @@ async function doLogin(){
 }
 function doLogout(){clearToken();showLogin("Ou dekonekte.");}
 
-// ═══════════════════════════════════════
-// UI TOGGLES
-// ═══════════════════════════════════════
 let currentAuthMode="pat";
-
 function setAuthMode(mode){
   currentAuthMode=mode;
   document.getElementById("panel-pat").style.display=mode==="pat"?"block":"none";
@@ -2831,7 +2805,6 @@ function setAuthMode(mode){
   document.getElementById("tab-pat").className="auth-tab"+(mode==="pat"?" on":"");
   document.getElementById("tab-oauth").className="auth-tab oauth"+(mode==="oauth2"?" on":"");
 }
-
 function toggleBroker(){
   const v=document.getElementById("d-br").value;
   document.getElementById("fd").style.display=v==="deriv"?"block":"none";
@@ -2839,7 +2812,6 @@ function toggleBroker(){
   const note=document.getElementById("fb-note-us");
   if(note)note.style.display=v==="binance_us"?"block":"none";
 }
-
 function toggleMode(){
   const mode=document.getElementById("c-mode").value;
   document.getElementById("opts-forex").style.display=mode==="forex"?"block":"none";
@@ -2847,32 +2819,34 @@ function toggleMode(){
   document.getElementById("opts-gold").style.display=mode==="binance_gold"?"block":"none";
   document.getElementById("opts-crypto").style.display=mode==="binance_crypto"?"block":"none";
 }
-
 function sw(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
   document.getElementById("pg-"+id).classList.add("on");el.classList.add("on");
 }
+function showMsg(id,txt,type){document.getElementById(id).innerHTML=`<div class="al ${type}">${txt}</div>`;}
 
-function showMsg(id,txt,type){
-  // type: "ok","er","in","wa"
-  document.getElementById(id).innerHTML=`<div class="al ${type}">${txt}</div>`;
+function copyAccountId(){
+  const id=document.getElementById("pi-id").textContent;
+  if(id&&id!=="—"){
+    navigator.clipboard.writeText(id).then(()=>{
+      // Mete nan champ profit admin
+      const pf=document.getElementById("new-profit-acct");
+      if(pf)pf.value=id;
+    }).catch(()=>{});
+    const btn=event.target;btn.textContent="✅ KOPYE!";
+    setTimeout(()=>btn.textContent="📋 KOPYE ID KONT LA",2000);
+  }
 }
 
-// ═══════════════════════════════════════
-// PAT TOKEN VERIFY
-// ═══════════════════════════════════════
 async function doPATVerify(){
   const pat=document.getElementById("d-pat").value.trim();
   const res=document.getElementById("pat-verify-result");
   const card=document.getElementById("pat-info-card");
-  if(!pat){res.style.display="block";showMsg("pat-verify-result","⚠ Mete token PAT ou a anvan (pat_...)","wa");return;}
-  if(!pat.startsWith("pat_")){
-    res.style.display="block";
-    showMsg("pat-verify-result","❌ Token dwe kòmanse avèk pat_\nEgzanp: pat_XXXXXXXXXXXXXX","er");
-    card.style.display="none";return;}
+  if(!pat){res.style.display="block";showMsg("pat-verify-result","⚠ Mete token PAT ou a (pat_...)","wa");return;}
+  if(!pat.startsWith("pat_")){res.style.display="block";showMsg("pat-verify-result","❌ Token dwe kòmanse avèk pat_","er");card.style.display="none";return;}
   res.style.display="block";
-  showMsg("pat-verify-result","⏳ Ap verifye token via Deriv WebSocket...","in");
+  showMsg("pat-verify-result","⏳ Ap verifye via Deriv WebSocket...","in");
   try{
     const r=await fetch("/api/pat_verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pat_token:pat})});
     const d=await r.json();
@@ -2883,6 +2857,9 @@ async function doPATVerify(){
       document.getElementById("pi-cur").textContent=d.currency||"USD";
       document.getElementById("pi-em").textContent=d.email||"—";
       card.style.display="block";
+      // Auto-populate profit account field si li vid
+      const pf=document.getElementById("new-profit-acct");
+      if(pf&&!pf.value)pf.value=d.account_id||"";
     }else{
       showMsg("pat-verify-result",`❌ Token invalib\n${d.error||"Erè enkoni"}`,"er");
       card.style.display="none";
@@ -2890,15 +2867,12 @@ async function doPATVerify(){
   }catch(e){showMsg("pat-verify-result","✗ Erè rezo: "+e.message,"er");card.style.display="none";}
 }
 
-// ═══════════════════════════════════════
-// CONNECT — PAT
-// ═══════════════════════════════════════
 async function doConnPAT(){
   const pat=document.getElementById("d-pat").value.trim();
-  if(!pat){showMsg("conn-msg","⚠ Mete token PAT ou a anvan","wa");return;}
+  if(!pat){showMsg("conn-msg","⚠ Mete token PAT ou a","wa");return;}
   if(!pat.startsWith("pat_")){showMsg("conn-msg","❌ Token dwe kòmanse avèk pat_","er");return;}
   const btn=document.getElementById("pat-conn-btn");btn.textContent="⏳ AP KONEKTE...";btn.disabled=true;
-  showMsg("conn-msg","⏳ Ap konekte Deriv via PAT token...","in");
+  showMsg("conn-msg","⏳ Ap konekte Deriv via PAT...","in");
   try{
     const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({broker:"deriv",conn_type:"pat",pat_token:pat})});
@@ -2906,72 +2880,46 @@ async function doConnPAT(){
     if(d.ok){
       showMsg("conn-msg",`✅ Konekte! Kont: ${d.account_id||"—"} | $${d.balance.toFixed(2)} ${d.currency||"USD"}\n${d.note||""}`,"ok");
       updateHeaderAuth("PAT",d.account_id,d.currency,d.balance);
-    }else{
-      showMsg("conn-msg",`❌ Koneksyon echwe\n${d.error||"Erè enkoni"}`,"er");
-    }
+    }else{showMsg("conn-msg",`❌ ${d.error||"Erè enkoni"}`,"er");}
   }catch(e){showMsg("conn-msg","✗ Erè: "+e.message,"er");}
   btn.textContent="⚡ KONEKTE AVÈK PAT";btn.disabled=false;
 }
 
-// ═══════════════════════════════════════
-// CONNECT — OAUTH2
-// ═══════════════════════════════════════
 function doOAuth2Login(){
-  // Ouvri Deriv login nan yon nouvo tab
-  const params=new URLSearchParams({
-    app_id:"33h9RL9bbCjURr4MO3PQ0",
-    l:"EN",brand:"deriv",
-    redirect_uri:"https://robotbonheur.onrender.com/callback"
-  });
-  const url="https://oauth.deriv.com/oauth2/authorize?"+params.toString();
-  window.open(url,"_blank");
-  showMsg("conn-msg","⏳ Deriv login ouvri nan yon nouvo tab.\nApre ou login, tounen isit epi klike ⚡ KONEKTE OAUTH2","in");
+  const params=new URLSearchParams({app_id:"33h9RL9bbCjURr4MO3PQ0",l:"EN",brand:"deriv",redirect_uri:"https://robotbonheur.onrender.com/callback"});
+  window.open("https://oauth.deriv.com/oauth2/authorize?"+params.toString(),"_blank");
+  showMsg("conn-msg","⏳ Deriv login ouvri nan nouvo tab.\nApre login, tounen isit epi klike ⚡ KONEKTE OAUTH2","in");
 }
-
 async function doConnOAuth2(){
   const btn=document.getElementById("oauth-conn-btn");btn.textContent="⏳...";btn.disabled=true;
   showMsg("conn-msg","⏳ Ap tcheke sesyon OAuth2...","in");
   try{
-    const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({broker:"deriv",conn_type:"oauth2"})});
+    const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({broker:"deriv",conn_type:"oauth2"})});
     const d=await r.json();
     if(d.ok){
-      showMsg("conn-msg",`✅ OAuth2 konekte! Kont: ${d.account_id||"—"} | $${d.balance.toFixed(2)} ${d.currency||"USD"}`,"ok");
+      showMsg("conn-msg",`✅ OAuth2 konekte! Kont: ${d.account_id||"—"} | $${d.balance.toFixed(2)}`,"ok");
       updateHeaderAuth("OAuth2",d.account_id,d.currency,d.balance);
-      // Montre card oauth
       document.getElementById("oa-acct").textContent=d.account_id||"—";
       document.getElementById("oa-bal").textContent=`$${d.balance.toFixed(2)} ${d.currency||"USD"}`;
       document.getElementById("oauth-ready-card").style.display="block";
-    }else if(d.redirect){
-      showMsg("conn-msg","⚠ Pa gen sesyon OAuth2 aktif. Klike OUVRI DERIV LOGIN anvan.","wa");
-    }else{
-      showMsg("conn-msg",`❌ ${d.error||"Echwe"}`,"er");
-    }
-  }catch(e){showMsg("conn-msg","✗ Erè: "+e.message,"er");}
+    }else if(d.redirect){showMsg("conn-msg","⚠ Klike OUVRI DERIV LOGIN anvan.","wa");}
+    else{showMsg("conn-msg",`❌ ${d.error||"Echwe"}`,"er");}
+  }catch(e){showMsg("conn-msg","✗ "+e.message,"er");}
   btn.textContent="⚡ KONEKTE OAUTH2";btn.disabled=false;
 }
-
-// ═══════════════════════════════════════
-// CONNECT — BINANCE
-// ═══════════════════════════════════════
 async function doConnBinance(){
   const broker=document.getElementById("d-br").value;
   const key=document.getElementById("b-k").value.trim();
   const secret=document.getElementById("b-s").value.trim();
-  if(!key||!secret){showMsg("conn-msg","⚠ Mete API Key ak Secret ou","wa");return;}
+  if(!key||!secret){showMsg("conn-msg","⚠ Mete API Key ak Secret","wa");return;}
   showMsg("conn-msg","⏳ Ap konekte Binance...","in");
   try{
-    const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({broker,api_key:key,api_secret:secret})});
+    const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({broker,api_key:key,api_secret:secret})});
     const d=await r.json();
-    if(d.ok){
-      showMsg("conn-msg",`✅ Binance konekte! USDT: $${d.balance.toFixed(2)}`,"ok");
-    }else{
-      showMsg("conn-msg",`❌ ${d.error||"Echwe"}`,"er");
-    }
-  }catch(e){showMsg("conn-msg","✗ Erè: "+e.message,"er");}
+    if(d.ok){showMsg("conn-msg",`✅ Binance konekte! USDT: $${d.balance.toFixed(2)}`,"ok");}
+    else{showMsg("conn-msg",`❌ ${d.error||"Echwe"}`,"er");}
+  }catch(e){showMsg("conn-msg","✗ "+e.message,"er");}
 }
-
 function updateHeaderAuth(type,acct,cur,bal){
   document.getElementById("h-auth").style.display="inline";
   document.getElementById("h-auth").textContent=`[${type} | ${acct||"—"} | ${cur||"USD"}]`;
@@ -2979,9 +2927,6 @@ function updateHeaderAuth(type,acct,cur,bal){
   document.getElementById("hbal").style.color="#00D4FF";
 }
 
-// ═══════════════════════════════════════
-// BOT START / STOP
-// ═══════════════════════════════════════
 function getStartParams(){
   const mode=document.getElementById("c-mode").value;
   const conf=parseFloat(document.getElementById("c-conf").value);
@@ -2992,7 +2937,6 @@ function getStartParams(){
   else if(mode==="binance_gold") return{mode:"forex",symbol:document.getElementById("c-sy-gold").value,strategy:"binance_gold",lot:parseFloat(document.getElementById("c-lot-gold").value),tf:document.getElementById("c-tf-gold").value,min_conf:conf,profit_target:target,loss_limit:loss};
   else return{mode:"forex",symbol:document.getElementById("c-sy-crypto").value,strategy:"binance_crypto",lot:parseFloat(document.getElementById("c-lot-crypto").value),tf:document.getElementById("c-tf-crypto").value,min_conf:conf,profit_target:target,loss_limit:loss};
 }
-
 async function doStart(){
   const body=getStartParams();
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -3006,12 +2950,9 @@ async function doStop(){
   document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";
 }
 
-// ═══════════════════════════════════════
-// BACKTEST
-// ═══════════════════════════════════════
 async function doBt(){
   const btn=event.target;btn.textContent="⏳ AP KALKILE...";btn.disabled=true;
-  document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest — tann 30 segonn...</div>`;
+  document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest...</div>`;
   const body={symbol:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,
     balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),
     sl:parseFloat(document.getElementById("bt-sl").value),tp:parseFloat(document.getElementById("bt-tp").value)};
@@ -3050,21 +2991,18 @@ function drawC(vals){
   </svg>`;
 }
 
-// ═══════════════════════════════════════
-// STRATEGIES TAB
-// ═══════════════════════════════════════
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+10 strategies klasik. ADX≥12, 3 strat min. Pi solid strategy.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12"]},
-  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. Espesyal Deriv Synthetic.",tags:["score 5/15","ADX≥12","ST bonus"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0. Siyal klè BUY/SELL. Travèse bann = siyal solid. Conf 75-92%.",tags:["ATR×3","travèse","conf 75-92%"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif. Filtre bwi mache. Bon pou trend. Conf 72-83%.",tags:["5 bouji","filtre bwi","conf 72-83%"]},
-  chandelier:{l:"🔔 Chandelier Exit",d:"HH - ATR×3 (long). LL + ATR×3 (short). Siy chanjman trend. Conf 75-90%.",tags:["HH-ATR×3","LL+ATR×3","conf 75-90%"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend long. Conf 68-92%.",tags:["8 faktè","pwa","conf 68-92%"]},
-  smc:{l:"🏛 SMC",d:"Smart Money: Break of Structure + swing high/low + EMA50. Conf 84%.",tags:["BOS","swing","EMA50","84%"]},
-  scalping_pro:{l:"⚡ Scalping Pro",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m. Siyal frekant.",tags:["EMA 5/13","RSI 9","1m/5m"]},
-  rsi:{l:"📉 RSI Classic",d:"RSI<30 OB, RSI>70 OS + EMA50 filter. Siyal mean-reversion.",tags:["RSI 14","OB/OS","EMA50"]},
-  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD. EMA20/50/200+RSI+MACD+BB+Stoch+Volume. 7+ pts.",tags:["EMA 20/50/200","RSI+Stoch","Volume"]},
-  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance. EMA 9/21/50+Trend+Volume+RSI+MACD+Breakout. 8+ pts.",tags:["EMA 9/21/50","Volume surge","Breakout"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+10 strategies klasik. ADX≥12, 3 strat min.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5.0/15 + ADX≥12 + SuperTrend bonus. Espesyal Deriv Synthetic.",tags:["score 5/15","ADX≥12","ST bonus"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0. Siyal klè BUY/SELL. Conf 75-92%.",tags:["ATR×3","conf 75-92%"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif. Filtre bwi. Bon pou trend. Conf 72-83%.",tags:["5 bouji","conf 72-83%"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"HH - ATR×3 (long). LL + ATR×3 (short). Conf 75-90%.",tags:["HH-ATR×3","conf 75-90%"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend. Conf 68-92%.",tags:["8 faktè","conf 68-92%"]},
+  smc:{l:"🏛 SMC",d:"Smart Money: BOS + swing high/low + EMA50. Conf 84%.",tags:["BOS","swing","EMA50"]},
+  scalping_pro:{l:"⚡ Scalping Pro",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9"]},
+  rsi:{l:"📉 RSI Classic",d:"RSI<30 OB, RSI>70 OS + EMA50 filter.",tags:["RSI 14","OB/OS"]},
+  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD. EMA20/50/200+RSI+MACD+BB+Stoch+Volume.",tags:["EMA 20/50/200","Volume"]},
+  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance. EMA 9/21/50+Trend+Volume+RSI+MACD+Breakout.",tags:["EMA 9/21/50","Volume surge"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
@@ -3072,33 +3010,19 @@ Object.keys(SI).forEach(k=>{
   const b=document.createElement("button");
   b.className="btn"+(k===sel?" b":"");b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
   b.textContent=SI[k].l;
-  b.onclick=()=>{
-    sel=k;renderS();
-    sb.querySelectorAll("button").forEach(x=>{x.className="btn";});
-    b.className="btn b";
-  };
+  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.className="btn");b.className="btn b";};
   sb.appendChild(b);
 });
 function renderS(){
   const s=SI[sel];
-  document.getElementById("sdet").innerHTML=`
-    <div class="bt">${s.l}</div>
-    <div style="color:#C8E8F0;line-height:1.8;margin-bottom:12px">${s.d}</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      ${s.tags.map(t=>`<span class="tag" style="border-color:#FFD60044;color:#FFD600">${t}</span>`).join("")}
-    </div>`;
+  document.getElementById("sdet").innerHTML=`<div class="bt">${s.l}</div><div style="color:#C8E8F0;line-height:1.8;margin-bottom:12px">${s.d}</div><div style="display:flex;gap:8px;flex-wrap:wrap">${s.tags.map(t=>`<span class="tag" style="border-color:#FFD60044;color:#FFD600">${t}</span>`).join("")}</div>`;
 }
 renderS();
 
-// ═══════════════════════════════════════
-// STATUS POLLING
-// ═══════════════════════════════════════
 function upd(d){
-  const col=d.pnl>=0?"#00FF88":"#FF3B6B";
-  const sign=d.pnl>=0?"+":"";
+  const col=d.pnl>=0?"#00FF88":"#FF3B6B"; const sign=d.pnl>=0?"+":"";
   const brokerLabel={"deriv":"DERIV","binance":"BINANCE","binance_us":"BINANCE US"}[d.broker]||(d.broker?d.broker.toUpperCase():"DISCONNECTED");
   const authLabel=d.auth_type?`[${d.auth_type.toUpperCase()}]`:"";
-
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("hbal").style.color=d.connected?"#00D4FF":"#3A6070";
   document.getElementById("hb").textContent=brokerLabel+(authLabel?" "+authLabel:"");
@@ -3106,8 +3030,6 @@ function upd(d){
   document.getElementById("dot").className="dot "+(d.running?"dl":"di");
   document.getElementById("hs").textContent=d.running?"LIVE":"IDLE";
   document.getElementById("hs").style.color=d.running?"#00FF88":"#3A6070";
-
-  // Stats
   document.getElementById("s-bal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("s-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
   document.getElementById("s-pnl").style.color=col;
@@ -3121,91 +3043,81 @@ function upd(d){
   document.getElementById("s-sym").textContent=d.config.symbol||"—";
   document.getElementById("s-auth").textContent=(d.auth_type||"—").toUpperCase();
   document.getElementById("s-auth").style.color=d.auth_type==="pat"?"#00D4FF":(d.auth_type==="oauth2"?"#A855F7":"#3A6070");
-
-  // Control page
   document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"IDLE";
   document.getElementById("c-st2").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("c-bal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("c-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
   document.getElementById("c-pnl").style.color=col;
   document.getElementById("c-sent").textContent="$"+d.profit_sent.toFixed(4);
-
-  // Kont info
   if(d.connected&&(d.account_id||d.auth_type)){
     const ai=document.getElementById("c-acct-info");
-    if(ai){
-      ai.style.display="block";
-      document.getElementById("c-auth-type").textContent=(d.auth_type||"—").toUpperCase();
-      document.getElementById("c-acct-id").textContent=d.account_id||"—";
-      document.getElementById("c-currency").textContent=d.currency||"USD";
-    }
+    if(ai){ai.style.display="block";document.getElementById("c-auth-type").textContent=(d.auth_type||"—").toUpperCase();document.getElementById("c-acct-id").textContent=d.account_id||"—";document.getElementById("c-currency").textContent=d.currency||"USD";}
   }
-
-  // Auth header
   if(d.connected&&d.account_id){
     const ha=document.getElementById("h-auth");
     if(ha){ha.style.display="inline";ha.textContent=`[${(d.auth_type||"—").toUpperCase()} | ${d.account_id} | ${d.currency||"USD"}]`;}
   }
-
-  // OAuth2 card
   if(d.oauth_ready&&d.account_id){
     document.getElementById("oa-acct").textContent=d.account_id;
     document.getElementById("oa-bal").textContent=`$${d.balance.toFixed(2)} ${d.currency||"USD"}`;
     document.getElementById("oauth-ready-card").style.display="block";
   }
-
-  // Bot buttons
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
-
-  // Chart
+  // Update profit account display
+  if(d.profit_account_id){
+    const pa=document.getElementById("current-profit-acct");
+    if(pa)pa.textContent=d.profit_account_id;
+  }
   if(d.trades.length>1){
-    let cum=0;
-    const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});
+    let cum=0;const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});
     const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;
     const ns=tmp.firstChild;const svg=document.getElementById("chart");
     while(svg.firstChild)svg.removeChild(svg.firstChild);
     while(ns&&ns.firstChild)svg.appendChild(ns.firstChild);
   }
-
-  // Trades table
   if(d.trades.length){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
     document.getElementById("trtbl").innerHTML=`<table>
       <tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>
       ${d.trades.map(t=>`<tr>
-        <td style="color:#4A7080">${t.id}</td>
-        <td style="color:#4A7080">${t.time}</td>
+        <td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td>
         <td style="font-weight:700">${t.symbol}</td>
         <td><span class="tag ${t.side==="BUY"||t.side.includes("OVER")||t.side==="EVEN"?"tb":"ts"}">${t.side}</span></td>
-        <td>${t.entry}</td>
-        <td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td>
-        <td style="color:#FFD600">$${t.stake||"—"}</td>
-        <td style="color:#FFD600">${t.conf}</td>
+        <td>${t.entry}</td><td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td>
+        <td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td>
         <td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td>
         <td><span class="tag ${t.status==="won"?"tb":"ts"}">${t.status||"—"}</span></td>
-      </tr>`).join("")}
-    </table>`;
+      </tr>`).join("")}</table>`;
   }
-
-  // Logs
   if(d.log.length){
-    document.getElementById("logs").innerHTML=d.log.map(l=>`
-      <div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("");
+    document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("");
   }
 }
-
 async function poll(){
   try{const r=await fetch("/api/status");const d=await r.json();upd(d);}catch(e){}
   setTimeout(poll,3000);
 }
 
-// ═══════════════════════════════════════
 // ADMIN
-// ═══════════════════════════════════════
+async function admSetProfitAccount(){
+  const token=getToken();
+  const id=document.getElementById("new-profit-acct").value.trim().toUpperCase();
+  if(!id){document.getElementById("profit-acct-msg").innerHTML='<div class="al er">Mete ID kont lan</div>';return;}
+  const r=await fetch("/api/set_profit_account",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,account_id:id})});
+  const d=await r.json();
+  document.getElementById("profit-acct-msg").innerHTML=`<div class="al ${d.ok?"ok":"er"}">${d.ok?d.msg:d.error}</div>`;
+  if(d.ok){document.getElementById("current-profit-acct").textContent=id;document.getElementById("new-profit-acct").value="";}
+}
+
 async function admRefresh(){
-  const token=getToken();if(!token){alert("Pa konekte!");return;}
-  // Codes
+  const token=getToken();if(!token){return;}
+  // Load profit account
+  try{
+    const rp=await fetch("/api/get_profit_account",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
+    const dp=await rp.json();
+    if(dp.ok){const pa=document.getElementById("current-profit-acct");if(pa)pa.textContent=dp.account_id||"—";}
+  }catch(e){}
   try{
     const r=await fetch("/api/admin/codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
     const d=await r.json();
@@ -3223,15 +3135,12 @@ async function admRefresh(){
           <td style="color:#4A7080">${c.remaining}</td>
           <td>${c.is_adm?"👑 Admin":"👤 User"}</td>
           <td style="display:flex;gap:4px">
-            ${c.status!=="ADM"?`<button onclick="admReset('${c.code}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">↺ Reset</button>`:""}
-            ${c.code!=="BONHEURWIIN"?`<button onclick="admRevoke('${c.code}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕ Revoke</button>`:""}
+            ${c.status!=="ADM"?`<button onclick="admReset('${c.code}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">↺</button>`:""}
+            ${c.code!=="BONHEURWIIN"?`<button onclick="admRevoke('${c.code}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕</button>`:""}
           </td>
-        </tr>`).join("")}
-      </table>`;
+        </tr>`).join("")}</table>`;
     }
-  }catch(e){console.error(e);}
-
-  // Users
+  }catch(e){}
   try{
     const r2=await fetch("/api/admin/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
     const d2=await r2.json();
@@ -3239,28 +3148,22 @@ async function admRefresh(){
       document.getElementById("adm-users-count").textContent=d2.total;
       document.getElementById("adm-users-list").innerHTML=d2.total===0?
         '<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>':
-        `<table>
-          <tr><th>UID</th><th>AUTH</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>
-          ${d2.users.map(u=>`<tr>
-            <td style="color:#4A7080;font-size:10px">${u.uid}</td>
-            <td style="color:#00D4FF;font-size:10px">${u.auth_type||"—"}</td>
-            <td>${u.broker||"—"}</td>
-            <td style="font-weight:700">${u.symbol||"—"}</td>
-            <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
-            <td style="color:#00D4FF">$${u.balance}</td>
-            <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
-            <td>${u.trades}</td>
-            <td style="display:flex;gap:4px;align-items:center">
-              ${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■ Stop</button>`:""}
-              <button onclick="admClearTrades('${u.uid}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑 Trades</button>
-              <button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑 Tout</button>
-            </td>
-          </tr>`).join("")}
-        </table>`;
+        `<table><tr><th>UID</th><th>AUTH</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>AKSYON</th></tr>
+        ${d2.users.map(u=>`<tr>
+          <td style="color:#4A7080;font-size:10px">${u.uid}</td>
+          <td style="color:#00D4FF;font-size:10px">${u.auth_type||"—"}</td>
+          <td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td>
+          <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
+          <td style="color:#00D4FF">$${u.balance}</td>
+          <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
+          <td style="display:flex;gap:4px">
+            ${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
+            <button onclick="admClearTrades('${u.uid}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑T</button>
+            <button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑A</button>
+          </td>
+        </tr>`).join("")}</table>`;
     }
   }catch(e){}
-
-  // Sessions
   try{
     const r3=await fetch("/api/admin/sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
     const d3=await r3.json();
@@ -3275,7 +3178,6 @@ async function admRefresh(){
     }
   }catch(e){}
 }
-
 async function admAddCode(){
   const token=getToken();
   const code=document.getElementById("new-code").value.trim().toUpperCase();
@@ -3291,8 +3193,7 @@ async function admReset(code){const token=getToken();const r=await fetch("/api/a
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admCleanSessions(){const token=getToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admClearUser(uid){if(!confirm(`Efase TOUT istorik ${uid}?`))return;const token=getToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-async function admClearTrades(uid){if(!confirm(`Efase trades sèlman pou ${uid}?`))return;const token=getToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-
+async function admClearTrades(uid){if(!confirm(`Efase trades ${uid}?`))return;const token=getToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 function genCode(len){
   const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";
   for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}
@@ -3306,9 +3207,6 @@ function admCopyGen(){
   admAddCode();
 }
 
-// ═══════════════════════════════════════
-// INIT
-// ═══════════════════════════════════════
 checkLogin();
 </script>
 </body>
@@ -3318,7 +3216,6 @@ checkLogin();
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"BonheurBot ELITE v6 starting on port {port}")
-    logger.info(f"Deriv Client ID: {DERIV_CLIENT_ID}")
-    logger.info(f"Redirect URI: {DERIV_REDIRECT_URI}")
-    logger.info(f"WS App IDs: {DERIV_WS_APP_IDS}")
+    logger.info(f"PROFIT_ACCOUNT_ID: {PROFIT_ACCOUNT_ID}")
+    logger.info(f"Deriv WS App IDs: {DERIV_WS_APP_IDS}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

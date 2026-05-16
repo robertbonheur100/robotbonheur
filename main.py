@@ -21,14 +21,14 @@ PROFIT_PCT    = 0.05
 # ═══════════════════════════════════════════════════════════
 # DERIV CONFIG
 # ═══════════════════════════════════════════════════════════
-DERIV_APP_ID       = "36544"         # App ID pou WS connexion
+DERIV_APP_ID       = "1089"         # App ID default pou WS connexion
 DERIV_CLIENT_ID    = "33h9RL9bbCjURr4MO3PQ0"   # OAuth2 client_id
 DERIV_REDIRECT_URI = "https://robotbonheur.onrender.com/callback"
-# Deriv OAuth2 URL — retounen ?acct1=...&token1=... (pa PKCE code)
 DERIV_AUTH_URL     = "https://oauth.deriv.com/oauth2/authorize"
 
-# WS App IDs pou eseye
-DERIV_WS_APP_IDS = ["36544", "1089", "16929"]
+# WS App IDs pou eseye — yo eseye tout pou jwenn youn ki mache ak kont lan
+# Deriv sijere itilize prop app_id ou kreye sou developer hub
+DERIV_WS_APP_IDS = ["36544", "1089", "16929", "62275", "8"]
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
@@ -146,11 +146,11 @@ def get_state():
 # Deriv REST v1 pa ofisyèlman disponib — WS sèlman.
 # ═══════════════════════════════════════════════════════════
 
-def pat_verify_via_websocket(pat_token):
+def pat_verify_via_websocket(pat_token, custom_app_ids=None):
     """
     Verifye yon PAT token via WebSocket authorize.
-    PAT token se yon token long ki kòmanse ak pat_ 
-    men li fonksyone menm jan ak yon token nòmal nan WS API.
+    PAT token (pat_xxx) fonksyone menm jan ak token nòmal nan WS API.
+    Accepte nenpot format — pa gen restriksyon sou longè.
     Retounen (ok, info_dict oswa error_str)
     """
     try:
@@ -158,12 +158,28 @@ def pat_verify_via_websocket(pat_token):
     except ImportError:
         return False, "websocket-client library pa enstale — pip install websocket-client"
 
-    for app_id in DERIV_WS_APP_IDS:
+    # Si user bay yon app_id espesifik, eseye li an premye
+    app_ids_to_try = []
+    if custom_app_ids:
+        if isinstance(custom_app_ids, str):
+            app_ids_to_try = [custom_app_ids] + [x for x in DERIV_WS_APP_IDS if x != custom_app_ids]
+        else:
+            app_ids_to_try = list(custom_app_ids) + [x for x in DERIV_WS_APP_IDS if x not in custom_app_ids]
+    else:
+        app_ids_to_try = DERIV_WS_APP_IDS[:]
+
+    last_error = "Koneksyon echwe"
+
+    for app_id in app_ids_to_try:
         done   = threading.Event()
         result = [None]
 
-        def on_open(ws):
-            ws.send(json.dumps({"authorize": pat_token}))
+        def on_open(ws, _tok=pat_token):
+            try:
+                ws.send(json.dumps({"authorize": _tok}))
+            except Exception as e:
+                result[0] = {"ok": False, "error": str(e)}
+                done.set()
 
         def on_msg(ws, msg):
             try:
@@ -171,19 +187,21 @@ def pat_verify_via_websocket(pat_token):
                 if d.get("msg_type") == "authorize":
                     if "error" in d:
                         result[0] = {
-                            "ok": False,
-                            "error": d["error"].get("message", "Token invalib")
+                            "ok":    False,
+                            "error": d["error"].get("message", "Token invalib"),
+                            "code":  d["error"].get("code", ""),
                         }
                     else:
                         auth = d["authorize"]
                         result[0] = {
-                            "ok":         True,
-                            "account_id": auth.get("loginid", ""),
-                            "balance":    float(auth.get("balance", 0)),
-                            "currency":   auth.get("currency", "USD"),
-                            "email":      auth.get("email", ""),
-                            "fullname":   auth.get("fullname", ""),
+                            "ok":          True,
+                            "account_id":  auth.get("loginid", ""),
+                            "balance":     float(auth.get("balance", 0)),
+                            "currency":    auth.get("currency", "USD"),
+                            "email":       auth.get("email", ""),
+                            "fullname":    auth.get("fullname", ""),
                             "all_accounts": auth.get("account_list", []),
+                            "app_id":      app_id,
                         }
                     done.set()
             except Exception as e:
@@ -195,22 +213,23 @@ def pat_verify_via_websocket(pat_token):
             done.set()
 
         def on_close(ws, *a):
-            done.set()
+            if not done.is_set():
+                done.set()
 
         url = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
         try:
-            ws = ws_lib.WebSocketApp(
+            wsa = ws_lib.WebSocketApp(
                 url,
                 on_open=on_open,
                 on_message=on_msg,
                 on_error=on_error,
                 on_close=on_close,
             )
-            t = threading.Thread(target=ws.run_forever, daemon=True)
+            t = threading.Thread(target=wsa.run_forever, daemon=True)
             t.start()
-            done.wait(timeout=15)
+            done.wait(timeout=18)
             try:
-                ws.close()
+                wsa.close()
             except:
                 pass
 
@@ -219,15 +238,27 @@ def pat_verify_via_websocket(pat_token):
                 logger.info(f"PAT WS verify OK | app_id={app_id} | acct={r.get('account_id')} | bal={r.get('balance')}")
                 return True, r
             elif r:
-                logger.info(f"PAT WS app_id={app_id} echwe: {r.get('error')}")
+                err_code = r.get("code","")
+                last_error = r.get("error","Erè enkoni")
+                logger.info(f"PAT WS app_id={app_id} echwe: code={err_code} | {last_error}")
+                # Si InvalidToken, pa bezwen eseye lòt app_id yo — menm rezilta
+                if err_code in ("InvalidToken", "AuthorizationRequired"):
+                    break
+            else:
+                logger.info(f"PAT WS app_id={app_id} timeout — pa gen repons")
+                last_error = f"Timeout (app_id={app_id})"
         except Exception as ex:
             logger.info(f"PAT WS app_id={app_id} exception: {ex}")
+            last_error = str(ex)
 
     return False, (
-        "Token PAT invalib oswa rejte pa Deriv.\n"
-        "• Asire token ou a kòmanse ak pat_\n"
-        "• Kreye yon nouvo token: app.deriv.com → Réglages → API Token\n"
-        "• Pèmisyon rekèri: Read, Trade, Payments"
+        f"Token PAT invalib oswa rejet pa Deriv ({last_error}).\n\n"
+        "SOLISYON POSIB:\n"
+        "1. Asire token ou a kòmanse ak pat_ epi li kopi kole kòrèkteman\n"
+        "2. Token gen pèmisyon: Trade (ak Account Management oswa Payments)\n"
+        "3. Ale sou app.deriv.com → Réglages → API Token → kreye nouvo token\n"
+        "4. Si ou gen yon App ID espesifik Deriv, mete li nan chan App ID a\n"
+        "5. Eseye OAuth2 Deriv pito (bouton OAUTH2 DERIV anlè)"
     )
 
 
@@ -1737,25 +1768,38 @@ def api_oauth_url():
 def api_pat_verify():
     """
     Verifye yon PAT token via WebSocket Deriv.
-    Retounen account info san modifye eta koneksyon.
+    Accepte nenpot token — pa gen restriksyon sou fòma.
+    Si user bay yon app_id espesifik, itilize li an premye.
     """
     d = request.json or {}
     pat = d.get("pat_token", "").strip()
-    if not pat:
-        return jsonify({"ok": False, "error": "Mete token PAT ou a (pat_...)"})
-    if not pat.startswith("pat_"):
-        return jsonify({"ok": False, "error": "Token PAT dwe kòmanse avèk 'pat_' — egzanp: pat_abc123..."})
+    custom_app_id = d.get("app_id", "").strip()
 
-    ok, info = pat_verify_via_websocket(pat)
+    if not pat:
+        return jsonify({"ok": False, "error": "Mete token PAT ou a"})
+
+    # Avètisman si li pa kòmanse ak pat_ men eseye kanmèm
+    warn = ""
+    if not pat.startswith("pat_"):
+        warn = "⚠ Nòmalman token PAT kòmanse ak pat_ — n ap eseye kanmèm..."
+        logger.info(f"PAT verify: token pa kòmanse ak pat_ — eseye kanmèm: {pat[:20]}...")
+
+    custom_ids = [custom_app_id] if custom_app_id else None
+    ok, info = pat_verify_via_websocket(pat, custom_app_ids=custom_ids)
+
     if ok:
-        return jsonify({
-            "ok":        True,
+        resp = {
+            "ok":         True,
             "account_id": info.get("account_id", ""),
-            "balance":   info.get("balance", 0.0),
-            "currency":  info.get("currency", "USD"),
-            "email":     info.get("email", ""),
-            "fullname":  info.get("fullname", ""),
-        })
+            "balance":    info.get("balance", 0.0),
+            "currency":   info.get("currency", "USD"),
+            "email":      info.get("email", ""),
+            "fullname":   info.get("fullname", ""),
+            "app_id_used": info.get("app_id", ""),
+        }
+        if warn:
+            resp["warning"] = warn
+        return jsonify(resp)
     return jsonify({"ok": False, "error": str(info)})
 
 

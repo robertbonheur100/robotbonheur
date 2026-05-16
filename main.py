@@ -123,69 +123,37 @@ def get_state():
     return _user_states[uid]
 
 # ═══════════════════════════════════════════════════════════
-# ██  NOUVO: DERIV OTP / pat_ TOKEN HELPER  ██
-# Sipòte de metòd:
-#   1. Token klasik — dirèkteman via WebSocket
-#   2. Token pat_ — via REST API OTP flow pou jwenn session token
+# ██  DERIV TOKEN HANDLER — KLASIK + PAT_  ██
+#
+# KLASIK TOKEN: alphanumerik, pa kòmanse ak pat_
+#   → Authorize dirèkteman via WebSocket: {"authorize": token}
+#
+# PAT TOKEN: kòmanse ak pat_
+#   → Itilize kòm Bearer header pou REST API Deriv
+#   → REST retounen yon session token pou WebSocket
 # ═══════════════════════════════════════════════════════════
 
-# App ID pa defaut pou pat_ / OTP (nouvo sistèm Deriv)
-PAT_APP_ID = "33h9RL9bbCjURr4MO3PQ0"
+DERIV_WS_APP_IDS = ["36544", "16929", "1089"]
 
-def resolve_pat_token_rest(pat_token, timeout=20):
+# ── Verifye si token se PAT ──
+def is_pat_token(token):
+    return token.strip().lower().startswith("pat_")
+
+# ── Koneksyon KLASIK via WebSocket ──
+def connect_classic_token(token, app_id="1089", timeout=15):
     """
-    Nouvo sistèm Deriv OTP:
-    Itilize REST API pou echange pat_ token → one-time token → konekte WebSocket.
-    Retounen: (ok, otp_or_error, account_id, balance)
-    """
-    import urllib.request
-    import urllib.error
-
-    # Etap 1: Rele REST API pou jwenn OTP
-    rest_url = "https://oauth.deriv.com/oauth2/token"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {pat_token}",
-    }
-    body = json.dumps({"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                       "subject_token": pat_token,
-                       "subject_token_type": "urn:ietf:params:oauth:token-type:access_token"}).encode()
-
-    try:
-        req = urllib.request.Request(rest_url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
-            otp = data.get("access_token") or data.get("token")
-            if otp:
-                logger.info("OTP jwenn via REST API")
-                return True, otp, None, 0.0
-            return False, f"REST pa bay token: {data}", None, 0.0
-    except urllib.error.HTTPError as e:
-        body_err = e.read().decode() if e.fp else ""
-        logger.info(f"REST OTP HTTP {e.code}: {body_err}")
-    except Exception as e:
-        logger.info(f"REST OTP echwe: {e}")
-
-    # Etap 2: Eseye via WebSocket dirèkteman ak pat_ token + nouvo app_id
-    return _try_pat_websocket(pat_token, timeout)
-
-
-def _try_pat_websocket(pat_token, timeout=20):
-    """
-    Eseye konekte pat_ token dirèkteman sou WebSocket Deriv
-    avèk plizyè app_id (PAT_APP_ID an premye).
-    Retounen: (ok, token_or_error, account_id, balance)
+    Konekte token klasik Deriv via WebSocket authorize.
+    Retounen: (ok, balance_or_error, loginid)
     """
     import websocket
+    app_ids_to_try = [app_id] + [aid for aid in DERIV_WS_APP_IDS if aid != app_id]
 
-    APP_IDS = [PAT_APP_ID, "36544", "16929", "1089"]
-
-    for aid in APP_IDS:
+    for aid in app_ids_to_try:
         done   = threading.Event()
-        result = [None, None, None, 0.0]  # [ok, token, account_id, balance]
+        result = [None, None, None]  # [ok, val, loginid]
 
         def on_open(ws):
-            ws.send(json.dumps({"authorize": pat_token}))
+            ws.send(json.dumps({"authorize": token}))
 
         def on_msg(ws, msg):
             d = json.loads(msg)
@@ -194,11 +162,9 @@ def _try_pat_websocket(pat_token, timeout=20):
                     result[0] = False
                     result[1] = d["error"].get("message", "Token invalib")
                 else:
-                    auth = d["authorize"]
                     result[0] = True
-                    result[1] = auth.get("token", pat_token)
-                    result[2] = auth.get("loginid")
-                    result[3] = float(auth.get("balance", 0))
+                    result[1] = float(d["authorize"].get("balance", 0))
+                    result[2] = d["authorize"].get("loginid")
                 done.set()
             elif "error" in d:
                 result[0] = False
@@ -222,56 +188,143 @@ def _try_pat_websocket(pat_token, timeout=20):
             except: pass
 
             if result[0] is True:
-                logger.info(f"pat_ token aksepte avèk app_id={aid}")
-                return True, result[1], result[2], result[3]
-            else:
-                logger.info(f"pat_ echwe app_id={aid}: {result[1]}")
+                logger.info(f"Token klasik konekte | app_id={aid} | loginid={result[2]}")
+                return True, result[1], result[2], aid
+            logger.info(f"Token klasik echwe app_id={aid}: {result[1]}")
         except Exception as e:
-            logger.info(f"pat_ erè app_id={aid}: {e}")
+            logger.info(f"Token klasik erè app_id={aid}: {e}")
 
-    return False, (
-        "Token pat_ pa aksepte.\n"
-        "SOLISYON: Kreye yon token API KLASIK nan:\n"
-        "app.deriv.com → foto ou → API Token → Create"
-    ), None, 0.0
+    return False, "Token invalib oswa ekspire. Verifye nan app.deriv.com → API Token.", None, app_id
 
-
-def test_deriv_token_ws(token, app_id="1089", timeout=15):
+# ── Koneksyon PAT via REST Bearer ──
+def connect_pat_token(pat_token, timeout=20):
     """
-    Teste token klasik nan WebSocket Deriv.
-    Retounen: (ok, balance_or_error)
+    PAT token flow:
+    1. Voye Bearer request nan Deriv REST API
+    2. Jwenn session token (oswa itilize PAT dirèkteman pou WebSocket apre)
+    3. Retounen: (ok, ws_token, loginid, balance, used_app_id)
+
+    Deriv PAT API doc: itilize Authorization: Bearer pat_xxx
+    Endpoint: https://api.deriv.com/v1/account (oswa verify via WS ak Bearer)
+    """
+    import urllib.request
+    import urllib.error
+
+    # Etap 1: Eseye REST API Deriv pou verifye PAT + jwenn account info
+    rest_endpoints = [
+        "https://api.deriv.com/v1/account",
+        "https://api.deriv.com/v1/authorize",
+    ]
+
+    for endpoint in rest_endpoints:
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {pat_token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                method="GET"
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+                logger.info(f"PAT REST response from {endpoint}: {list(data.keys())}")
+                # Jwenn balance ak loginid si disponib
+                balance = float(data.get("balance", data.get("account", {}).get("balance", 0)))
+                loginid = data.get("loginid", data.get("account", {}).get("loginid"))
+                logger.info(f"PAT REST ok | loginid={loginid} | balance={balance}")
+                # Pou WebSocket, itilize PAT kòm authorize dirèkteman (Deriv aksepte sa)
+                ok, ws_balance, ws_loginid, used_app_id = _pat_websocket_connect(pat_token, timeout)
+                if ok:
+                    return True, pat_token, ws_loginid or loginid, ws_balance or balance, used_app_id
+                return True, pat_token, loginid, balance, DERIV_WS_APP_IDS[0]
+        except urllib.error.HTTPError as e:
+            body = ""
+            try: body = e.read().decode()
+            except: pass
+            logger.info(f"PAT REST {endpoint} HTTP {e.code}: {body[:200]}")
+            if e.code == 401:
+                return False, f"Token pat_ rejte (401 Unauthorized). Verifye permisyon: Trade + Account management + Application insights.", None, 0.0, None
+        except Exception as e:
+            logger.info(f"PAT REST {endpoint} erè: {e}")
+
+    # Etap 2: Si REST pa mache, eseye WebSocket dirèkteman ak PAT
+    logger.info("PAT REST echwe — ap eseye WebSocket dirèkteman...")
+    ok, balance, loginid, used_app_id = _pat_websocket_connect(pat_token, timeout)
+    if ok:
+        return True, pat_token, loginid, balance, used_app_id
+
+    # Etap 3: Echèk total
+    return False, (
+        "Token pat_ pa aksepte.\n\n"
+        "VERIFYE:\n"
+        "1. Token gen permisyon: Trade + Account management + Application insights\n"
+        "2. Token pa ekspire\n"
+        "3. Ou ka eseye token Klasik pito:\n"
+        "   app.deriv.com → foto ou → API Token → Create\n"
+        "   (Permisyon: Read + Trade + Payments)"
+    ), None, 0.0, None
+
+
+def _pat_websocket_connect(pat_token, timeout=20):
+    """
+    Eseye konekte PAT token via WebSocket Deriv.
+    Kèk app_id aksepte PAT kòm authorize dirèkteman.
+    Retounen: (ok, balance, loginid, used_app_id)
     """
     import websocket
-    done  = threading.Event()
-    result = [None, None]
 
-    def on_open(ws):
-        ws.send(json.dumps({"authorize": token}))
+    # App IDs ki konn aksepte PAT pou authorize
+    pat_app_ids = ["36544", "16929", "1089"]
 
-    def on_msg(ws, msg):
-        d = json.loads(msg)
-        if d.get("msg_type") == "authorize":
-            if "error" in d:
+    for aid in pat_app_ids:
+        done   = threading.Event()
+        result = [None, None, None]  # [ok, val_or_err, loginid]
+
+        def on_open(ws):
+            ws.send(json.dumps({"authorize": pat_token}))
+
+        def on_msg(ws, msg):
+            d = json.loads(msg)
+            if d.get("msg_type") == "authorize":
+                if "error" in d:
+                    result[0] = False
+                    result[1] = d["error"].get("message", "Token invalib")
+                else:
+                    result[0] = True
+                    result[1] = float(d["authorize"].get("balance", 0))
+                    result[2] = d["authorize"].get("loginid")
+                done.set()
+            elif "error" in d:
                 result[0] = False
-                result[1] = d["error"].get("message", "Token invalib")
-            else:
-                result[0] = True
-                result[1] = float(d["authorize"].get("balance", 0))
+                result[1] = d["error"].get("message", "Erè enkoni")
+                done.set()
+
+        def on_err(ws, e):
+            result[0] = False
+            result[1] = str(e)
             done.set()
 
-    def on_err(ws, e):
-        result[0] = False
-        result[1] = str(e)
-        done.set()
+        url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
+        try:
+            ws = websocket.WebSocketApp(
+                url, on_open=on_open, on_message=on_msg, on_error=on_err
+            )
+            th = threading.Thread(target=ws.run_forever, daemon=True)
+            th.start()
+            done.wait(timeout=timeout)
+            try: ws.close()
+            except: pass
 
-    url = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
-    ws = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
-    threading.Thread(target=ws.run_forever, daemon=True).start()
-    done.wait(timeout=timeout)
+            if result[0] is True:
+                logger.info(f"PAT WebSocket aksepte | app_id={aid} | loginid={result[2]}")
+                return True, result[1], result[2], aid
+            logger.info(f"PAT WS echwe app_id={aid}: {result[1]}")
+        except Exception as e:
+            logger.info(f"PAT WS erè app_id={aid}: {e}")
 
-    if result[0] is None:
-        return False, "Timeout — pa jwenn repons Deriv"
-    return result[0], result[1]
+    return False, 0.0, None, None
 
 # ═══════════════════════════════════════════════════════════
 # INDIKATÈ TEKNIK
@@ -984,7 +1037,7 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# DERIV CLIENT — Sipòte Token Klasik + pat_ OTP
+# DERIV CLIENT — Sipòte Token Klasik + PAT Bearer
 # ═══════════════════════════════════════════════════════════
 class DerivClient:
     def __init__(self, token, app_id="1089"):
@@ -993,48 +1046,30 @@ class DerivClient:
         self._bal   = 0.0
 
     def connect(self):
-        import websocket
-        done = threading.Event()
-        err  = [None]
-
-        def on_open(ws):
-            ws.send(json.dumps({"authorize": self.token}))
-
-        def on_msg(ws, msg):
-            d = json.loads(msg)
-            if d.get("msg_type") == "authorize":
-                if "error" in d:
-                    err[0] = d["error"]["message"]
-                else:
-                    self._bal = float(d["authorize"].get("balance", 0))
-                done.set()
-
-        def on_err(ws, e):
-            err[0] = str(e)
-            done.set()
-
-        # Token klasik: eseye app_id ou a + 1089 kòm backup
-        is_pat = self.token.lower().startswith("pat_")
-        if is_pat:
-            app_ids_to_try = [PAT_APP_ID, "36544", self.app_id, "16929"]
+        """
+        Detekte tip token epi konekte kòrèkteman:
+        - Token klasik → WebSocket authorize dirèkteman
+        - PAT token    → Bearer REST auth, epi WebSocket
+        """
+        if is_pat_token(self.token):
+            ok, ws_token, loginid, balance, used_app_id = connect_pat_token(self.token)
+            if not ok:
+                raise Exception(ws_token)  # ws_token = mesaj erè si pa ok
+            self._bal = balance
+            if used_app_id:
+                self.app_id = used_app_id
+            return self._bal
         else:
-            app_ids_to_try = [self.app_id, "1089"]
+            ok, balance, loginid, used_app_id = connect_classic_token(self.token, self.app_id)
+            if not ok:
+                raise Exception(balance)  # balance = mesaj erè si pa ok
+            self._bal = balance
+            self.app_id = used_app_id
+            return self._bal
 
-        for aid in app_ids_to_try:
-            done.clear(); err[0] = None
-            url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
-            ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
-            threading.Thread(target=ws.run_forever, daemon=True).start()
-            done.wait(timeout=15)
-            try: ws.close()
-            except: pass
-            if not err[0]:
-                self.app_id = aid
-                return self._bal
-
-        if err[0]:
-            raise Exception(f"Deriv: {err[0]}")
-        return self._bal
+    def _authorize_ws(self, ws):
+        """Voye authorize message (menm pou klasik ak PAT)"""
+        ws.send(json.dumps({"authorize": self.token}))
 
     def get_candles(self, symbol="R_100", count=200, gran=60):
         import websocket as wsl
@@ -1045,7 +1080,7 @@ class DerivClient:
                 ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","granularity":gran,"style":"candles","adjust_start_time":1}))
             elif "candles" in d: res[0]=d["candles"]; done.set()
             elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1072,7 +1107,7 @@ class DerivClient:
             elif mt=="buy":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d.get("buy",{}); done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1090,7 +1125,7 @@ class DerivClient:
             elif mt=="transfer_between_accounts":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d; done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1109,7 +1144,7 @@ class DerivClient:
                 b=d.get("balance",{}).get("balance")
                 if b is not None: res[0]=float(b); done.set()
             elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1121,7 +1156,7 @@ class DerivClient:
     def balance(self): return self._bal
 
 # ═══════════════════════════════════════════════════════════
-# DERIV DIGITS CLIENT — Sipòte Token Klasik + pat_ OTP
+# DERIV DIGITS CLIENT — Sipòte Token Klasik + PAT Bearer
 # ═══════════════════════════════════════════════════════════
 class DerivDigitsClient:
     def __init__(self, token, app_id="1089"):
@@ -1130,47 +1165,24 @@ class DerivDigitsClient:
         self._bal   = 0.0
 
     def connect(self):
-        import websocket
-        done = threading.Event()
-        err  = [None]
-
-        def on_open(ws):
-            ws.send(json.dumps({"authorize": self.token}))
-
-        def on_msg(ws, msg):
-            d = json.loads(msg)
-            if d.get("msg_type") == "authorize":
-                if "error" in d:
-                    err[0] = d["error"]["message"]
-                else:
-                    self._bal = float(d["authorize"].get("balance", 0))
-                done.set()
-
-        def on_err(ws, e):
-            err[0] = str(e)
-            done.set()
-
-        is_pat = self.token.lower().startswith("pat_")
-        if is_pat:
-            app_ids_to_try = [PAT_APP_ID, "36544", self.app_id, "16929"]
+        if is_pat_token(self.token):
+            ok, ws_token, loginid, balance, used_app_id = connect_pat_token(self.token)
+            if not ok:
+                raise Exception(ws_token)
+            self._bal = balance
+            if used_app_id:
+                self.app_id = used_app_id
+            return self._bal
         else:
-            app_ids_to_try = [self.app_id, "1089"]
+            ok, balance, loginid, used_app_id = connect_classic_token(self.token, self.app_id)
+            if not ok:
+                raise Exception(balance)
+            self._bal = balance
+            self.app_id = used_app_id
+            return self._bal
 
-        for aid in app_ids_to_try:
-            done.clear(); err[0] = None
-            url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
-            ws  = websocket.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_err)
-            threading.Thread(target=ws.run_forever, daemon=True).start()
-            done.wait(timeout=15)
-            try: ws.close()
-            except: pass
-            if not err[0]:
-                self.app_id = aid
-                return self._bal
-
-        if err[0]:
-            raise Exception(f"Deriv: {err[0]}")
-        return self._bal
+    def _authorize_ws(self, ws):
+        ws.send(json.dumps({"authorize": self.token}))
 
     def get_ticks(self, symbol="R_10", count=100):
         import websocket as wsl
@@ -1181,7 +1193,7 @@ class DerivDigitsClient:
                 ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","style":"ticks"}))
             elif d.get("msg_type")=="history": res[0]=d.get("history",{}); done.set()
             elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1206,7 +1218,7 @@ class DerivDigitsClient:
             elif mt=="buy":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d.get("buy",{}); done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1225,7 +1237,7 @@ class DerivDigitsClient:
                 poc=d.get("proposal_open_contract",{})
                 status=poc.get("status","")
                 if status in ("won","lost","sold"): res[0]=poc; done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1243,7 +1255,7 @@ class DerivDigitsClient:
                 b=d.get("balance",{}).get("balance")
                 if b is not None: res[0]=float(b); done.set()
             elif "error" in d: done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1261,7 +1273,7 @@ class DerivDigitsClient:
             elif mt=="transfer_between_accounts":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d; done.set()
-        def on_open(ws): ws.send(json.dumps({"authorize":self.token}))
+        def on_open(ws): self._authorize_ws(ws)
         url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
         w=wsl.WebSocketApp(url,on_message=on_msg,on_open=on_open)
         threading.Thread(target=w.run_forever,daemon=True).start()
@@ -1535,7 +1547,7 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 # ═══════════════════════════════════════════════════════════
-# TRADING LOOPS
+# TRADING LOOPS (menm jan ak orijinal — pa chanje)
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1827,50 +1839,69 @@ def api_connect():
         d=request.json; broker=d.get("broker")
         if broker=="deriv":
             import websocket
-            raw_token=d["token"].strip()
-            app_id=d.get("app_id","1089")
-            is_pat=raw_token.lower().startswith("pat_")
+            raw_token = d["token"].strip()
+            app_id    = d.get("app_id", "1089").strip() or "1089"
 
-            if is_pat:
-                # ── Nouvo OTP flow pou pat_ token ──
-                add_log(st,"🔑 Token pat_ detekte — ap eseye OTP flow...","INFO")
-                ok, final_token, account_id, bal = resolve_pat_token_rest(raw_token, timeout=20)
+            if is_pat_token(raw_token):
+                # ══ PAT Token flow ══
+                add_log(st, "🔑 Token pat_ detekte — Bearer REST auth...", "INFO")
+                ok, ws_token, loginid, bal, used_app_id = connect_pat_token(raw_token, timeout=20)
                 if not ok:
                     return jsonify({
                         "ok": False,
                         "error": (
-                            f"❌ Token pat_ pa mache: {final_token}\n\n"
-                            "💡 SOLISYON: Kreye yon token API KLASIK:\n"
-                            "1. Ale sou app.deriv.com\n"
-                            "2. Klike sou foto ou (anlè adwat) → API Token\n"
-                            "3. Klike 'Create' — bay yon nòm (ex: BonheurBot)\n"
-                            "4. Kopye token an (pa kòmanse ak pat_)\n"
-                            "5. Kole l nan chan token klasik la"
+                            f"❌ {ws_token}\n\n"
+                            "📋 Permisyon obligatwa pou PAT token:\n"
+                            "  ✓ Trade\n"
+                            "  ✓ Account management\n"
+                            "  ✓ Application insights\n\n"
+                            "Kreye PAT: app.deriv.com → foto ou → API Token"
                         )
                     })
-                # Itilize token ki retounen (kapab se pat_ orijinal la oswa OTP)
-                use_token = final_token if final_token else raw_token
-                # Si balans 0, eseye konekte pou jwenn balans reyèl
-                if bal == 0:
-                    try:
-                        api_tmp = DerivClient(use_token, PAT_APP_ID)
-                        bal = api_tmp.connect()
-                    except: pass
-                api = DerivClient(use_token, PAT_APP_ID)
-                api._bal = bal
-                st["deriv_api"] = api
-                st["deriv_digits_api"] = DerivDigitsClient(use_token, PAT_APP_ID)
-                st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
-                note = f"✓ pat_ konekte via OTP | AccID:{account_id}" if account_id else "✓ pat_ konekte!"
-                return jsonify({"ok":True,"balance":bal,"broker":"deriv","note":note})
+                # Kreye client ak token orijinal la (PAT)
+                # Bot la ap itilize PAT dirèkteman kòm authorize nan WS
+                api_main   = DerivClient(raw_token, used_app_id or app_id)
+                api_main._bal = bal
+                api_digits = DerivDigitsClient(raw_token, used_app_id or app_id)
+                api_digits._bal = bal
+                st["deriv_api"]        = api_main
+                st["deriv_digits_api"] = api_digits
+                st["broker"]    = "deriv"
+                st["balance"]   = bal
+                st["connected"] = True
+                note = f"✓ PAT Bearer konekte"
+                if loginid: note += f" | {loginid}"
+                note += f" | ${ bal:.2f}"
+                return jsonify({"ok": True, "balance": bal, "broker": "deriv", "note": note})
+
             else:
-                # ── Token klasik — metòd nòmal ──
-                api=DerivClient(raw_token,app_id)
-                bal=api.connect()
-                st["deriv_api"]=api
-                st["deriv_digits_api"]=DerivDigitsClient(raw_token,app_id)
-                st["broker"]="deriv"; st["balance"]=bal; st["connected"]=True
-                return jsonify({"ok":True,"balance":bal,"broker":"deriv"})
+                # ══ Token Klasik flow ══
+                add_log(st, "🔑 Token klasik — WebSocket authorize...", "INFO")
+                ok, balance, loginid, used_app_id = connect_classic_token(raw_token, app_id)
+                if not ok:
+                    return jsonify({
+                        "ok": False,
+                        "error": (
+                            f"❌ {balance}\n\n"
+                            "📋 Permisyon obligatwa pou Token Klasik:\n"
+                            "  ✓ Read\n"
+                            "  ✓ Trade\n"
+                            "  ✓ Payments\n\n"
+                            "Kreye token: app.deriv.com → foto ou → API Token → Create"
+                        )
+                    })
+                api_main   = DerivClient(raw_token, used_app_id)
+                api_main._bal = balance
+                api_digits = DerivDigitsClient(raw_token, used_app_id)
+                api_digits._bal = balance
+                st["deriv_api"]        = api_main
+                st["deriv_digits_api"] = api_digits
+                st["broker"]    = "deriv"
+                st["balance"]   = balance
+                st["connected"] = True
+                note = f"✓ Token Klasik konekte"
+                if loginid: note += f" | {loginid}"
+                return jsonify({"ok": True, "balance": balance, "broker": "deriv", "note": note})
 
         elif broker=="binance":
             api=BinanceClient(d["api_key"],d["api_secret"])
@@ -2108,7 +2139,7 @@ def admin_clear_trades():
 def index(): return render_template_string(HTML)
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE
+# HTML INTERFACE — v6 ELITE (ranje token flow)
 # ═══════════════════════════════════════════════════════════
 HTML=r"""<!DOCTYPE html>
 <html>
@@ -2235,7 +2266,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="box">
       <div class="bt">KONEKSYON BROKER</div>
       <div class="iw"><div class="il">BROKER</div>
-        <select id="d-br" onchange="tog()">
+        <select id="d-br" onchange="togBroker()">
           <option value="deriv">Deriv (Synthetic/Digits)</option>
           <option value="binance">Binance Global (Crypto/Gold)</option>
           <option value="binance_us">Binance US (Crypto/Gold)</option>
@@ -2244,43 +2275,62 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 
       <!-- ══ DERIV FIELDS ══ -->
       <div id="fd">
+        <!-- Token Type Selector -->
         <div class="iw">
           <div class="il">TIP TOKEN DERIV</div>
           <select id="d-token-type" onchange="togTokenType()">
-            <option value="classic">🔑 Token Klasik (rekòmande)</option>
-            <option value="pat">🆕 Nouvo Token pat_ (OTP/OAuth)</option>
+            <option value="classic">🔑 Token Klasik (Read + Trade + Payments)</option>
+            <option value="pat">🆕 Token PAT pat_ (Trade + Acct Mgmt + App Insights)</option>
           </select>
         </div>
 
-        <!-- Info token klasik -->
-        <div id="d-classic-info" style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#4A7080;line-height:1.7">
-          ✅ <span style="color:#00FF88">Token Klasik</span> — Meyè chwa pou BonheurBot<br>
-          Jwenn li: <span style="color:#C8E8F0">app.deriv.com → foto ou → API Token → Create</span><br>
-          Fòma: alphanumerik ~15 karaktè (pa kòmanse ak pat_)
+        <!-- Info Token Klasik -->
+        <div id="info-classic" style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:8px;font-size:10px;line-height:1.8">
+          <div style="color:#00FF88;font-weight:700;margin-bottom:4px">🔑 TOKEN KLASIK — Comment kreye:</div>
+          <div style="color:#4A7080">
+            1. Ale sou <span style="color:#C8E8F0">app.deriv.com</span><br>
+            2. Klike foto ou (anlè adwat) → <span style="color:#C8E8F0">API Token</span><br>
+            3. Klike <span style="color:#00FF88">Create</span> — bay nòm (ex: BonheurBot)<br>
+            4. Pèmisyon: <span style="color:#FFD600">✓ Read &nbsp;✓ Trade &nbsp;✓ Payments</span><br>
+            5. Kopye token (pa kòmanse ak pat_)
+          </div>
         </div>
 
-        <!-- Info token pat_ -->
-        <div id="d-pat-info" style="display:none;background:#00D4FF10;border:1px solid #00D4FF30;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#4A7080;line-height:1.7">
-          🆕 <span style="color:#00D4FF">Token pat_ (Nouvo OTP Sistèm)</span><br>
-          App ID <span style="color:#00FF88;font-weight:700">33h9RL9bbCjURr4MO3PQ0</span> ap itilize otomatikman.<br>
-          <span style="color:#FFD600">⚠ Si pat_ pa mache: itilize Token Klasik pito.</span>
+        <!-- Info Token PAT -->
+        <div id="info-pat" style="display:none;background:#00D4FF10;border:1px solid #00D4FF30;border-radius:6px;padding:10px;margin-bottom:8px;font-size:10px;line-height:1.8">
+          <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🆕 TOKEN PAT — Comment kreye:</div>
+          <div style="color:#4A7080">
+            1. Ale sou <span style="color:#C8E8F0">app.deriv.com</span><br>
+            2. Klike foto ou → <span style="color:#C8E8F0">API Token</span><br>
+            3. Klike <span style="color:#00D4FF">Create</span> — bay nòm (ex: BonheurPAT)<br>
+            4. Pèmisyon: <span style="color:#FFD600">✓ Trade &nbsp;✓ Account management &nbsp;✓ Application insights</span><br>
+            5. Kopye token (kòmanse ak <span style="color:#00D4FF">pat_</span>)
+          </div>
         </div>
 
-        <div class="iw"><div class="il" id="d-token-label">API TOKEN DERIV (Klasik)</div>
-          <input id="d-tk" type="password" placeholder="Kole token klasik ou a isit">
+        <!-- Token Input -->
+        <div class="iw">
+          <div class="il" id="lbl-token">API TOKEN KLASIK</div>
+          <input id="d-tk" type="password" placeholder="Kole token ou a isit...">
         </div>
 
-        <!-- App ID — kache pou pat_, afiche pou klasik -->
-        <div class="iw" id="d-appid-row">
-          <div class="il">APP ID</div>
-          <input id="d-ai" value="1089">
+        <!-- App ID — afiche pou klasik, kache pou PAT -->
+        <div class="iw" id="row-appid">
+          <div class="il">APP ID (defot: 1089)</div>
+          <input id="d-ai" value="1089" placeholder="1089">
+          <div style="color:#4A7080;font-size:9px;margin-top:3px">Pa chanje sa sof si ou gen pwòp app Deriv</div>
+        </div>
+
+        <!-- PAT App ID info — afiche pou PAT sèlman -->
+        <div id="row-pat-appid" style="display:none;background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600">
+          ⚡ PAT: App ID 36544/16929/1089 ap eseye otomatikman
         </div>
       </div>
 
       <!-- ══ BINANCE FIELDS ══ -->
       <div id="fb" style="display:none">
-        <div class="iw"><div class="il">API KEY</div><input id="b-k" type="password"></div>
-        <div class="iw"><div class="il">API SECRET</div><input id="b-s" type="password"></div>
+        <div class="iw"><div class="il">API KEY</div><input id="b-k" type="password" placeholder="Binance API Key"></div>
+        <div class="iw"><div class="il">API SECRET</div><input id="b-s" type="password" placeholder="Binance API Secret"></div>
         <div id="fb-note" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600">
           🇺🇸 Binance US — Konekte sou api.binance.us
         </div>
@@ -2290,6 +2340,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <button class="btn b fw" onclick="doConn()">⚡ KONEKTE</button>
       <div id="cs" style="margin-top:10px"></div>
     </div>
+
     <div class="box">
       <div class="bt" style="display:flex;justify-content:space-between">
         <span>COURBE P&L</span>
@@ -2305,6 +2356,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
     </div>
   </div>
+
   <div class="box" style="background:#00FF8808;border-color:#00FF8822">
     <div class="bt" style="color:#00FF88">🚀 SISTÈM ELITE v6 — NOUVO INDIKATÈ</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
@@ -2617,9 +2669,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div>
 
 <script>
-const SESSION_KEY="bb_session_v6";
-// App ID pa defot pou pat_ token
-const PAT_APP_ID="33h9RL9bbCjURr4MO3PQ0";
+const SESSION_KEY = "bb_session_v6";
 
 function saveToken(t){try{localStorage.setItem(SESSION_KEY,t);}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t);}catch(e){}try{const exp=new Date();exp.setDate(exp.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${exp.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
@@ -2627,16 +2677,15 @@ function clearToken(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}try{se
 function updateAdminTab(isAdmin){const tab=document.getElementById("tab-admin");if(tab)tab.style.display=isAdmin?"block":"none";}
 
 async function checkLogin(){
-  const token=getStoredToken();
-  if(!token){showLogin("");return;}
+  const token = getStoredToken();
+  if(!token){showLogin(""); return;}
   try{
-    const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_token:token,code:""})});
-    const d=await r.json();
+    const r = await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_token:token,code:""})});
+    const d = await r.json();
     if(d.ok){if(d.session_token)saveToken(d.session_token);updateAdminTab(d.is_admin||false);showApp(d.msg);poll();if(d.is_admin)setTimeout(()=>admRefresh(),500);}
     else{if(d.msg&&d.msg.includes("ekspire"))clearToken();showLogin(d.msg||"");}
   }catch(e){showLogin("");}
 }
-
 function showLogin(err=""){
   document.getElementById("login-page").style.display="flex";
   document.getElementById("app-page").style.display="none";
@@ -2648,7 +2697,6 @@ function showApp(msg){
   document.getElementById("app-page").style.display="block";
   document.getElementById("sub-info").textContent=msg||"";
 }
-
 async function doLogin(){
   const code=document.getElementById("login-code").value.trim().toUpperCase();
   if(!code){document.getElementById("login-err").innerHTML='<div class="al er">⚠ Mete kòd aksè ou</div>';return;}
@@ -2663,46 +2711,63 @@ async function doLogin(){
 }
 function doLogout(){clearToken();showLogin("Ou dekonekte.");}
 
-// ══ Toggle broker fields ══
-function tog(){
+// ══ Toggle broker ══
+function togBroker(){
   const v=document.getElementById("d-br").value;
-  document.getElementById("fd").style.display=v=="deriv"?"block":"none";
-  document.getElementById("fb").style.display=(v=="binance"||v=="binance_us")?"block":"none";
+  document.getElementById("fd").style.display=(v==="deriv")?"block":"none";
+  document.getElementById("fb").style.display=(v==="binance"||v==="binance_us")?"block":"none";
   const note=document.getElementById("fb-note");
-  if(note) note.style.display=v=="binance_us"?"block":"none";
+  if(note) note.style.display=(v==="binance_us")?"block":"none";
 }
 
-// ══ Toggle token type (klasik vs pat_) ══
+// ══ Toggle token type klasik vs PAT ══
 function togTokenType(){
-  const v=document.getElementById("d-token-type").value;
-  const classicInfo=document.getElementById("d-classic-info");
-  const patInfo=document.getElementById("d-pat-info");
-  const lbl=document.getElementById("d-token-label");
-  const inp=document.getElementById("d-tk");
-  const appidRow=document.getElementById("d-appid-row");
+  const v  = document.getElementById("d-token-type").value;
+  const inp = document.getElementById("d-tk");
+  const lbl = document.getElementById("lbl-token");
+  const rowAppid    = document.getElementById("row-appid");
+  const rowPatAppid = document.getElementById("row-pat-appid");
+  const infoClassic = document.getElementById("info-classic");
+  const infoPat     = document.getElementById("info-pat");
 
-  if(v==="pat"){
-    classicInfo.style.display="none";
-    patInfo.style.display="block";
-    lbl.textContent="NOUVO TOKEN pat_ (OAuth/OTP)";
-    inp.placeholder="pat_XXXXXXXXXXXXXXXXXXXXXXXX";
-    // Kache champ App ID — app_id defot ap itilize otomatikman
-    if(appidRow) appidRow.style.display="none";
+  if(v === "pat"){
+    infoClassic.style.display = "none";
+    infoPat.style.display     = "block";
+    rowAppid.style.display    = "none";
+    rowPatAppid.style.display = "block";
+    lbl.textContent = "TOKEN PAT (kòmanse ak pat_)";
+    inp.placeholder = "pat_XXXXXXXXXXXXXXXXXXXXXXXXXX";
+    inp.type = "password";
   } else {
-    classicInfo.style.display="block";
-    patInfo.style.display="none";
-    lbl.textContent="API TOKEN DERIV (Klasik)";
-    inp.placeholder="Kole token klasik ou a isit";
-    if(appidRow) appidRow.style.display="block";
+    infoClassic.style.display = "block";
+    infoPat.style.display     = "none";
+    rowAppid.style.display    = "block";
+    rowPatAppid.style.display = "none";
+    lbl.textContent = "API TOKEN KLASIK";
+    inp.placeholder = "Kole token ou a isit...";
+    inp.type = "password";
+  }
+}
+
+// ══ Auto-detect token type lè user ap tape ══
+function autoDetectToken(){
+  const val = document.getElementById("d-tk").value.trim().toLowerCase();
+  const sel = document.getElementById("d-token-type");
+  if(val.startsWith("pat_") && sel.value !== "pat"){
+    sel.value = "pat";
+    togTokenType();
+  } else if(!val.startsWith("pat_") && val.length > 5 && sel.value !== "classic"){
+    sel.value = "classic";
+    togTokenType();
   }
 }
 
 function toggleMode(){
   const mode=document.getElementById("c-mode").value;
-  document.getElementById("opts-forex").style.display=mode=="forex"?"block":"none";
-  document.getElementById("opts-digits").style.display=mode=="digits"?"block":"none";
-  document.getElementById("opts-gold").style.display=mode=="binance_gold"?"block":"none";
-  document.getElementById("opts-crypto").style.display=mode=="binance_crypto"?"block":"none";
+  document.getElementById("opts-forex").style.display=mode==="forex"?"block":"none";
+  document.getElementById("opts-digits").style.display=mode==="digits"?"block":"none";
+  document.getElementById("opts-gold").style.display=mode==="binance_gold"?"block":"none";
+  document.getElementById("opts-crypto").style.display=mode==="binance_crypto"?"block":"none";
 }
 
 function getStartParams(){
@@ -2710,101 +2775,60 @@ function getStartParams(){
   const conf=parseFloat(document.getElementById("c-conf").value);
   const target=parseFloat(document.getElementById("c-target").value||0);
   const loss=parseFloat(document.getElementById("c-loss").value||0);
-  if(mode=="forex"){
-    return{mode:"forex",symbol:document.getElementById("c-sy-deriv").value,
-      strategy:document.getElementById("c-st-forex").value,
-      lot:parseFloat(document.getElementById("c-lot-forex").value),
-      tf:document.getElementById("c-tf").value,min_conf:conf,profit_target:target,loss_limit:loss};
-  }else if(mode=="digits"){
-    return{mode:"digits",symbol:document.getElementById("c-sy-digits").value,
-      digit_type:document.getElementById("c-digit-type").value,
-      lot:parseFloat(document.getElementById("c-lot-digits").value),
-      tf:"1m",min_conf:conf,profit_target:target,loss_limit:loss,strategy:"digits"};
-  }else if(mode=="binance_gold"){
-    return{mode:"forex",symbol:document.getElementById("c-sy-gold").value,
-      strategy:"binance_gold",lot:parseFloat(document.getElementById("c-lot-gold").value),
-      tf:document.getElementById("c-tf-gold").value,min_conf:conf,profit_target:target,loss_limit:loss};
-  }else{
-    return{mode:"forex",symbol:document.getElementById("c-sy-crypto").value,
-      strategy:"binance_crypto",lot:parseFloat(document.getElementById("c-lot-crypto").value),
-      tf:document.getElementById("c-tf-crypto").value,min_conf:conf,profit_target:target,loss_limit:loss};
-  }
+  if(mode==="forex")     return{mode:"forex",symbol:document.getElementById("c-sy-deriv").value,strategy:document.getElementById("c-st-forex").value,lot:parseFloat(document.getElementById("c-lot-forex").value),tf:document.getElementById("c-tf").value,min_conf:conf,profit_target:target,loss_limit:loss};
+  if(mode==="digits")    return{mode:"digits",symbol:document.getElementById("c-sy-digits").value,digit_type:document.getElementById("c-digit-type").value,lot:parseFloat(document.getElementById("c-lot-digits").value),tf:"1m",min_conf:conf,profit_target:target,loss_limit:loss,strategy:"digits"};
+  if(mode==="binance_gold") return{mode:"forex",symbol:document.getElementById("c-sy-gold").value,strategy:"binance_gold",lot:parseFloat(document.getElementById("c-lot-gold").value),tf:document.getElementById("c-tf-gold").value,min_conf:conf,profit_target:target,loss_limit:loss};
+  return{mode:"forex",symbol:document.getElementById("c-sy-crypto").value,strategy:"binance_crypto",lot:parseFloat(document.getElementById("c-lot-crypto").value),tf:document.getElementById("c-tf-crypto").value,min_conf:conf,profit_target:target,loss_limit:loss};
 }
 
-const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"v6 NOUVO: SuperTrend(pwa 2.5x) + HeikinAshi(pwa 2.5x) + Chandelier(pwa 2.5x) + 10 strategies klasik. ADX≥12, 3 strat minimòm.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
-  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"v6: Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. Plis siyal, menm presizyon.",tags:["score 5/15","ADX≥12","ST bonus","1 bouji EMA"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0 multiplier. Siyal klè BUY/SELL. Pi reliable pou Deriv synthetic.",tags:["ATR×3","bann sup/res","travèse=BUY","conf 75-92%"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid. Filtre bwi mache.",tags:["5 bouji","filtre bwi","bouji grandi","conf 72-83%"]},
-  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short). Chanjman trend detekte.",tags:["HH-ATR×3","LL+ATR×3","chanjman trend","conf 75-90%"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["8 faktè","pwa","score nòm","conf 68-92%"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre.",tags:["BOS","swing","EMA50","conf 84%"]},
-  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
-  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
-  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA+RSI+MACD+BB+Stoch.",tags:["EMA 20/50/200","RSI+Stoch","BB","6+ pts"]},
-  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: Trend+Volume+RSI+MACD+Breakout.",tags:["EMA 9/21/50","Volume","MACD+BB","Breakout"]},
-};
-let sel="confluence";
-const sb=document.getElementById("sbts");
-Object.keys(SI).forEach(k=>{
-  const b=document.createElement("button");
-  b.className="btn"+(k==sel?" b":"");
-  b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
-  b.textContent=SI[k].l;
-  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88";};
-  sb.appendChild(b);
-});
-function renderS(){
-  const s=SI[sel];
-  document.getElementById("sdet").innerHTML=`<div class="bt">${s.l}</div><div style="color:#C8E8F0;line-height:1.8;margin-bottom:12px">${s.d}</div><div style="display:flex;gap:8px;flex-wrap:wrap">${s.tags.map(t=>`<span class="tag" style="border-color:#FFD60044;color:#FFD600">${t}</span>`).join("")}</div>`;
-}
-renderS();
-
-function sw(id,el){
-  document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
-  document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
-  document.getElementById("pg-"+id).classList.add("on");
-  el.classList.add("on");
-}
-function msg(id,txt,ok){document.getElementById(id).innerHTML=`<div class="al ${ok?"ok":"er"}">${txt}</div>`;}
-
+// ══ Main connect function ══
 async function doConn(){
-  const br=document.getElementById("d-br").value;
-  const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
-  const brokerLabel={"deriv":"Deriv","binance":"Binance Global","binance_us":"Binance US"}[br]||br;
+  const br  = document.getElementById("d-br").value;
+  const btn = event.target; btn.textContent="AP KONEKTE..."; btn.disabled=true;
+  const brokerLabel = {"deriv":"Deriv","binance":"Binance Global","binance_us":"Binance US"}[br]||br;
 
-  const body={broker:br};
-  if(br=="deriv"){
-    const tokenType=document.getElementById("d-token-type").value;
-    body.token=document.getElementById("d-tk").value.trim();
-    const isPat=tokenType==="pat"||body.token.toLowerCase().startsWith("pat_");
+  const body = {broker: br};
+
+  if(br === "deriv"){
+    const rawToken = document.getElementById("d-tk").value.trim();
+    if(!rawToken){
+      msg("cm","✗ Kole token ou anvan!",false);
+      btn.textContent="⚡ KONEKTE"; btn.disabled=false; return;
+    }
+    const isPat = rawToken.toLowerCase().startsWith("pat_");
+    body.token  = rawToken;
+    body.app_id = isPat ? "36544" : (document.getElementById("d-ai").value||"1089");
+
     if(isPat){
-      // Pou pat_: itilize PAT_APP_ID otomatikman
-      body.app_id=PAT_APP_ID;
-      msg("cm","⏳ Token pat_ detekte — OTP flow ap kòmanse... (20 sek max)","ok");
+      msg("cm","⏳ Token PAT — Bearer auth + WebSocket... (max 25 sek)","ok");
     } else {
-      body.app_id=document.getElementById("d-ai").value||"1089";
-      msg("cm",`⏳ Ap konekte ${brokerLabel} — tann 15 segonn...`,"ok");
+      msg("cm",`⏳ Token Klasik — WebSocket authorize... (max 15 sek)...`,"ok");
     }
   }
-  if(br=="binance"||br=="binance_us"){
-    body.api_key=document.getElementById("b-k").value;
-    body.api_secret=document.getElementById("b-s").value;
-    msg("cm",`⏳ Ap konekte ${brokerLabel} — tann...`,"ok");
+  if(br==="binance"||br==="binance_us"){
+    body.api_key    = document.getElementById("b-k").value.trim();
+    body.api_secret = document.getElementById("b-s").value.trim();
+    if(!body.api_key||!body.api_secret){
+      msg("cm","✗ Mete API Key ak Secret!",false);
+      btn.textContent="⚡ KONEKTE"; btn.disabled=false; return;
+    }
+    msg("cm",`⏳ Ap konekte ${brokerLabel}...`,"ok");
   }
 
   try{
-    const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    const d=await r.json();
+    const r = await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const d = await r.json();
     if(d.ok){
-      const noteMsg=d.note?` | ${d.note}`:"";
-      msg("cm",`✓ Konekte ${brokerLabel} | $${d.balance.toFixed(2)}${noteMsg}`,"ok");
+      const noteMsg = d.note ? ` | ${d.note}` : "";
+      msg("cm",`✓ ${brokerLabel} konekte | $${d.balance.toFixed(2)}${noteMsg}`,"ok");
       document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${brokerLabel}</b> | $${d.balance.toFixed(2)}${noteMsg}</div>`;
     } else {
-      msg("cm",`✗ Echwe\n${d.error}`,false);
+      msg("cm",`✗ ECHÈK KONEKSYON\n${d.error}`,false);
     }
-  }catch(e){msg("cm","✗ "+e.message,false);}
-  btn.textContent="⚡ KONEKTE";btn.disabled=false;
+  }catch(e){
+    msg("cm","✗ Erè rezo: "+e.message,false);
+  }
+  btn.textContent="⚡ KONEKTE"; btn.disabled=false;
 }
 
 async function doStart(){
@@ -2854,6 +2878,46 @@ function drawC(vals){
   return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${area}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
 }
 
+const SI={
+  confluence:{l:"🔥 Confluence ELITE",d:"v6 NOUVO: SuperTrend(pwa 2.5x) + HeikinAshi(pwa 2.5x) + Chandelier(pwa 2.5x) + 10 strategies klasik. ADX≥12, 3 strat minimòm.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"v6: Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. Plis siyal, menm presizyon.",tags:["score 5/15","ADX≥12","ST bonus","1 bouji EMA"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0 multiplier. Siyal klè BUY/SELL. Pi reliable pou Deriv synthetic.",tags:["ATR×3","bann sup/res","travèse=BUY","conf 75-92%"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid. Filtre bwi mache.",tags:["5 bouji","filtre bwi","bouji grandi","conf 72-83%"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short). Chanjman trend detekte.",tags:["HH-ATR×3","LL+ATR×3","chanjman trend","conf 75-90%"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["8 faktè","pwa","score nòm","conf 68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre.",tags:["BOS","swing","EMA50","conf 84%"]},
+  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
+  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
+  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA+RSI+MACD+BB+Stoch.",tags:["EMA 20/50/200","RSI+Stoch","BB","6+ pts"]},
+  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: Trend+Volume+RSI+MACD+Breakout.",tags:["EMA 9/21/50","Volume","MACD+BB","Breakout"]},
+};
+let sel="confluence";
+const sb=document.getElementById("sbts");
+Object.keys(SI).forEach(k=>{
+  const b=document.createElement("button");
+  b.className="btn"+(k===sel?" b":"");
+  b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
+  b.textContent=SI[k].l;
+  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88";};
+  sb.appendChild(b);
+});
+function renderS(){
+  const s=SI[sel];
+  document.getElementById("sdet").innerHTML=`<div class="bt">${s.l}</div><div style="color:#C8E8F0;line-height:1.8;margin-bottom:12px">${s.d}</div><div style="display:flex;gap:8px;flex-wrap:wrap">${s.tags.map(t=>`<span class="tag" style="border-color:#FFD60044;color:#FFD600">${t}</span>`).join("")}</div>`;
+}
+renderS();
+
+function sw(id,el){
+  document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
+  document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
+  document.getElementById("pg-"+id).classList.add("on");
+  el.classList.add("on");
+}
+function msg(id,txt,ok){
+  const cls = ok===true?"ok":(ok===false?"er":"in");
+  document.getElementById(id).innerHTML=`<div class="al ${cls}">${txt}</div>`;
+}
+
 function upd(d){
   const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
   const brokerLabel={"deriv":"DERIV","binance":"BINANCE","binance_us":"BINANCE US"}[d.broker]||(d.broker?d.broker.toUpperCase():"DISCONNECTED");
@@ -2894,13 +2958,14 @@ function upd(d){
   }
   if(d.trades.length){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
-    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side=="BUY"||t.side.includes("OVER")||t.side=="EVEN"?"tb":"ts"}">${t.side}</span></td><td>${t.entry}</td><td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
+    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side==="BUY"||t.side.includes("OVER")||t.side==="EVEN"?"tb":"ts"}">${t.side}</span></td><td>${t.entry}</td><td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status==="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
   }
   if(d.log.length){document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("");}
 }
 
 async function poll(){try{const r=await fetch("/api/status");const d=await r.json();upd(d);}catch(e){}setTimeout(poll,3000);}
 
+// ══ ADMIN ══
 async function admRefresh(){
   const token=getStoredToken();if(!token){alert("Pa konekte!");return;}
   try{
@@ -2933,7 +2998,7 @@ async function admRefresh(){
           <td style="display:flex;gap:4px;align-items:center">
             ${u.running?`<button onclick="admStopUser('${u.uid}')" title="Kanpe bot" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
             <button onclick="admClearTrades('${u.uid}')" title="Efase trades sèlman" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button>
-            <button onclick="admClearUser('${u.uid}')" title="Efase tout (trades+log+pnl)" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
+            <button onclick="admClearUser('${u.uid}')" title="Efase tout" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
           </td>
         </tr>`).join("")}</table>`;
     }
@@ -2944,7 +3009,6 @@ async function admRefresh(){
     if(d3.ok){document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>':d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between"><span style="color:#4A7080">${s.token}</span><span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span><span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span></div>`).join("");}
   }catch(e){}
 }
-
 async function admAddCode(){
   const token=getStoredToken();const code=document.getElementById("new-code").value.trim().toUpperCase();
   if(!code){document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>';return;}
@@ -2958,11 +3022,18 @@ async function admRevoke(code){if(!confirm(`Revoke ${code}?`))return;const token
 async function admReset(code){const token=getStoredToken();const r=await fetch("/api/admin/reset_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-async function admClearUser(uid){if(!confirm(`Efase TOUT istorik ${uid}?\n(trades + log + pnl reset)`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-async function admClearTrades(uid){if(!confirm(`Efase trades sèlman pou ${uid}?\n(log + pnl ap konsève)`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
+async function admClearUser(uid){if(!confirm(`Efase TOUT istorik ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
+async function admClearTrades(uid){if(!confirm(`Efase trades sèlman pou ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
 function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}
+
+// ══ Init ══
+// Auto-detect token type lè user tape
+document.addEventListener("DOMContentLoaded",()=>{
+  const inp = document.getElementById("d-tk");
+  if(inp) inp.addEventListener("input", autoDetectToken);
+});
 
 checkLogin();
 </script>

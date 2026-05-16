@@ -129,21 +129,21 @@ def get_state():
 #   → Authorize dirèkteman via WebSocket: {"authorize": token}
 #
 # PAT TOKEN: kòmanse ak pat_
-#   → Itilize kòm Bearer header pou REST API Deriv
-#   → REST retounen yon session token pou WebSocket
+#   → Travay MENM JAN via WebSocket: {"authorize": "pat_xxx"}
+#   → Deriv aksepte PAT tokens dirèkteman nan WebSocket
 # ═══════════════════════════════════════════════════════════
 
 DERIV_WS_APP_IDS = ["36544", "16929", "1089"]
 
-# ── Verifye si token se PAT ──
 def is_pat_token(token):
     return token.strip().lower().startswith("pat_")
 
-# ── Koneksyon KLASIK via WebSocket ──
+# ── Koneksyon via WebSocket (klasik ak PAT menm jan) ──
 def connect_classic_token(token, app_id="1089", timeout=15):
     """
-    Konekte token klasik Deriv via WebSocket authorize.
-    Retounen: (ok, balance_or_error, loginid)
+    Konekte token Deriv via WebSocket authorize.
+    Fonksyone pou token klasik AK token PAT (pat_xxx).
+    Retounen: (ok, balance_or_error, loginid, used_app_id)
     """
     import websocket
     app_ids_to_try = [app_id] + [aid for aid in DERIV_WS_APP_IDS if aid != app_id]
@@ -188,143 +188,35 @@ def connect_classic_token(token, app_id="1089", timeout=15):
             except: pass
 
             if result[0] is True:
-                logger.info(f"Token klasik konekte | app_id={aid} | loginid={result[2]}")
+                logger.info(f"Token konekte | app_id={aid} | loginid={result[2]}")
                 return True, result[1], result[2], aid
-            logger.info(f"Token klasik echwe app_id={aid}: {result[1]}")
+            logger.info(f"Token echwe app_id={aid}: {result[1]}")
         except Exception as e:
-            logger.info(f"Token klasik erè app_id={aid}: {e}")
+            logger.info(f"Token erè app_id={aid}: {e}")
 
     return False, "Token invalib oswa ekspire. Verifye nan app.deriv.com → API Token.", None, app_id
 
-# ── Koneksyon PAT via REST Bearer ──
-def connect_pat_token(pat_token, timeout=20):
+# ── FIX 1: connect_pat_token — itilize WebSocket dirèkteman ──
+def connect_pat_token(pat_token, timeout=20, app_id="1089"):
     """
-    PAT token flow:
-    1. Voye Bearer request nan Deriv REST API
-    2. Jwenn session token (oswa itilize PAT dirèkteman pou WebSocket apre)
-    3. Retounen: (ok, ws_token, loginid, balance, used_app_id)
-
-    Deriv PAT API doc: itilize Authorization: Bearer pat_xxx
-    Endpoint: https://api.deriv.com/v1/account (oswa verify via WS ak Bearer)
+    Token PAT (pat_xxx) — fonksyone menm jan ak token klasik via WebSocket.
+    Deriv aksepte { authorize: "pat_xxx" } dirèkteman.
+    Pa bezwen REST API — WebSocket sèlman.
+    Retounen: (ok, ws_token, loginid, balance, used_app_id)
     """
-    import urllib.request
-    import urllib.error
-
-    # Etap 1: Eseye REST API Deriv pou verifye PAT + jwenn account info
-    rest_endpoints = [
-        "https://api.deriv.com/v1/account",
-        "https://api.deriv.com/v1/authorize",
-    ]
-
-    for endpoint in rest_endpoints:
-        try:
-            req = urllib.request.Request(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {pat_token}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                method="GET"
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
-                logger.info(f"PAT REST response from {endpoint}: {list(data.keys())}")
-                # Jwenn balance ak loginid si disponib
-                balance = float(data.get("balance", data.get("account", {}).get("balance", 0)))
-                loginid = data.get("loginid", data.get("account", {}).get("loginid"))
-                logger.info(f"PAT REST ok | loginid={loginid} | balance={balance}")
-                # Pou WebSocket, itilize PAT kòm authorize dirèkteman (Deriv aksepte sa)
-                ok, ws_balance, ws_loginid, used_app_id = _pat_websocket_connect(pat_token, timeout)
-                if ok:
-                    return True, pat_token, ws_loginid or loginid, ws_balance or balance, used_app_id
-                return True, pat_token, loginid, balance, DERIV_WS_APP_IDS[0]
-        except urllib.error.HTTPError as e:
-            body = ""
-            try: body = e.read().decode()
-            except: pass
-            logger.info(f"PAT REST {endpoint} HTTP {e.code}: {body[:200]}")
-            if e.code == 401:
-                return False, f"Token pat_ rejte (401 Unauthorized). Verifye permisyon: Trade + Account management + Application insights.", None, 0.0, None
-        except Exception as e:
-            logger.info(f"PAT REST {endpoint} erè: {e}")
-
-    # Etap 2: Si REST pa mache, eseye WebSocket dirèkteman ak PAT
-    logger.info("PAT REST echwe — ap eseye WebSocket dirèkteman...")
-    ok, balance, loginid, used_app_id = _pat_websocket_connect(pat_token, timeout)
+    logger.info(f"PAT token — WebSocket authorize dirèkteman (app_id={app_id})...")
+    ok, balance, loginid, used_app_id = connect_classic_token(pat_token, app_id, timeout)
     if ok:
+        logger.info(f"PAT aksepte | loginid={loginid} | balance={balance}")
         return True, pat_token, loginid, balance, used_app_id
 
-    # Etap 3: Echèk total
     return False, (
         "Token pat_ pa aksepte.\n\n"
         "VERIFYE:\n"
-        "1. Token gen permisyon: Trade + Account management + Application insights\n"
-        "2. Token pa ekspire\n"
-        "3. Ou ka eseye token Klasik pito:\n"
-        "   app.deriv.com → foto ou → API Token → Create\n"
-        "   (Permisyon: Read + Trade + Payments)"
+        "1. Permisyon: Trade + Account management + Application insights\n"
+        "2. App ID kòrèk (defot: 1089 — ou ka chanje si ou bezwen)\n"
+        "3. Token pa ekspire — kreye yon nouvo nan app.deriv.com → API Token"
     ), None, 0.0, None
-
-
-def _pat_websocket_connect(pat_token, timeout=20):
-    """
-    Eseye konekte PAT token via WebSocket Deriv.
-    Kèk app_id aksepte PAT kòm authorize dirèkteman.
-    Retounen: (ok, balance, loginid, used_app_id)
-    """
-    import websocket
-
-    # App IDs ki konn aksepte PAT pou authorize
-    pat_app_ids = ["36544", "16929", "1089"]
-
-    for aid in pat_app_ids:
-        done   = threading.Event()
-        result = [None, None, None]  # [ok, val_or_err, loginid]
-
-        def on_open(ws):
-            ws.send(json.dumps({"authorize": pat_token}))
-
-        def on_msg(ws, msg):
-            d = json.loads(msg)
-            if d.get("msg_type") == "authorize":
-                if "error" in d:
-                    result[0] = False
-                    result[1] = d["error"].get("message", "Token invalib")
-                else:
-                    result[0] = True
-                    result[1] = float(d["authorize"].get("balance", 0))
-                    result[2] = d["authorize"].get("loginid")
-                done.set()
-            elif "error" in d:
-                result[0] = False
-                result[1] = d["error"].get("message", "Erè enkoni")
-                done.set()
-
-        def on_err(ws, e):
-            result[0] = False
-            result[1] = str(e)
-            done.set()
-
-        url = f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
-        try:
-            ws = websocket.WebSocketApp(
-                url, on_open=on_open, on_message=on_msg, on_error=on_err
-            )
-            th = threading.Thread(target=ws.run_forever, daemon=True)
-            th.start()
-            done.wait(timeout=timeout)
-            try: ws.close()
-            except: pass
-
-            if result[0] is True:
-                logger.info(f"PAT WebSocket aksepte | app_id={aid} | loginid={result[2]}")
-                return True, result[1], result[2], aid
-            logger.info(f"PAT WS echwe app_id={aid}: {result[1]}")
-        except Exception as e:
-            logger.info(f"PAT WS erè app_id={aid}: {e}")
-
-    return False, 0.0, None, None
 
 # ═══════════════════════════════════════════════════════════
 # INDIKATÈ TEKNIK
@@ -1037,7 +929,7 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# DERIV CLIENT — Sipòte Token Klasik + PAT Bearer
+# DERIV CLIENT
 # ═══════════════════════════════════════════════════════════
 class DerivClient:
     def __init__(self, token, app_id="1089"):
@@ -1046,15 +938,10 @@ class DerivClient:
         self._bal   = 0.0
 
     def connect(self):
-        """
-        Detekte tip token epi konekte kòrèkteman:
-        - Token klasik → WebSocket authorize dirèkteman
-        - PAT token    → Bearer REST auth, epi WebSocket
-        """
         if is_pat_token(self.token):
-            ok, ws_token, loginid, balance, used_app_id = connect_pat_token(self.token)
+            ok, ws_token, loginid, balance, used_app_id = connect_pat_token(self.token, app_id=self.app_id)
             if not ok:
-                raise Exception(ws_token)  # ws_token = mesaj erè si pa ok
+                raise Exception(ws_token)
             self._bal = balance
             if used_app_id:
                 self.app_id = used_app_id
@@ -1062,13 +949,12 @@ class DerivClient:
         else:
             ok, balance, loginid, used_app_id = connect_classic_token(self.token, self.app_id)
             if not ok:
-                raise Exception(balance)  # balance = mesaj erè si pa ok
+                raise Exception(balance)
             self._bal = balance
             self.app_id = used_app_id
             return self._bal
 
     def _authorize_ws(self, ws):
-        """Voye authorize message (menm pou klasik ak PAT)"""
         ws.send(json.dumps({"authorize": self.token}))
 
     def get_candles(self, symbol="R_100", count=200, gran=60):
@@ -1156,7 +1042,7 @@ class DerivClient:
     def balance(self): return self._bal
 
 # ═══════════════════════════════════════════════════════════
-# DERIV DIGITS CLIENT — Sipòte Token Klasik + PAT Bearer
+# DERIV DIGITS CLIENT
 # ═══════════════════════════════════════════════════════════
 class DerivDigitsClient:
     def __init__(self, token, app_id="1089"):
@@ -1166,7 +1052,7 @@ class DerivDigitsClient:
 
     def connect(self):
         if is_pat_token(self.token):
-            ok, ws_token, loginid, balance, used_app_id = connect_pat_token(self.token)
+            ok, ws_token, loginid, balance, used_app_id = connect_pat_token(self.token, app_id=self.app_id)
             if not ok:
                 raise Exception(ws_token)
             self._bal = balance
@@ -1547,7 +1433,7 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 # ═══════════════════════════════════════════════════════════
-# TRADING LOOPS (menm jan ak orijinal — pa chanje)
+# TRADING LOOPS
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1840,26 +1726,25 @@ def api_connect():
         if broker=="deriv":
             import websocket
             raw_token = d["token"].strip()
-            app_id    = d.get("app_id", "1089").strip() or "1089"
+            # FIX 2: toujou itilize app_id ke itilizatè a bay la
+            app_id = d.get("app_id", "1089").strip() or "1089"
 
             if is_pat_token(raw_token):
-                # ══ PAT Token flow ══
-                add_log(st, "🔑 Token pat_ detekte — Bearer REST auth...", "INFO")
-                ok, ws_token, loginid, bal, used_app_id = connect_pat_token(raw_token, timeout=20)
+                add_log(st, f"🔑 Token PAT — WebSocket authorize (app_id={app_id})...", "INFO")
+                # FIX 2: pase app_id bay connect_pat_token
+                ok, ws_token, loginid, bal, used_app_id = connect_pat_token(raw_token, timeout=20, app_id=app_id)
                 if not ok:
                     return jsonify({
                         "ok": False,
                         "error": (
                             f"❌ {ws_token}\n\n"
-                            "📋 Permisyon obligatwa pou PAT token:\n"
-                            "  ✓ Trade\n"
-                            "  ✓ Account management\n"
-                            "  ✓ Application insights\n\n"
+                            "📋 VERIFYE:\n"
+                            "  ✓ Permisyon: Trade + Account management + Application insights\n"
+                            "  ✓ App ID kòrèk (defot: 1089)\n"
+                            "  ✓ Token pa ekspire\n\n"
                             "Kreye PAT: app.deriv.com → foto ou → API Token"
                         )
                     })
-                # Kreye client ak token orijinal la (PAT)
-                # Bot la ap itilize PAT dirèkteman kòm authorize nan WS
                 api_main   = DerivClient(raw_token, used_app_id or app_id)
                 api_main._bal = bal
                 api_digits = DerivDigitsClient(raw_token, used_app_id or app_id)
@@ -1869,14 +1754,13 @@ def api_connect():
                 st["broker"]    = "deriv"
                 st["balance"]   = bal
                 st["connected"] = True
-                note = f"✓ PAT Bearer konekte"
+                note = f"✓ PAT konekte"
                 if loginid: note += f" | {loginid}"
-                note += f" | ${ bal:.2f}"
+                note += f" | ${bal:.2f}"
                 return jsonify({"ok": True, "balance": bal, "broker": "deriv", "note": note})
 
             else:
-                # ══ Token Klasik flow ══
-                add_log(st, "🔑 Token klasik — WebSocket authorize...", "INFO")
+                add_log(st, f"🔑 Token Klasik — WebSocket authorize (app_id={app_id})...", "INFO")
                 ok, balance, loginid, used_app_id = connect_classic_token(raw_token, app_id)
                 if not ok:
                     return jsonify({
@@ -2139,7 +2023,7 @@ def admin_clear_trades():
 def index(): return render_template_string(HTML)
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — v6 ELITE (ranje token flow)
+# HTML INTERFACE — v6 ELITE (FIX: PAT token + App ID manyèl)
 # ═══════════════════════════════════════════════════════════
 HTML=r"""<!DOCTYPE html>
 <html>
@@ -2314,16 +2198,11 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <input id="d-tk" type="password" placeholder="Kole token ou a isit...">
         </div>
 
-        <!-- App ID — afiche pou klasik, kache pou PAT -->
+        <!-- FIX 3: App ID — toujou vizib pou KLASIK ak PAT, label chanje -->
         <div class="iw" id="row-appid">
-          <div class="il">APP ID (defot: 1089)</div>
+          <div class="il" id="lbl-appid">APP ID (defot: 1089)</div>
           <input id="d-ai" value="1089" placeholder="1089">
-          <div style="color:#4A7080;font-size:9px;margin-top:3px">Pa chanje sa sof si ou gen pwòp app Deriv</div>
-        </div>
-
-        <!-- PAT App ID info — afiche pou PAT sèlman -->
-        <div id="row-pat-appid" style="display:none;background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600">
-          ⚡ PAT: App ID 36544/16929/1089 ap eseye otomatikman
+          <div id="hint-appid" style="color:#4A7080;font-size:9px;margin-top:3px">Pa chanje sa sof si ou gen pwòp app Deriv</div>
         </div>
       </div>
 
@@ -2720,29 +2599,32 @@ function togBroker(){
   if(note) note.style.display=(v==="binance_us")?"block":"none";
 }
 
-// ══ Toggle token type klasik vs PAT ══
+// ══ FIX 4: Toggle token type — toujou montre App ID input ══
 function togTokenType(){
   const v  = document.getElementById("d-token-type").value;
   const inp = document.getElementById("d-tk");
   const lbl = document.getElementById("lbl-token");
-  const rowAppid    = document.getElementById("row-appid");
-  const rowPatAppid = document.getElementById("row-pat-appid");
+  const lblAppid = document.getElementById("lbl-appid");
+  const hintAppid = document.getElementById("hint-appid");
   const infoClassic = document.getElementById("info-classic");
   const infoPat     = document.getElementById("info-pat");
 
   if(v === "pat"){
     infoClassic.style.display = "none";
     infoPat.style.display     = "block";
-    rowAppid.style.display    = "none";
-    rowPatAppid.style.display = "block";
+    // App ID input toujou vizib — chanje sèlman label ak hint
+    lblAppid.textContent = "APP ID PAT (defot: 1089 — ka chanje)";
+    hintAppid.textContent = "Eseye 1089 anvan. Si pa mache eseye: 16929 oswa 36544";
+    hintAppid.style.color = "#FFD600";
     lbl.textContent = "TOKEN PAT (kòmanse ak pat_)";
     inp.placeholder = "pat_XXXXXXXXXXXXXXXXXXXXXXXXXX";
     inp.type = "password";
   } else {
     infoClassic.style.display = "block";
     infoPat.style.display     = "none";
-    rowAppid.style.display    = "block";
-    rowPatAppid.style.display = "none";
+    lblAppid.textContent = "APP ID (defot: 1089)";
+    hintAppid.textContent = "Pa chanje sa sof si ou gen pwòp app Deriv";
+    hintAppid.style.color = "#4A7080";
     lbl.textContent = "API TOKEN KLASIK";
     inp.placeholder = "Kole token ou a isit...";
     inp.type = "password";
@@ -2781,7 +2663,7 @@ function getStartParams(){
   return{mode:"forex",symbol:document.getElementById("c-sy-crypto").value,strategy:"binance_crypto",lot:parseFloat(document.getElementById("c-lot-crypto").value),tf:document.getElementById("c-tf-crypto").value,min_conf:conf,profit_target:target,loss_limit:loss};
 }
 
-// ══ Main connect function ══
+// ══ FIX 5: doConn — toujou itilize d-ai pou app_id ══
 async function doConn(){
   const br  = document.getElementById("d-br").value;
   const btn = event.target; btn.textContent="AP KONEKTE..."; btn.disabled=true;
@@ -2796,13 +2678,15 @@ async function doConn(){
       btn.textContent="⚡ KONEKTE"; btn.disabled=false; return;
     }
     const isPat = rawToken.toLowerCase().startsWith("pat_");
+    // FIX 5: toujou itilize valè d-ai (ki editable pou 2 tip token)
+    const appId = document.getElementById("d-ai").value.trim() || "1089";
     body.token  = rawToken;
-    body.app_id = isPat ? "36544" : (document.getElementById("d-ai").value||"1089");
+    body.app_id = appId;
 
     if(isPat){
-      msg("cm","⏳ Token PAT — Bearer auth + WebSocket... (max 25 sek)","ok");
+      msg("cm",`⏳ Token PAT — WebSocket authorize (app_id=${appId})... (max 20 sek)`,"ok");
     } else {
-      msg("cm",`⏳ Token Klasik — WebSocket authorize... (max 15 sek)...`,"ok");
+      msg("cm",`⏳ Token Klasik — WebSocket authorize (app_id=${appId})... (max 15 sek)`,"ok");
     }
   }
   if(br==="binance"||br==="binance_us"){
@@ -3029,7 +2913,6 @@ function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result=
 function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}
 
 // ══ Init ══
-// Auto-detect token type lè user tape
 document.addEventListener("DOMContentLoaded",()=>{
   const inp = document.getElementById("d-tk");
   if(inp) inp.addEventListener("input", autoDetectToken);

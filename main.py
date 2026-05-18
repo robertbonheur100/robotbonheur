@@ -1,32 +1,33 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║        BONHEURBOT PRO v6 ELITE — VRÈ PAT FIX KONPLÈ        ║
+║              BONHEURBOT PRO v6 ELITE — HYBRID AUTH          ║
 ║         Multi-User Trading Bot — Deriv + Binance            ║
-║                                                             ║
-║  VRÈ PAT FIX (konfime avèk prèv teknik):                   ║
-║   PAT + WebSocket = 401 + {"error":"InvalidAppID"} TOUJOU  ║
-║   PAT SÈLMAN fonksyone: Authorization: Bearer pat_xxx       ║
-║                         nan HTTP REST API                   ║
-║                                                             ║
-║  ACHITEKTI DUAL CLIENT:                                      ║
-║   TOKEN PAT    → DerivRESTClient  (HTTP REST Bearer)        ║
-║   TOKEN KLASIK → DerivClient      (WebSocket authorize)     ║
-║                                                             ║
-║  Smart Entry | 3-Loss Pause | Live Balance | Multi-User     ║
+║   PAT Token Fix: App ID correct + WS Auth unifye            ║
+║   Smart Entry | 3-Loss Pause | Live Balance Display         ║
 ╚══════════════════════════════════════════════════════════════╝
+
+HYBRID AUTHENTICATION SYSTEM
+─────────────────────────────
+• TOKEN KLASIK  → WebSocket authorize {"authorize": "TOKEN"}  app_id=1089
+• TOKEN PAT     → WebSocket authorize {"authorize": "pat_xxx"} app_id=TON_APP_ID
+                  (PAT aksepte nativrèlman pa Deriv WebSocket avèk bon app_id)
+
+FIX PRENSIPAL:
+  - PAT token: itilize app_id="33ifAjI7cFab3IsUV8u9q" (oswa nenpòt app_id ou kreye)
+  - Token KLASIK: itilize app_id="1089" (defot Deriv)
+  - REST API Deriv pa egziste vrèman pou PAT — WebSocket se sèl metòd valab
+  - Authorization: Bearer pat_xxx se pou lòt API, PA pou Deriv
 """
 
 import os, json, time, threading, logging, math, uuid, secrets, requests
 from datetime import datetime, timedelta, date
-from flask import Flask, request as freq, jsonify, render_template_string, session
+from flask import Flask, request, jsonify, render_template_string, session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 PROFIT_WALLET = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
-PROFIT_PCT    = 0.05
-DERIV_REST_BASE = "https://api.deriv.com/v2"
-DERIV_WS_APP_IDS = ["1089", "36544", "16929"]
+PROFIT_PCT    = 0.05   # 5% → CR9560099
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
@@ -36,17 +37,23 @@ ACCESS_CODES = {
 CODE_TTL_SECONDS = 2592000  # 30 jou
 
 # ═══════════════════════════════════════════════════════════
-# ACCESS CODES + SESSIONS
+# ACCESS CODES
 # ═══════════════════════════════════════════════════════════
 def check_access(code):
     code = code.strip().upper()
-    if code not in ACCESS_CODES: return False, "Kòd aksè pa valid — kontakte admin"
+    if code not in ACCESS_CODES:
+        return False, "Kòd aksè pa valid — kontakte admin"
     entry = ACCESS_CODES[code]
-    if entry["created_at"] is None or entry.get("is_adm"): return True, "✓ Aksè admin akòde"
+    if entry["created_at"] is None or entry.get("is_adm"):
+        return True, "✓ Aksè admin akòde"
     age = time.time() - entry["created_at"]
-    if age > CODE_TTL_SECONDS: return False, f"Kòd ekspire depi {int((age-CODE_TTL_SECONDS)/86400)} jou — kontakte admin"
-    if entry["used"]: return False, "Kòd sa deja itilize — kontakte admin"
-    return True, f"✓ Aksè akòde — {int((CODE_TTL_SECONDS-age)/86400)} jou rete"
+    if age > CODE_TTL_SECONDS:
+        days_ago = int((age - CODE_TTL_SECONDS) / 86400)
+        return False, f"Kòd ekspire depi {days_ago} jou — kontakte admin"
+    if entry["used"]:
+        return False, "Kòd sa deja itilize — kontakte admin"
+    days_left = int((CODE_TTL_SECONDS - age) / 86400)
+    return True, f"✓ Aksè akòde — {days_left} jou rete"
 
 def use_code(code):
     code = code.strip().upper()
@@ -55,6 +62,9 @@ def use_code(code):
         if e["created_at"] is not None and not e.get("is_adm"):
             ACCESS_CODES[code]["used"] = True
 
+# ═══════════════════════════════════════════════════════════
+# SESSIONS
+# ═══════════════════════════════════════════════════════════
 SESSIONS_FILE = "sessions.json"
 _sessions = {}
 _sess_lock = threading.Lock()
@@ -63,13 +73,17 @@ def _load_sessions():
     global _sessions
     try:
         if os.path.exists(SESSIONS_FILE):
-            with open(SESSIONS_FILE) as f: _sessions = json.load(f)
-    except: _sessions = {}
+            with open(SESSIONS_FILE) as f:
+                _sessions = json.load(f)
+    except:
+        _sessions = {}
 
 def _save_sessions():
     try:
-        with open(SESSIONS_FILE, "w") as f: json.dump(_sessions, f, indent=2)
-    except Exception as e: logger.error(f"Sessions save: {e}")
+        with open(SESSIONS_FILE, "w") as f:
+            json.dump(_sessions, f, indent=2)
+    except Exception as e:
+        logger.error(f"Sessions save: {e}")
 
 _load_sessions()
 
@@ -82,29 +96,39 @@ def create_session():
     return token, expire
 
 def validate_session(token):
-    if not token: return False, "Pa gen sesyon"
-    with _sess_lock: sess = _sessions.get(token)
-    if not sess: return False, "Sesyon pa valid — antre kòd aksè ou"
+    if not token:
+        return False, "Pa gen sesyon"
+    with _sess_lock:
+        sess = _sessions.get(token)
+    if not sess:
+        return False, "Sesyon pa valid — antre kòd aksè ou"
     exp = date.fromisoformat(sess["expire"])
     if date.today() > exp:
-        with _sess_lock: _sessions.pop(token, None); _save_sessions()
+        with _sess_lock:
+            _sessions.pop(token, None)
+            _save_sessions()
         return False, "Abònman ou ekspire (30 jou) — kontakte admin"
-    return True, f"Sesyon aktif — {(exp - date.today()).days} jou rete"
+    days_left = (exp - date.today()).days
+    return True, f"Sesyon aktif — {days_left} jou rete"
 
 SECRET_KEY_FILE = "secret.key"
 if os.path.exists(SECRET_KEY_FILE):
-    with open(SECRET_KEY_FILE) as f: _secret = f.read().strip()
+    with open(SECRET_KEY_FILE) as f:
+        _secret = f.read().strip()
 else:
     _secret = secrets.token_hex(32)
-    with open(SECRET_KEY_FILE, "w") as f: f.write(_secret)
+    with open(SECRET_KEY_FILE, "w") as f:
+        f.write(_secret)
 
 app = Flask(__name__)
 app.secret_key = _secret
+
 _user_states = {}
 _user_lock = threading.Lock()
 
 def get_state():
-    if "uid" not in session: session["uid"] = str(uuid.uuid4())
+    if "uid" not in session:
+        session["uid"] = str(uuid.uuid4())
     uid = session["uid"]
     with _user_lock:
         if uid not in _user_states:
@@ -117,341 +141,220 @@ def get_state():
             }
     return _user_states[uid]
 
+# ═══════════════════════════════════════════════════════════
+# ██  HYBRID AUTHENTICATION SYSTEM — FIX KONPLÈ  ██
+#
+#  TOKEN KLASIK  →  WebSocket  {"authorize": "TOKEN"}
+#                   app_id = 1089 (oswa lòt app ofisyèl Deriv)
+#
+#  TOKEN PAT     →  WebSocket  {"authorize": "pat_xxx"}
+#                   app_id = TON_APP_ID (sa ou kreye sou Deriv)
+#                   Ex: app_id = "33ifAjI7cFab3IsUV8u9q"
+#
+#  ⚠ ENPÒTAN: Deriv PA gen yon vrè REST API pou PAT nan
+#    /v2/authorize. PAT token travay DIRÈKTEMAN nan WebSocket
+#    akòz ke ou bay pèmisyon nan app ou kreye a.
+#    Authorization: Bearer pat_xxx = pou API TIYÈS, PA Deriv WS.
+#
+# DERIV WS endpoint: wss://ws.derivws.com/websockets/v3
+# ═══════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════
-# ██  VRÈ PAT FIX — DUAL CLIENT SYSTEM  ██
-#
-#  PRÈV TEKNIK (konfime):
-#   PAT + WebSocket {"authorize":"pat_xxx"} = 401 + InvalidAppID
-#   Kèlkeswa app_id (1089, 36544, nenpòt) — PA fonksyone
-#
-#  SOLISYON KÒRÈK:
-#   PAT    → HTTP REST  api.deriv.com/v2/  + Authorization: Bearer pat_xxx
-#   KLASIK → WebSocket  ws.derivws.com     + {"authorize": "token"}
-#
-# ═══════════════════════════════════════════════════════════
+# App IDs pou eseye selon tip token
+DERIV_WS_APP_IDS_CLASSIC = ["1089", "36544", "16929"]
 
 def is_pat_token(token: str) -> bool:
     return token.strip().lower().startswith("pat_")
 
 
 # ─────────────────────────────────────────────────────────────
-# REST CLIENT — PAT TOKEN VIA HTTP Bearer
-# ─────────────────────────────────────────────────────────────
-class DerivRESTClient:
-    """REST API client pou PAT token (Authorization: Bearer)"""
-
-    def __init__(self, pat_token: str, timeout: int = 20):
-        self.token   = pat_token
-        self.timeout = timeout
-        self._bal    = 0.0
-        self._loginid = "PAT_USER"
-        self._headers = {
-            "Authorization": f"Bearer {pat_token}",
-            "Content-Type":  "application/json",
-            "Accept":        "application/json",
-            "User-Agent":    "BonheurBot/6.0",
-        }
-
-    def _get(self, endpoint, params=None):
-        r = requests.get(f"{DERIV_REST_BASE}{endpoint}", headers=self._headers,
-                         params=params or {}, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()
-
-    def _post(self, endpoint, data=None):
-        r = requests.post(f"{DERIV_REST_BASE}{endpoint}", headers=self._headers,
-                          json=data or {}, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()
-
-    def connect(self) -> float:
-        """Authenticate PAT via REST — eseye plizyè endpoints"""
-        errors = []
-
-        # Metòd 1: GET /v2/account
-        try:
-            data = self._get("/account")
-            logger.info(f"PAT REST /account: {str(data)[:200]}")
-            if "error" not in data:
-                for path in [["balance"], ["account","balance"], ["data","balance"]]:
-                    v = data
-                    try:
-                        for k in path: v = v[k]
-                        self._bal = float(v)
-                        for lpath in [["loginid"],["account","loginid"],["login_id"]]:
-                            try:
-                                lv = data
-                                for k in lpath: lv = lv[k]
-                                self._loginid = str(lv)
-                                break
-                            except: pass
-                        return self._bal
-                    except: pass
-                self._loginid = "PAT_USER"
-                return 0.0
-        except requests.HTTPError as e:
-            errors.append(f"GET /account: {e.response.status_code} → {e.response.text[:80]}")
-        except Exception as e:
-            errors.append(f"GET /account: {str(e)[:80]}")
-
-        # Metòd 2: GET /v2/account/balance
-        try:
-            data = self._get("/account/balance")
-            logger.info(f"PAT REST /balance: {str(data)[:200]}")
-            if "error" not in data:
-                for k in ["balance","amount"]:
-                    if k in data:
-                        self._bal = float(data[k])
-                        return self._bal
-        except requests.HTTPError as e:
-            errors.append(f"GET /balance: {e.response.status_code} → {e.response.text[:80]}")
-        except Exception as e:
-            errors.append(f"GET /balance: {str(e)[:80]}")
-
-        # Metòd 3: POST /v2/account/authorize
-        try:
-            data = self._post("/account/authorize", {"token": self.token})
-            logger.info(f"PAT REST /authorize: {str(data)[:200]}")
-            if "error" not in data:
-                bal = data.get("balance") or data.get("account", {}).get("balance") or 0
-                self._bal = float(bal)
-                self._loginid = data.get("loginid") or "PAT_USER"
-                return self._bal
-        except requests.HTTPError as e:
-            errors.append(f"POST /authorize: {e.response.status_code} → {e.response.text[:80]}")
-        except Exception as e:
-            errors.append(f"POST /authorize: {str(e)[:80]}")
-
-        # Metòd 4: GET /v2/ping (jis pou verifye token valid)
-        try:
-            data = self._get("/ping")
-            logger.info(f"PAT REST /ping: {str(data)[:100]}")
-            self._bal = 0.0; self._loginid = "PAT_USER"
-            logger.warning("PAT: ping OK men balance unavailable — mete 0")
-            return 0.0
-        except requests.HTTPError as e:
-            errors.append(f"GET /ping: {e.response.status_code} → {e.response.text[:80]}")
-        except Exception as e:
-            errors.append(f"GET /ping: {str(e)[:80]}")
-
-        raise Exception(
-            f"Token PAT echwe ak tout REST endpoints.\n\nDETAY ERÈ:\n" +
-            "\n".join(errors) +
-            "\n\n╔══════════════════════════════════════╗\n"
-            "║   ITILIZE TOKEN KLASIK (REKÒMANDE)  ║\n"
-            "╚══════════════════════════════════════╝\n"
-            "1. app.deriv.com → foto ou → API Token\n"
-            "2. Create new token → Read+Trade+Payments\n"
-            "3. Kole token (PA kòmanse ak pat_)\n"
-            "4. App ID: 1089"
-        )
-
-    def get_balance_sync(self) -> float:
-        try:
-            data = self._get("/account/balance")
-            for k in ["balance","amount"]:
-                if k in data:
-                    self._bal = float(data[k]); return self._bal
-        except: pass
-        try:
-            data = self._get("/account")
-            bal = data.get("balance") or data.get("account",{}).get("balance")
-            if bal: self._bal = float(bal); return self._bal
-        except: pass
-        return self._bal
-
-    def get_candles(self, symbol="R_100", count=200, gran=60):
-        try:
-            data = self._get("/ticks/history", {
-                "symbol": symbol, "count": count,
-                "granularity": gran, "style": "candles", "end": "latest"
-            })
-            candles = data.get("candles") or data.get("data",{}).get("candles") or []
-            return [{"open":float(c.get("open",0)),"high":float(c.get("high",0)),
-                     "low":float(c.get("low",0)),"close":float(c.get("close",0)),
-                     "volume":1000,"time":c.get("epoch",0)} for c in candles]
-        except Exception as e:
-            logger.error(f"PAT get_candles: {e}"); return []
-
-    def get_ticks(self, symbol="R_10", count=100):
-        try:
-            data = self._get("/ticks/history", {"symbol":symbol,"count":count,"style":"ticks","end":"latest"})
-            hist = data.get("history") or data.get("data",{}).get("history") or {}
-            prices = hist.get("prices",[]); times = hist.get("times",[])
-            return [{"price":float(p),"time":t} for p,t in zip(prices,times)]
-        except Exception as e:
-            logger.error(f"PAT get_ticks: {e}"); return []
-
-    def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
-        ct = "CALL" if direction == "BUY" else "PUT"
-        if duration_secs<=60: dv,du=1,"m"
-        elif duration_secs<=300: dv,du=5,"m"
-        elif duration_secs<=900: dv,du=15,"m"
-        elif duration_secs<=3600: dv,du=1,"h"
-        else: dv,du=4,"h"
-        prop = self._post("/trade/proposal", {
-            "contract_type":ct,"symbol":symbol,"amount":max(0.5,float(amount)),
-            "basis":"stake","duration":dv,"duration_unit":du,"currency":"USD"})
-        if "error" in prop: raise Exception(prop["error"].get("message","Proposal echwe"))
-        pid = prop.get("proposal",{}).get("id") or prop.get("id")
-        ask = prop.get("proposal",{}).get("ask_price") or prop.get("ask_price")
-        if not pid: raise Exception(f"Pa jwenn proposal_id: {prop}")
-        result = self._post("/trade/buy", {"buy":pid,"price":ask})
-        if "error" in result: raise Exception(result["error"].get("message","Buy echwe"))
-        return result.get("buy") or result
-
-    def place_digits_trade(self, symbol, contract_type, amount=0.35, barrier=None):
-        payload = {"contract_type":contract_type,"symbol":symbol,
-                   "amount":max(0.35,float(amount)),"basis":"stake",
-                   "duration":5,"duration_unit":"t","currency":"USD"}
-        if barrier is not None: payload["barrier"] = str(barrier)
-        prop = self._post("/trade/proposal", payload)
-        if "error" in prop: raise Exception(prop["error"].get("message","Proposal echwe"))
-        pid = prop.get("proposal",{}).get("id") or prop.get("id")
-        ask = prop.get("proposal",{}).get("ask_price") or prop.get("ask_price")
-        result = self._post("/trade/buy", {"buy":pid,"price":ask})
-        if "error" in result: raise Exception(result["error"].get("message","Buy echwe"))
-        return result.get("buy") or result
-
-    def wait_contract_result(self, contract_id, timeout=30):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                data = self._get(f"/trade/contracts/{contract_id}")
-                poc = data.get("contract") or data.get("proposal_open_contract") or data
-                if poc.get("status","") in ("won","lost","sold"): return poc
-            except: pass
-            time.sleep(2)
-        return None
-
-    def transfer_to_account(self, account_id, amount):
-        result = self._post("/account/transfer", {
-            "account_to":account_id,"amount":round(float(amount),2),"currency":"USD"})
-        return result
-
-    @property
-    def balance(self): return self._bal
-    @property
-    def loginid(self): return self._loginid
-
-
-# ─────────────────────────────────────────────────────────────
-# WEBSOCKET AUTHORIZE — TOKEN KLASIK SÈLMAN
+# KONEKSYON DERIV — WebSocket unifye pou Klasik AK PAT
+# PAT = menm metòd WebSocket authorize, men DIFE app_id
 # ─────────────────────────────────────────────────────────────
 def connect_ws_authorize(token: str, app_id: str, timeout: int = 20):
-    import websocket as wsl
-    done = threading.Event()
+    """
+    Konekte via WebSocket authorize.
+    Valab pou TOKEN KLASIK ak TOKEN PAT.
+    PAT token aksepte pa Deriv WS si app_id = bon app ou kreye a.
+
+    Retounen: (ok, balance, loginid, used_app_id, error_msg)
+    """
+    import websocket
+
+    done   = threading.Event()
     result = [None, None, None, None]  # [ok, balance, loginid, error]
 
-    def on_open(ws): ws.send(json.dumps({"authorize": token}))
+    def on_open(ws):
+        ws.send(json.dumps({"authorize": token}))
+
     def on_msg(ws, msg):
-        try: d = json.loads(msg)
-        except: return
+        try:
+            d = json.loads(msg)
+        except:
+            return
         if d.get("msg_type") == "authorize":
             if "error" in d:
-                result[0]=False; result[3]=d["error"].get("message","Token invalib")
+                result[0] = False
+                result[3] = d["error"].get("message", "Token invalib oswa rejte")
             else:
-                result[0]=True; result[1]=float(d["authorize"].get("balance",0))
-                result[2]=d["authorize"].get("loginid")
+                result[0] = True
+                result[1] = float(d["authorize"].get("balance", 0))
+                result[2] = d["authorize"].get("loginid")
             done.set()
             try: ws.close()
             except: pass
         elif "error" in d and not done.is_set():
-            result[0]=False; result[3]=d["error"].get("message","Erè enkoni")
+            result[0] = False
+            result[3] = d["error"].get("message", "Erè enkoni")
             done.set()
             try: ws.close()
             except: pass
+
     def on_error(ws, e):
         if not done.is_set():
-            result[0]=False; result[3]=f"WS erè: {str(e)[:150]}"; done.set()
+            result[0] = False
+            result[3] = f"WebSocket erè: {str(e)}"
+            done.set()
 
     url = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
     try:
-        ws = wsl.WebSocketApp(url, on_open=on_open, on_message=on_msg, on_error=on_error)
-        t  = threading.Thread(target=ws.run_forever, daemon=True); t.start()
+        ws = websocket.WebSocketApp(
+            url,
+            on_open=on_open,
+            on_message=on_msg,
+            on_error=on_error,
+        )
+        t = threading.Thread(target=ws.run_forever, daemon=True)
+        t.start()
         done.wait(timeout=timeout)
         if not done.is_set():
             try: ws.close()
             except: pass
-            return False, 0.0, None, app_id, f"Timeout ({timeout}s)"
-        if result[0]: return True, result[1], result[2], app_id, None
+            return False, 0.0, None, app_id, f"Timeout ({timeout}s) — app_id={app_id}"
+
+        if result[0] is True:
+            return True, result[1], result[2], app_id, None
         return False, 0.0, None, app_id, result[3] or "Echèk enkoni"
+
     except Exception as e:
-        return False, 0.0, None, app_id, f"Erè: {str(e)}"
-
-
-def connect_classic_token(token: str, app_id: str = "1089"):
-    app_ids = [app_id] + [a for a in DERIV_WS_APP_IDS if a != app_id]
-    errors  = []
-    for aid in app_ids:
-        ok,bal,lid,_,err = connect_ws_authorize(token, aid, timeout=15)
-        if ok:
-            logger.info(f"Klasik OK | app_id={aid} | {lid} | ${bal:.2f}")
-            return True, bal, lid, aid, f"Klasik (WS) | {lid} | app_id={aid}"
-        errors.append(f"app_id={aid}: {err}")
-    return False, 0.0, None, app_id, (
-        "Token Klasik echwe.\n\nDETAY:\n" + "\n".join(errors[:3]) +
-        "\n\nVERIFYE:\n1. Token valid epi pa ekspire\n"
-        "2. Pèmisyon: Read + Trade + Payments\n"
-        "3. Kreye nouvo sou app.deriv.com → API Token"
-    )
+        return False, 0.0, None, app_id, f"Erè koneksyon: {str(e)}"
 
 
 def connect_deriv_token(token: str, app_id: str = "1089"):
     """
-    ROUTER PRENSIPAL:
-      PAT (pat_xxx) → DerivRESTClient.connect()   [REST Bearer HTTP]
-      KLASIK        → connect_classic_token()      [WebSocket]
+    ══════════════════════════════════════════════════════
+    ENTRY POINT PRENSIPAL — Hybrid Token Koneksyon
+
+    TOKEN KLASIK:
+      - Eseye app_id fourni + fallback 1089, 36544, 16929
+      - Auth: WebSocket {"authorize": "TOKEN"}
+
+    TOKEN PAT (pat_xxx):
+      - Eseye app_id ou fourni AN PREMYE (obligatwa!)
+      - Si sa echwe, eseye app_ids klasik kòm dènye recou
+      - Auth: WebSocket {"authorize": "pat_xxx"}
+      - ⚠ app_id DWE = app ou kreye sou app.deriv.com
+
     Retounen: (ok, balance, loginid, used_app_id, note)
+    ══════════════════════════════════════════════════════
     """
-    if is_pat_token(token):
-        logger.info("PAT token → REST API Bearer")
-        try:
-            c = DerivRESTClient(token)
-            bal = c.connect()
-            logger.info(f"PAT REST OK | {c.loginid} | ${bal:.2f}")
-            return True, bal, c.loginid, None, f"PAT (REST Bearer) | {c.loginid}"
-        except Exception as e:
-            return False, 0.0, None, None, str(e)
+    is_pat = is_pat_token(token)
+    token_type = "PAT" if is_pat else "Klasik"
+
+    if is_pat:
+        # PAT: eseye app_id mèt la ban nou AN PREMYE
+        # Si app_id = defot 1089, avèti ke PAT bezwen bon app_id
+        app_ids_to_try = [app_id]
+
+        # Ajoute fallback sèlman si app_id pa t manke
+        if app_id not in ("1089", "36544", "16929"):
+            # Si yo ban nou yon app_id espesifik PAT, eseye l sèl
+            pass
+        else:
+            # App_id klasik — ajoute lòt pou PAT tou (sèten app_id klasik aksepte PAT)
+            app_ids_to_try = [app_id] + [a for a in ("1089", "36544", "16929") if a != app_id]
+
+        errors = []
+        for aid in app_ids_to_try:
+            logger.info(f"PAT auth eseye | app_id={aid}")
+            ok, balance, loginid, used_aid, err = connect_ws_authorize(token, aid, timeout=20)
+            if ok:
+                logger.info(f"PAT OK | app_id={aid} | loginid={loginid} | ${balance:.2f}")
+                return True, balance, loginid, aid, f"PAT (WS) | app_id={aid} | {loginid}"
+            errors.append(f"app_id={aid}: {err}")
+            logger.warning(f"PAT echwe app_id={aid}: {err}")
+
+        # Tout echwe
+        err_detail = "\n".join(errors)
+        return False, 0.0, None, app_id, (
+            f"Token PAT echwe ak tout app_ids essayés.\n\n"
+            f"DETAY ERÈ:\n{err_detail}\n\n"
+            f"SOLISYON:\n"
+            f"1. Ale sou app.deriv.com → Tools → API Token\n"
+            f"2. Kreye TOKEN KLASIK (PA PAT) avèk:\n"
+            f"   ✓ Read  ✓ Trade  ✓ Payments\n"
+            f"3. Kole token klasik la — li pa kòmanse ak 'pat_'\n\n"
+            f"OU:\n"
+            f"4. Si ou vlè itilize PAT: app_id DWE = app ou kreye\n"
+            f"   sou app.deriv.com → Cashier → API Token → Apps"
+        )
+
     else:
-        logger.info(f"Token Klasik → WebSocket app_id={app_id}")
-        return connect_classic_token(token, app_id)
+        # TOKEN KLASIK: eseye app_id fourni + fallbacks
+        app_ids_to_try = [app_id] + [a for a in DERIV_WS_APP_IDS_CLASSIC if a != app_id]
+        errors = []
+
+        for aid in app_ids_to_try:
+            logger.info(f"Klasik auth eseye | app_id={aid}")
+            ok, balance, loginid, used_aid, err = connect_ws_authorize(token, aid, timeout=15)
+            if ok:
+                logger.info(f"Klasik OK | app_id={aid} | loginid={loginid} | ${balance:.2f}")
+                return True, balance, loginid, aid, f"Klasik (WS) | {loginid}"
+            errors.append(f"app_id={aid}: {err}")
+            logger.warning(f"Klasik echwe app_id={aid}: {err}")
+
+        err_detail = "\n".join(errors[:3])
+        return False, 0.0, None, app_id, (
+            f"Token Klasik echwe.\n\nDETAY:\n{err_detail}\n\n"
+            f"VERIFYE:\n"
+            f"1. Token valid epi pa ekspire\n"
+            f"2. Pèmisyon: Read + Trade + Payments\n"
+            f"3. Kreye nouvo sou app.deriv.com → API Token"
+        )
 
 
 # ═══════════════════════════════════════════════════════════
 # INDIKATÈ TEKNIK
 # ═══════════════════════════════════════════════════════════
 def ema(prices, p):
-    if len(prices)<p: return []
-    k=2/(p+1); e=[sum(prices[:p])/p]
-    for x in prices[p:]: e.append(x*k+e[-1]*(1-k))
+    if len(prices) < p: return []
+    k = 2/(p+1); e = [sum(prices[:p])/p]
+    for x in prices[p:]: e.append(x*k + e[-1]*(1-k))
     return e
 
 def rsi(prices, p=14):
-    if len(prices)<p+1: return 50
-    d=[prices[i+1]-prices[i] for i in range(len(prices)-1)]
-    g=sum(x for x in d[-p:] if x>0)/p
-    l=sum(-x for x in d[-p:] if x<0)/p
+    if len(prices) < p+1: return 50
+    d = [prices[i+1]-prices[i] for i in range(len(prices)-1)]
+    g = sum(x for x in d[-p:] if x>0)/p
+    l = sum(-x for x in d[-p:] if x<0)/p
     return 100 if l==0 else 100-(100/(1+g/l))
 
 def macd(prices):
     e12=ema(prices,12); e26=ema(prices,26)
     if not e12 or not e26: return 0,0
-    m=e12[-1]-e26[-1]; return m,m*0.2
+    m=e12[-1]-e26[-1]; return m, m*0.2
 
 def bb(prices, p=20, s=2.0):
     if len(prices)<p: return None,None,None
     avg=sum(prices[-p:])/p
     std=math.sqrt(sum((x-avg)**2 for x in prices[-p:])/p)
-    return avg+s*std,avg,avg-s*std
+    return avg+s*std, avg, avg-s*std
 
 def atr(candles, p=14):
     if len(candles)<p+1: return 0
     trs=[]
     for i in range(1,len(candles)):
         h=candles[i]["high"]; l=candles[i]["low"]; pc=candles[i-1]["close"]
-        trs.append(max(h-l,abs(h-pc),abs(l-pc)))
+        trs.append(max(h-l, abs(h-pc), abs(l-pc)))
     return sum(trs[-p:])/p if trs else 0
 
 def stoch_k(candles, p=14):
@@ -465,54 +368,62 @@ def calc_adx_full(candles, p=14):
     for i in range(1,len(candles)):
         h=candles[i]["high"]; l=candles[i]["low"]
         ph=candles[i-1]["high"]; pl=candles[i-1]["low"]; pc=candles[i-1]["close"]
-        tr=max(h-l,abs(h-pc),abs(l-pc))
-        up=h-ph; dn=pl-l
-        pdms.append(up if up>dn and up>0 else 0)
-        mdms.append(dn if dn>up and dn>0 else 0)
+        tr=max(h-l, abs(h-pc), abs(l-pc))
+        up_=h-ph; dn=pl-l
+        pdms.append(up_ if up_>dn and up_>0 else 0)
+        mdms.append(dn if dn>up_ and dn>0 else 0)
         trs.append(tr)
-    av=sum(trs[-p:])/p if sum(trs[-p:])>0 else 1
-    pdi=100*sum(pdms[-p:])/(p*av); mdi=100*sum(mdms[-p:])/(p*av)
-    adx=100*abs(pdi-mdi)/(pdi+mdi+0.001)
-    return round(adx,2),round(pdi,2),round(mdi,2)
+    atr_v=sum(trs[-p:])/p if sum(trs[-p:])>0 else 1
+    pdi=100*sum(pdms[-p:])/(p*atr_v)
+    mdi=100*sum(mdms[-p:])/(p*atr_v)
+    adx_val=100*abs(pdi-mdi)/(pdi+mdi+0.001)
+    return round(adx_val,2), round(pdi,2), round(mdi,2)
 
 def supertrend(candles, p=10, mult=3.0):
-    if len(candles)<p+5: return "NONE",0.0
-    highs=[c["high"] for c in candles]; lows=[c["low"] for c in candles]; closes=[c["close"] for c in candles]
+    if len(candles) < p+5: return "NONE",0.0
+    highs=[c["high"] for c in candles]; lows=[c["low"] for c in candles]
+    closes=[c["close"] for c in candles]
     trs=[]
     for i in range(1,len(candles)):
         tr=max(highs[i]-lows[i],abs(highs[i]-closes[i-1]),abs(lows[i]-closes[i-1]))
         trs.append(tr)
     atr_vals=[]
-    for i in range(p-1,len(trs)): atr_vals.append(sum(trs[i-p+1:i+1])/p)
+    for i in range(p-1,len(trs)):
+        atr_vals.append(sum(trs[i-p+1:i+1])/p)
     if not atr_vals: return "NONE",0.0
     n=len(atr_vals); hl2=[(highs[i+1]+lows[i+1])/2 for i in range(n)]
-    ub=[hl2[i]+mult*atr_vals[i] for i in range(n)]; lb=[hl2[i]-mult*atr_vals[i] for i in range(n)]
-    upper=list(ub); lower=list(lb)
+    upper_basic=[hl2[i]+mult*atr_vals[i] for i in range(n)]
+    lower_basic=[hl2[i]-mult*atr_vals[i] for i in range(n)]
+    upper=list(upper_basic); lower=list(lower_basic)
     for i in range(1,n):
-        upper[i]=min(ub[i],upper[i-1]) if closes[i+p-1]<=upper[i-1] else ub[i]
-        lower[i]=max(lb[i],lower[i-1]) if closes[i+p-1]>=lower[i-1] else lb[i]
-    trend_up=closes[-1]>lower[-1]; trend_prev=closes[-2]>lower[-2] if len(closes)>=2 else trend_up
+        upper[i]=min(upper_basic[i],upper[i-1]) if closes[i+p-1]<=upper[i-1] else upper_basic[i]
+        lower[i]=max(lower_basic[i],lower[i-1]) if closes[i+p-1]>=lower[i-1] else lower_basic[i]
+    trend_up=closes[-1]>lower[-1]
+    trend_prev=closes[-2]>lower[-2] if len(closes)>=2 else trend_up
     price=closes[-1]
     if trend_up:
-        dist=(price-lower[-1])/max(atr_vals[-1],0.0001); conf=min(0.92,0.75+min(dist*0.04,0.17))
+        dist=(price-lower[-1])/max(atr_vals[-1],0.0001)
+        conf=min(0.92,0.75+min(dist*0.04,0.17))
         if not trend_prev: return "BUY",min(0.92,conf+0.05)
         return "BUY",conf
     else:
-        dist=(upper[-1]-price)/max(atr_vals[-1],0.0001); conf=min(0.92,0.75+min(dist*0.04,0.17))
+        dist=(upper[-1]-price)/max(atr_vals[-1],0.0001)
+        conf=min(0.92,0.75+min(dist*0.04,0.17))
         if trend_prev: return "SELL",min(0.92,conf+0.05)
         return "SELL",conf
 
 def chandelier_exit(candles, p=22, mult=3.0):
     if len(candles)<p+2: return "NONE",0.0
-    closes=[c["close"] for c in candles]; highs=[c["high"] for c in candles]; lows=[c["low"] for c in candles]
-    at=atr(candles,p)
+    closes=[c["close"] for c in candles]; highs=[c["high"] for c in candles]
+    lows=[c["low"] for c in candles]; at=atr(candles,p)
     if at==0: return "NONE",0.0
-    ce_long=max(highs[-p:])-mult*at; ce_short=min(lows[-p:])+mult*at
+    highest_high=max(highs[-p:]); lowest_low=min(lows[-p:])
+    ce_long=highest_high-mult*at; ce_short=lowest_low+mult*at
     price=closes[-1]; prev=closes[-2] if len(closes)>=2 else price
     if price>ce_long and prev<=ce_long:
-        return "BUY",min(0.90,0.78+min((price-ce_long)/max(at,0.0001)*0.04,0.12))
+        gap=(price-ce_long)/max(at,0.0001); return "BUY",min(0.90,0.78+min(gap*0.04,0.12))
     elif price<ce_short and prev>=ce_short:
-        return "SELL",min(0.90,0.78+min((ce_short-price)/max(at,0.0001)*0.04,0.12))
+        gap=(ce_short-price)/max(at,0.0001); return "SELL",min(0.90,0.78+min(gap*0.04,0.12))
     elif price>ce_long: return "BUY",0.75
     elif price<ce_short: return "SELL",0.75
     return "NONE",0.0
@@ -522,33 +433,37 @@ def heikin_ashi_trend(candles, lookback=5):
     ha=[]; prev_o=(candles[0]["open"]+candles[0]["close"])/2
     prev_c=(candles[0]["open"]+candles[0]["high"]+candles[0]["low"]+candles[0]["close"])/4
     for c in candles:
-        ha_c=(c["open"]+c["high"]+c["low"]+c["close"])/4; ha_o=(prev_o+prev_c)/2
-        ha_h=max(c["high"],ha_o,ha_c); ha_l=min(c["low"],ha_o,ha_c)
-        ha.append({"open":ha_o,"high":ha_h,"low":ha_l,"close":ha_c}); prev_o=ha_o; prev_c=ha_c
+        ha_c=(c["open"]+c["high"]+c["low"]+c["close"])/4
+        ha_o=(prev_o+prev_c)/2; ha_h=max(c["high"],ha_o,ha_c); ha_l=min(c["low"],ha_o,ha_c)
+        ha.append({"open":ha_o,"high":ha_h,"low":ha_l,"close":ha_c})
+        prev_o=ha_o; prev_c=ha_c
     recent=ha[-lookback:]
-    bull=[b for b in recent if b["close"]>b["open"]]; bear=[b for b in recent if b["close"]<b["open"]]
-    if len(bull)==lookback:
-        bodies=[abs(b["close"]-b["open"]) for b in bull]; growing=bodies[-1]>=bodies[0]*0.7
+    bullish=[b for b in recent if b["close"]>b["open"]]
+    bearish=[b for b in recent if b["close"]<b["open"]]
+    if len(bullish)==lookback:
+        bodies=[abs(b["close"]-b["open"]) for b in bullish]
+        growing=bodies[-1]>=bodies[0]*0.7
         return "BUY",0.83 if growing else 0.77
-    if len(bear)==lookback:
-        bodies=[abs(b["close"]-b["open"]) for b in bear]; growing=bodies[-1]>=bodies[0]*0.7
+    if len(bearish)==lookback:
+        bodies=[abs(b["close"]-b["open"]) for b in bearish]
+        growing=bodies[-1]>=bodies[0]*0.7
         return "SELL",0.83 if growing else 0.77
-    if len(bull)>=lookback-1: return "BUY",0.72
-    if len(bear)>=lookback-1: return "SELL",0.72
+    if len(bullish)>=lookback-1: return "BUY",0.72
+    if len(bearish)>=lookback-1: return "SELL",0.72
     return "NONE",0.0
 
 def vwap_signal(candles, lookback=20):
     if len(candles)<lookback: return "NONE",0.0
-    recent=candles[-lookback:]; tpv=0.0; tv=0.0
+    recent=candles[-lookback:]; total_pv=0.0; total_v=0.0
     for c in recent:
         typ=(c["high"]+c["low"]+c["close"])/3; vol=c.get("volume",1000)
-        tpv+=typ*vol; tv+=vol
-    if tv==0: return "NONE",0.0
-    vwap=tpv/tv; price=candles[-1]["close"]; at=atr(candles,14)
+        total_pv+=typ*vol; total_v+=vol
+    if total_v==0: return "NONE",0.0
+    vwap=total_pv/total_v; price=candles[-1]["close"]; at=atr(candles,14)
     if at==0: return "NONE",0.0
-    dist=(price-vwap)/max(at,0.0001)
-    if dist>0.3: return "BUY",min(0.88,0.72+min(dist*0.03,0.16))
-    elif dist<-0.3: return "SELL",min(0.88,0.72+min(abs(dist)*0.03,0.16))
+    dist_pct=(price-vwap)/max(at,0.0001)
+    if dist_pct>0.3: return "BUY",min(0.88,0.72+min(dist_pct*0.03,0.16))
+    elif dist_pct<-0.3: return "SELL",min(0.88,0.72+min(abs(dist_pct)*0.03,0.16))
     return "NONE",0.0
 
 def strat_ema(c):
@@ -565,7 +480,8 @@ def strat_ema(c):
 
 def strat_fibonacci(c):
     if len(c)<60: return "NONE",0
-    cl=[x["close"] for x in c]; hi=max(x["high"] for x in c[-60:]); lo=min(x["low"] for x in c[-60:])
+    cl=[x["close"] for x in c]
+    hi=max(x["high"] for x in c[-60:]); lo=min(x["low"] for x in c[-60:])
     rng=hi-lo
     if rng==0: return "NONE",0
     r=rsi(cl); price=cl[-1]
@@ -577,7 +493,8 @@ def strat_fibonacci(c):
 
 def strat_fvg(c):
     if len(c)<15: return "NONE",0
-    cl=[x["close"] for x in c]; e21=ema(cl,21) if len(cl)>=21 else None; r=rsi(cl)
+    cl=[x["close"] for x in c]
+    e21=ema(cl,21) if len(cl)>=21 else None; r=rsi(cl)
     for i in range(3,min(15,len(c)-1)):
         c1=c[-(i+2)]; c3=c[-i]
         if c3["low"]>c1["high"] and c1["high"]<cl[-1]<c3["low"]:
@@ -591,10 +508,14 @@ def strat_rsi(c):
     if len(cl)<25: return "NONE",0
     r=rsi(cl); r2=rsi(cl[:-3]) if len(cl)>3 else r
     e50=ema(cl,50) if len(cl)>=50 else None
-    if r<30 and (not e50 or cl[-1]>e50[-1]*0.998): return "BUY",0.82
-    if 30<=r<42 and r>r2 and (not e50 or cl[-1]>e50[-1]*0.996): return "BUY",0.74
-    if r>70 and (not e50 or cl[-1]<e50[-1]*1.002): return "SELL",0.82
-    if 58<r<=70 and r<r2 and (not e50 or cl[-1]<e50[-1]*1.004): return "SELL",0.74
+    if r<30:
+        if not e50 or cl[-1]>e50[-1]*0.998: return "BUY",0.82
+    if 30<=r<42 and r>r2:
+        if not e50 or cl[-1]>e50[-1]*0.996: return "BUY",0.74
+    if r>70:
+        if not e50 or cl[-1]<e50[-1]*1.002: return "SELL",0.82
+    if 58<r<=70 and r<r2:
+        if not e50 or cl[-1]<e50[-1]*1.004: return "SELL",0.74
     return "NONE",0
 
 def strat_macd(c):
@@ -611,7 +532,8 @@ def strat_macd(c):
 
 def strat_breakout(c):
     if len(c)<30: return "NONE",0
-    cl=[x["close"] for x in c]; hi20=max(x["high"] for x in c[-21:-1]); lo20=min(x["low"] for x in c[-21:-1])
+    cl=[x["close"] for x in c]
+    hi20=max(x["high"] for x in c[-21:-1]); lo20=min(x["low"] for x in c[-21:-1])
     r=rsi(cl)
     if cl[-1]>hi20 and cl[-2]<=hi20 and 50<r<75: return "BUY",0.80
     if cl[-1]<lo20 and cl[-2]>=lo20 and 25<r<50: return "SELL",0.80
@@ -619,15 +541,19 @@ def strat_breakout(c):
 
 def strat_smc(c):
     if len(c)<40: return "NONE",0
-    cl=[x["close"] for x in c]; e50=ema(cl,50) if len(cl)>=50 else None; r=rsi(cl)
-    shi=max(x["high"] for x in c[-30:-5]); slo=min(x["low"] for x in c[-30:-5])
-    if cl[-1]>shi and cl[-2]<=shi and (not e50 or cl[-1]>e50[-1]) and 45<r<75: return "BUY",0.84
-    if cl[-1]<slo and cl[-2]>=slo and (not e50 or cl[-1]<e50[-1]) and 25<r<55: return "SELL",0.84
+    cl=[x["close"] for x in c]
+    e50=ema(cl,50) if len(cl)>=50 else None; r=rsi(cl)
+    swing_hi=max(x["high"] for x in c[-30:-5]); swing_lo=min(x["low"] for x in c[-30:-5])
+    if cl[-1]>swing_hi and cl[-2]<=swing_hi:
+        if (not e50 or cl[-1]>e50[-1]) and 45<r<75: return "BUY",0.84
+    if cl[-1]<swing_lo and cl[-2]>=swing_lo:
+        if (not e50 or cl[-1]<e50[-1]) and 25<r<55: return "SELL",0.84
     return "NONE",0
 
 def strat_ob(c):
     if len(c)<30: return "NONE",0
-    cl=[x["close"] for x in c]; e21=ema(cl,21) if len(cl)>=21 else None; r=rsi(cl)
+    cl=[x["close"] for x in c]
+    e21=ema(cl,21) if len(cl)>=21 else None; r=rsi(cl)
     for i in range(4,20):
         b=c[-(i+1)]; body=abs(b["close"]-b["open"]); rng=b["high"]-b["low"]
         if rng==0 or body/rng<0.65: continue
@@ -639,7 +565,8 @@ def strat_ob(c):
 
 def strat_stoch(c):
     if len(c)<20: return "NONE",0
-    cl=[x["close"] for x in c]; k=stoch_k(c); kp=stoch_k(c[:-1]) if len(c)>1 else k
+    cl=[x["close"] for x in c]
+    k=stoch_k(c); kp=stoch_k(c[:-1]) if len(c)>1 else k
     e50=ema(cl,50) if len(cl)>=50 else None; r=rsi(cl)
     if k>kp and k<30 and (not e50 or cl[-1]>e50[-1]*0.997): return "BUY",0.80
     if k<kp and k>70 and (not e50 or cl[-1]<e50[-1]*1.003): return "SELL",0.80
@@ -650,56 +577,77 @@ def strat_ai(c):
     cl=[x["close"] for x in c]; hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
     e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else e50
     r=rsi(cl); m,sig_=macd(cl); up,mid,lo=bb(cl); at=atr(c)
-    def norm(val,mn,mx): return 0 if mx==mn else 2*(val-mn)/(mx-mn)-1
+    def norm(val,mn,mx):
+        if mx==mn: return 0
+        return 2*(val-mn)/(mx-mn)-1
     f=[0.0]*8
     if e9 and e21 and e50:
         if e9[-1]>e21[-1]>e50[-1]: f[0]=1.0
         elif e9[-1]<e21[-1]<e50[-1]: f[0]=-1.0
         else: f[0]=(e9[-1]-e21[-1])/(at if at else 1)*0.5
     f[1]=norm(r,0,100); f[1]=-f[1]
-    if m and sig_: f[2]=1.0 if m>sig_ and m>0 else(-1.0 if m<sig_ and m<0 else 0.5 if m>sig_ else -0.5)
-    if up and mid and lo: f[3]=norm(cl[-1],lo,up); f[3]=-f[3]
-    if len(cl)>=6: mom=(cl[-1]-cl[-6])/max(abs(cl[-6]),0.001)*100; f[4]=max(-1,min(1,mom/2))
-    if at and mid: vol_ratio=at/mid*100; f[5]=1.0 if 0.1<vol_ratio<0.5 else(0.5 if vol_ratio<=0.1 else -0.5)
+    if m and sig_:
+        f[2]=1.0 if m>sig_ and m>0 else(-1.0 if m<sig_ and m<0 else 0.5 if m>sig_ else -0.5)
+    if up and mid and lo:
+        f[3]=norm(cl[-1],lo,up); f[3]=-f[3]
+    if len(cl)>=6:
+        mom=(cl[-1]-cl[-6])/max(abs(cl[-6]),0.001)*100; f[4]=max(-1,min(1,mom/2))
+    if at and mid:
+        vol_ratio=at/mid*100
+        f[5]=1.0 if 0.1<vol_ratio<0.5 else(0.5 if vol_ratio<=0.1 else -0.5)
     hi20=max(hi[-20:]); lo20=min(lo_[-20:]); rng20=hi20-lo20 if hi20!=lo20 else 1
-    pos=(cl[-1]-lo20)/rng20; f[6]=1.0 if pos<0.2 else(-1.0 if pos>0.8 else 0.0)
-    if e50 and e200: trend=(e50[-1]-e200[-1])/max(e200[-1],0.001)*100; f[7]=max(-1,min(1,trend*10))
-    W=[2.8,2.2,1.8,1.5,1.2,0.8,1.6,1.9]; score=sum(f[i]*W[i] for i in range(8))/sum(W)
-    if score>=0.35: return "BUY",min(0.92,0.68+score*0.35)
-    if score<=-0.35: return "SELL",min(0.92,0.68+abs(score)*0.35)
+    pos=(cl[-1]-lo20)/rng20
+    f[6]=1.0 if pos<0.2 else(-1.0 if pos>0.8 else 0.0)
+    if e50 and e200:
+        trend=(e50[-1]-e200[-1])/max(e200[-1],0.001)*100; f[7]=max(-1,min(1,trend*10))
+    W=[2.8,2.2,1.8,1.5,1.2,0.8,1.6,1.9]; score=sum(f[i]*W[i] for i in range(8)); max_score=sum(W)
+    score_norm=score/max_score
+    if score_norm>=0.35: return "BUY",min(0.92,0.68+score_norm*0.35)
+    if score_norm<=-0.35: return "SELL",min(0.92,0.68+abs(score_norm)*0.35)
     return "NONE",0
 
 def strat_scalping(c):
     if len(c)<20: return "NONE",0
-    cl=[x["close"] for x in c]; e5=ema(cl,5); e13=ema(cl,13); e50=ema(cl,50) if len(cl)>=50 else None
+    cl=[x["close"] for x in c]
+    e5=ema(cl,5); e13=ema(cl,13); e50=ema(cl,50) if len(cl)>=50 else None
     if len(e5)<3 or len(e13)<3: return "NONE",0
     r=rsi(cl,9)
-    if e5[-1]>e13[-1] and r<70 and (not e50 or cl[-1]>e50[-1]*0.997): return "BUY",0.74
-    if e5[-1]<e13[-1] and r>30 and (not e50 or cl[-1]<e50[-1]*1.003): return "SELL",0.74
+    if e5[-1]>e13[-1] and r<70:
+        if not e50 or cl[-1]>e50[-1]*0.997: return "BUY",0.74
+    if e5[-1]<e13[-1] and r>30:
+        if not e50 or cl[-1]<e50[-1]*1.003: return "SELL",0.74
     return "NONE",0
 
 def calc_pivot_points(candles):
     if len(candles)<20: return None
-    recent=candles[-20:]; hi=max(x["high"] for x in recent); lo=min(x["low"] for x in recent); cl=candles[-1]["close"]
-    pp=(hi+lo+cl)/3; rng=hi-lo
-    return {"pp":pp,"r1":2*pp-lo,"r2":pp+rng,"s1":2*pp-hi,"s2":pp-rng,
-            "fib_r1":pp+0.382*rng,"fib_r2":pp+0.618*rng,"fib_s1":pp-0.382*rng,"fib_s2":pp-0.618*rng}
+    recent=candles[-20:]
+    hi=max(x["high"] for x in recent); lo=min(x["low"] for x in recent); cl=candles[-1]["close"]
+    pp=(hi+lo+cl)/3; r1=2*pp-lo; r2=pp+(hi-lo); r3=hi+2*(pp-lo)
+    s1=2*pp-hi; s2=pp-(hi-lo); s3=lo-2*(hi-pp); rng=hi-lo
+    return {"pp":pp,"r1":r1,"r2":r2,"r3":r3,"s1":s1,"s2":s2,"s3":s3,
+            "fib_r1":pp+0.382*rng,"fib_r2":pp+0.618*rng,
+            "fib_s1":pp-0.382*rng,"fib_s2":pp-0.618*rng}
 
 def pivot_signal(candles, trend):
     pv=calc_pivot_points(candles)
     if not pv: return False,0.0
     price=candles[-1]["close"]; tol=0.008
-    lvls={"TRENDING_UP":[pv["s1"],pv["s2"],pv["fib_s1"],pv["fib_s2"],pv["pp"]],
-          "TRENDING_DN":[pv["r1"],pv["r2"],pv["fib_r1"],pv["fib_r2"],pv["pp"]]}.get(trend,[])
-    for lvl in lvls:
-        if abs(price-lvl)/max(lvl,0.0001)<tol:
-            return True,(0.07 if lvl in(pv.get("s1"),pv.get("r1"),pv.get("fib_s1"),pv.get("fib_r1")) else 0.05)
+    if trend=="TRENDING_UP":
+        for lvl in [pv["s1"],pv["s2"],pv["fib_s1"],pv["fib_s2"],pv["pp"]]:
+            if abs(price-lvl)/max(lvl,0.0001)<tol:
+                return True,0.07 if lvl in(pv["s1"],pv["fib_s1"]) else 0.05
+    elif trend=="TRENDING_DN":
+        for lvl in [pv["r1"],pv["r2"],pv["fib_r1"],pv["fib_r2"],pv["pp"]]:
+            if abs(price-lvl)/max(lvl,0.0001)<tol:
+                return True,0.07 if lvl in(pv["r1"],pv["fib_r1"]) else 0.05
     return False,0.0
 
 def market_regime(candles):
     if len(candles)<20: return "UNKNOWN",0
-    cl=[x["close"] for x in candles]; adx,pdi,mdi=calc_adx_full(candles,14); at=atr(candles)
-    mid_val=sum(cl[-20:])/20; atr_pct=(at/mid_val*100) if mid_val>0 else 0
+    cl=[x["close"] for x in candles]
+    adx,pdi,mdi=calc_adx_full(candles,14); at=atr(candles)
+    mid_val=sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
+    atr_pct=(at/mid_val*100) if mid_val>0 else 0
     e50=ema(cl,50) if len(cl)>=50 else None
     if adx>12 and pdi>mdi+1: regime="TRENDING_UP"; score=min(10,adx/3)
     elif adx>12 and mdi>pdi+1: regime="TRENDING_DN"; score=min(10,adx/3)
@@ -715,43 +663,51 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     cl=[x["close"] for x in c]; at=atr(c)
     if at==0: return "NONE",0
     mid_price=sum(cl[-20:])/20 if len(cl)>=20 else cl[-1]
-    if (at/mid_price*100) if mid_price>0 else 0 < 0.005: return "NONE",0
+    atr_pct=(at/mid_price*100) if mid_price>0 else 0
+    if atr_pct<0.005: return "NONE",0
     adx,pdi,mdi=calc_adx_full(c,14); regime,_=market_regime(c)
     st_sig,st_conf=supertrend(c,p=10,mult=3.0); ha_sig,ha_conf=heikin_ashi_trend(c,lookback=5)
     ce_sig,ce_conf=chandelier_exit(c,p=22,mult=3.0); vw_sig,vw_conf=vwap_signal(c,lookback=20)
     classic_fns=[(strat_ema,1.4),(strat_rsi,1.6),(strat_macd,1.5),(strat_smc,1.7),
-        (strat_breakout,1.4),(strat_ob,1.5),(strat_stoch,1.3),(strat_ai,1.8),
-        (strat_scalping,1.2),(strat_fvg,1.3),(strat_fibonacci,1.4)]
-    buy_score=sell_score=0.0; buy_cnt=sell_cnt=0; NW=2.5
-    if st_sig=="BUY" and st_conf>=min_per_conf: buy_score+=st_conf*NW; buy_cnt+=1
-    elif st_sig=="SELL" and st_conf>=min_per_conf: sell_score+=st_conf*NW; sell_cnt+=1
-    if ha_sig=="BUY" and ha_conf>=min_per_conf: buy_score+=ha_conf*NW; buy_cnt+=1
-    elif ha_sig=="SELL" and ha_conf>=min_per_conf: sell_score+=ha_conf*NW; sell_cnt+=1
-    if ce_sig=="BUY" and ce_conf>=min_per_conf: buy_score+=ce_conf*NW; buy_cnt+=1
-    elif ce_sig=="SELL" and ce_conf>=min_per_conf: sell_score+=ce_conf*NW; sell_cnt+=1
-    if vw_sig=="BUY" and vw_conf>=min_per_conf: buy_score+=vw_conf*1.8; buy_cnt+=1
-    elif vw_sig=="SELL" and vw_conf>=min_per_conf: sell_score+=vw_conf*1.8; sell_cnt+=1
+        (strat_breakout,1.4),(strat_ob,1.5),(strat_stoch,1.3),
+        (strat_ai,1.8),(strat_scalping,1.2),(strat_fvg,1.3),(strat_fibonacci,1.4)]
+    buy_score=sell_score=0.0; buy_cnt=sell_cnt=0; buy_confs=[]; sell_confs=[]; NW=2.5
+    if st_sig=="BUY" and st_conf>=min_per_conf: buy_score+=st_conf*NW; buy_cnt+=1; buy_confs.append(st_conf)
+    elif st_sig=="SELL" and st_conf>=min_per_conf: sell_score+=st_conf*NW; sell_cnt+=1; sell_confs.append(st_conf)
+    if ha_sig=="BUY" and ha_conf>=min_per_conf: buy_score+=ha_conf*NW; buy_cnt+=1; buy_confs.append(ha_conf)
+    elif ha_sig=="SELL" and ha_conf>=min_per_conf: sell_score+=ha_conf*NW; sell_cnt+=1; sell_confs.append(ha_conf)
+    if ce_sig=="BUY" and ce_conf>=min_per_conf: buy_score+=ce_conf*NW; buy_cnt+=1; buy_confs.append(ce_conf)
+    elif ce_sig=="SELL" and ce_conf>=min_per_conf: sell_score+=ce_conf*NW; sell_cnt+=1; sell_confs.append(ce_conf)
+    if vw_sig=="BUY" and vw_conf>=min_per_conf: buy_score+=vw_conf*1.8; buy_cnt+=1; buy_confs.append(vw_conf)
+    elif vw_sig=="SELL" and vw_conf>=min_per_conf: sell_score+=vw_conf*1.8; sell_cnt+=1; sell_confs.append(vw_conf)
     for fn,w in classic_fns:
         try:
             s,conf=fn(c)
-            if s=="BUY" and conf>=min_per_conf: buy_score+=conf*w; buy_cnt+=1
-            elif s=="SELL" and conf>=min_per_conf: sell_score+=conf*w; sell_cnt+=1
+            if s=="BUY" and conf>=min_per_conf: buy_score+=conf*w; buy_cnt+=1; buy_confs.append(conf)
+            elif s=="SELL" and conf>=min_per_conf: sell_score+=conf*w; sell_cnt+=1; sell_confs.append(conf)
         except: pass
     if regime=="VOLATILE": return "NONE",0
-    dom=1.15
+    dom_ratio=1.15; min_strats_req=min_strats
     if regime=="RANGING":
-        ns=[st_sig,ha_sig,ce_sig]; bn=sum(1 for s in ns if s=="BUY"); sn=sum(1 for s in ns if s=="SELL")
-        if bn>=2 and buy_cnt>=min_strats and buy_score>sell_score*dom:
-            _,pb=pivot_signal(c,"TRENDING_UP"); return "BUY",round(min(0.92,0.74+(buy_score/max(buy_cnt,1)/5.0)*0.12+pb),3)
-        if sn>=2 and sell_cnt>=min_strats and sell_score>buy_score*dom:
-            _,pb=pivot_signal(c,"TRENDING_DN"); return "SELL",round(min(0.92,0.74+(sell_score/max(sell_cnt,1)/5.0)*0.12+pb),3)
+        new_sigs=[st_sig,ha_sig,ce_sig]
+        buy_new=sum(1 for s in new_sigs if s=="BUY"); sell_new=sum(1 for s in new_sigs if s=="SELL")
+        if buy_new>=2 and buy_cnt>=min_strats_req and buy_score>sell_score*dom_ratio:
+            in_pivot,piv_bonus=pivot_signal(c,"TRENDING_UP")
+            final=min(0.92,0.74+(buy_score/max(buy_cnt,1)/5.0)*0.12+piv_bonus)
+            return "BUY",round(final,3)
+        if sell_new>=2 and sell_cnt>=min_strats_req and sell_score>buy_score*dom_ratio:
+            in_pivot,piv_bonus=pivot_signal(c,"TRENDING_DN")
+            final=min(0.92,0.74+(sell_score/max(sell_cnt,1)/5.0)*0.12+piv_bonus)
+            return "SELL",round(final,3)
         return "NONE",0
-    if regime=="TRENDING_UP" and buy_cnt>=min_strats and buy_score>sell_score*dom:
-        _,pb=pivot_signal(c,"TRENDING_UP"); ab=min(0.05,adx/500)
-        return "BUY",round(min(0.95,0.75+(buy_score/max(buy_cnt,1)/5.0)*0.13+pb+ab),3)
-    if regime=="TRENDING_DN" and sell_cnt>=min_strats and sell_score>buy_score*dom:
-        _,pb=pivot_signal(c,"TRENDING_DN"); ab=min(0.05,adx/500)
-        return "SELL",round(min(0.95,0.75+(sell_score/max(sell_cnt,1)/5.0)*0.13+pb+ab),3)
+    if regime=="TRENDING_UP" and buy_cnt>=min_strats_req and buy_score>sell_score*dom_ratio:
+        in_pivot,piv_bonus=pivot_signal(c,"TRENDING_UP"); adx_bonus=min(0.05,adx/500)
+        final=min(0.95,0.75+(buy_score/max(buy_cnt,1)/5.0)*0.13+piv_bonus+adx_bonus)
+        return "BUY",round(final,3)
+    if regime=="TRENDING_DN" and sell_cnt>=min_strats_req and sell_score>buy_score*dom_ratio:
+        in_pivot,piv_bonus=pivot_signal(c,"TRENDING_DN"); adx_bonus=min(0.05,adx/500)
+        final=min(0.95,0.75+(sell_score/max(sell_cnt,1)/5.0)*0.13+piv_bonus+adx_bonus)
+        return "SELL",round(final,3)
     return "NONE",0
 
 def strat_deriv_pro_elite(c):
@@ -759,8 +715,8 @@ def strat_deriv_pro_elite(c):
     cl=[x["close"] for x in c]; hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
     e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50) if len(cl)>=50 else None
     if not e9 or not e21 or len(e9)<3 or len(e21)<3: return "NONE",0
-    r=rsi(cl,14); at=atr(c); m,sig_=macd(cl); macd_h=m-sig_
-    m2,sig2=(macd(cl[:-1]) if len(cl)>=2 else (m,sig_)); macd_hp=m2-sig2
+    r=rsi(cl,14); at=atr(c); m,sig_=macd(cl); macd_hist=m-sig_
+    m_prev,sig_prev=(macd(cl[:-1]) if len(cl)>=2 else (m,sig_)); macd_hist_prev=m_prev-sig_prev
     up_bb,mid_bb,lo_bb=bb(cl,20,2.0); k=stoch_k(c,14); kp=stoch_k(c[:-2]) if len(c)>2 else k
     if at==0 or not mid_bb: return "NONE",0
     atr_pct=at/mid_bb*100
@@ -768,59 +724,89 @@ def strat_deriv_pro_elite(c):
     adx,pdi,mdi=calc_adx_full(c,14)
     if adx<12: return "NONE",0
     trend_up=e9[-1]>e21[-1]; trend_down=e9[-1]<e21[-1]
-    if e50: trend_up=trend_up and cl[-1]>e50[-1]*0.998; trend_down=trend_down and cl[-1]<e50[-1]*1.002
+    if e50:
+        trend_up=trend_up and cl[-1]>e50[-1]*0.998
+        trend_down=trend_down and cl[-1]<e50[-1]*1.002
     if not trend_up and not trend_down: return "NONE",0
-    hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
+    if trend_up and not(e9[-1]>e9[-2] or e21[-1]>e21[-2]): return "NONE",0
+    if trend_down and not(e9[-1]<e9[-2] or e21[-1]<e21[-2]): return "NONE",0
+    hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1]); hi10=max(hi[-11:-1]); lo10=min(lo_[-11:-1])
     roc3=(cl[-1]-cl[-4])/max(abs(cl[-4]),0.001)*100 if len(cl)>=4 else 0
-    body=abs(cl[-1]-c[-1]["open"])/max(c[-1]["high"]-c[-1]["low"],0.00001)
-    st_sig,_=supertrend(c,p=10,mult=3.0)
-
-    def score_direction(up):
-        s=0.0
-        if up:
-            if cl[-1]>hi20 and cl[-2]<=hi20: s+=2.0
-            elif cl[-1]>hi20*0.997: s+=0.8
-            if 25<=r<=45: s+=3.0
-            elif r<25: s+=2.5
-            elif r<70: s+=0.8
-            if m>sig_ and macd_h>macd_hp: s+=2.5 if m>0 else 1.8
-            elif m>sig_: s+=1.0
-            if k<25 and k>kp: s+=2.5
-            elif k<35 and k>kp: s+=1.5
-            if lo_bb and cl[-1]<=lo_bb*1.005: s+=2.0
-            elif mid_bb and cl[-1]<mid_bb: s+=0.8
-            if roc3>0: s+=0.7
-            if body>=0.60 and cl[-1]>c[-1]["open"]: s+=1.5
-            if st_sig=="BUY": s+=2.0
-        else:
-            if cl[-1]<lo20 and cl[-2]>=lo20: s+=2.0
-            elif cl[-1]<lo20*1.003: s+=0.8
-            if 55<=r<=75: s+=3.0
-            elif r>75: s+=2.5
-            elif r>30: s+=0.8
-            if m<sig_ and macd_h<macd_hp: s+=2.5 if m<0 else 1.8
-            elif m<sig_: s+=1.0
-            if k>75 and k<kp: s+=2.5
-            elif k>65 and k<kp: s+=1.5
-            if up_bb and cl[-1]>=up_bb*0.995: s+=2.0
-            elif mid_bb and cl[-1]>mid_bb: s+=0.8
-            if roc3<0: s+=0.7
-            if body>=0.60 and cl[-1]<c[-1]["open"]: s+=1.5
-            if st_sig=="SELL": s+=2.0
-        if adx>=45: s+=2.0
-        elif adx>=35: s+=1.5
-        elif adx>=25: s+=0.8
-        elif adx>=12: s+=0.3
-        _,pb=pivot_signal(c,"TRENDING_UP" if up else "TRENDING_DN")
-        s+=pb*10
-        return s
-
+    roc5v=(cl[-1]-cl[-6])/max(abs(cl[-6]),0.001)*100 if len(cl)>=6 else 0
+    last_body=abs(cl[-1]-c[-1]["open"]); last_range=max(c[-1]["high"]-c[-1]["low"],0.00001)
+    body_ratio=last_body/last_range; st_sig,_=supertrend(c,p=10,mult=3.0)
     if trend_up:
-        s=score_direction(True)
-        if s>=5.0: return "BUY",round(min(0.95,0.76+(s/15.0)*0.25+(0.02 if adx>=50 else 0)),3)
+        score=0.0; bo_score=0.0
+        if cl[-1]>hi20 and cl[-2]<=hi20: bo_score+=2.0
+        elif cl[-1]>hi20*0.997: bo_score+=0.8
+        if cl[-1]>hi10 and cl[-2]<=hi10: bo_score+=1.0
+        elif cl[-1]>hi10*0.998: bo_score+=0.4
+        score+=min(3.5,bo_score)
+        if 25<=r<=45: score+=3.0
+        elif 45<r<=55: score+=2.0
+        elif 55<r<=65: score+=1.2
+        elif r<25: score+=2.5
+        elif r<70: score+=0.8
+        macd_ok=(m>sig_ and macd_hist>macd_hist_prev)
+        if macd_ok and m>0: score+=2.5
+        elif macd_ok: score+=1.8
+        elif m>sig_: score+=1.0
+        if k<25 and k>kp: score+=2.5
+        elif k<35 and k>kp: score+=1.5
+        elif k>kp: score+=0.8
+        if lo_bb and cl[-1]<=lo_bb*1.005: score+=2.0
+        elif mid_bb and cl[-1]<mid_bb: score+=0.8
+        if roc3>0 and roc5v>0: score+=1.5
+        elif roc3>0: score+=0.7
+        if body_ratio>=0.60 and cl[-1]>c[-1]["open"]: score+=1.5
+        elif body_ratio>=0.40 and cl[-1]>c[-1]["open"]: score+=0.8
+        if adx>=45: score+=2.0
+        elif adx>=35: score+=1.5
+        elif adx>=25: score+=0.8
+        elif adx>=12: score+=0.3
+        if st_sig=="BUY": score+=2.0
+        in_piv,_=pivot_signal(c,"TRENDING_UP")
+        if in_piv: score+=1.5
+        if score>=5.0:
+            pct=score/15.0; conf=min(0.95,0.76+pct*0.25)
+            if adx>=50: conf=min(0.95,conf+0.02)
+            return "BUY",round(conf,3)
     if trend_down:
-        s=score_direction(False)
-        if s>=5.0: return "SELL",round(min(0.95,0.76+(s/15.0)*0.25+(0.02 if adx>=50 else 0)),3)
+        score=0.0; bo_score=0.0
+        if cl[-1]<lo20 and cl[-2]>=lo20: bo_score+=2.0
+        elif cl[-1]<lo20*1.003: bo_score+=0.8
+        if cl[-1]<lo10 and cl[-2]>=lo10: bo_score+=1.0
+        elif cl[-1]<lo10*1.002: bo_score+=0.4
+        score+=min(3.5,bo_score)
+        if 55<=r<=75: score+=3.0
+        elif 45<=r<55: score+=2.0
+        elif 35<=r<45: score+=1.2
+        elif r>75: score+=2.5
+        elif r>30: score+=0.8
+        macd_ok=(m<sig_ and macd_hist<macd_hist_prev)
+        if macd_ok and m<0: score+=2.5
+        elif macd_ok: score+=1.8
+        elif m<sig_: score+=1.0
+        if k>75 and k<kp: score+=2.5
+        elif k>65 and k<kp: score+=1.5
+        elif k<kp: score+=0.8
+        if up_bb and cl[-1]>=up_bb*0.995: score+=2.0
+        elif mid_bb and cl[-1]>mid_bb: score+=0.8
+        if roc3<0 and roc5v<0: score+=1.5
+        elif roc3<0: score+=0.7
+        if body_ratio>=0.60 and cl[-1]<c[-1]["open"]: score+=1.5
+        elif body_ratio>=0.40 and cl[-1]<c[-1]["open"]: score+=0.8
+        if adx>=45: score+=2.0
+        elif adx>=35: score+=1.5
+        elif adx>=25: score+=0.8
+        elif adx>=12: score+=0.3
+        if st_sig=="SELL": score+=2.0
+        in_piv,_=pivot_signal(c,"TRENDING_DN")
+        if in_piv: score+=1.5
+        if score>=5.0:
+            pct=score/15.0; conf=min(0.95,0.76+pct*0.25)
+            if adx>=50: conf=min(0.95,conf+0.02)
+            return "SELL",round(conf,3)
     return "NONE",0
 
 def strat_binance_gold(c):
@@ -836,71 +822,85 @@ def strat_binance_gold(c):
     trend_up=e20[-1]>e50[-1] and e50[-1]>e200[-1] and cl[-1]>e200[-1]
     trend_dn=e20[-1]<e50[-1] and e50[-1]<e200[-1] and cl[-1]<e200[-1]
     if not trend_up and not trend_dn: return "NONE",0
-    if at/mid*100<0.03: return "NONE",0
-    bp=0; sp=0
-    if trend_up: bp+=3
-    if trend_dn: sp+=3
-    if adx_v>=35: bp+=2 if trend_up else 0; sp+=2 if trend_dn else 0
-    if trend_up and 30<=r<=55: bp+=3
-    elif trend_up and r<30: bp+=2
-    if trend_dn and 45<=r<=70: sp+=3
-    elif trend_dn and r>70: sp+=2
-    if m>sig_ and m>0: bp+=2
-    if m<sig_ and m<0: sp+=2
-    if lo and cl[-1]<=lo*1.002: bp+=3
-    if up and cl[-1]>=up*0.998: sp+=3
-    if k<25: bp+=2
-    if k>75: sp+=2
+    atr_pct=at/mid*100
+    if atr_pct<0.03: return "NONE",0
+    buy_pts=0; sell_pts=0
+    if trend_up: buy_pts+=3
+    if trend_dn: sell_pts+=3
+    if adx_v>=35: buy_pts+=2 if trend_up else 0; sell_pts+=2 if trend_dn else 0
+    elif adx_v>=25: buy_pts+=1 if trend_up else 0; sell_pts+=1 if trend_dn else 0
+    if trend_up and 30<=r<=55: buy_pts+=3
+    elif trend_up and r<30: buy_pts+=2
+    if trend_dn and 45<=r<=70: sell_pts+=3
+    elif trend_dn and r>70: sell_pts+=2
+    if m>sig_ and m>0: buy_pts+=2
+    if m<sig_ and m<0: sell_pts+=2
+    if lo and cl[-1]<=lo*1.002: buy_pts+=3
+    elif mid and cl[-1]<mid*1.005: buy_pts+=1
+    if up and cl[-1]>=up*0.998: sell_pts+=3
+    elif mid and cl[-1]>mid*0.995: sell_pts+=1
+    if k<25: buy_pts+=2
+    elif k<35: buy_pts+=1
+    if k>75: sell_pts+=2
+    elif k>65: sell_pts+=1
     if vol[-1]>avg_vol*1.8:
-        if bp>sp: bp+=2
-        elif sp>bp: sp+=2
+        if buy_pts>sell_pts: buy_pts+=2
+        elif sell_pts>buy_pts: sell_pts+=2
     st_sig,_=supertrend(c,p=10,mult=3.0)
-    if st_sig=="BUY": bp+=2
-    if st_sig=="SELL": sp+=2
-    if bp>=7 and bp>sp+2 and trend_up: return "BUY",min(0.91,0.72+bp*0.018)
-    if sp>=7 and sp>bp+2 and trend_dn: return "SELL",min(0.91,0.72+sp*0.018)
+    if st_sig=="BUY": buy_pts+=2
+    if st_sig=="SELL": sell_pts+=2
+    if buy_pts>=7 and buy_pts>sell_pts+2 and trend_up: return "BUY",min(0.91,0.72+buy_pts*0.018)
+    if sell_pts>=7 and sell_pts>buy_pts+2 and trend_dn: return "SELL",min(0.91,0.72+sell_pts*0.018)
     return "NONE",0
 
 def strat_binance_crypto(c):
     if len(c)<50: return "NONE",0
     cl=[x["close"] for x in c]; hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
     vol=[x.get("volume",0) for x in c]
-    e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
+    e9=ema(cl,9); e21=ema(cl,21); e50=ema(cl,50)
+    e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
     if not e9 or not e21 or not e50: return "NONE",0
     r=rsi(cl,14); at=atr(c); m,sig_=macd(cl); up,mid,lo=bb(cl,20,2.0)
     k=stoch_k(c,14); adx_v,pdi_v,mdi_v=calc_adx_full(c,14)
     avg_vol=sum(vol[-20:])/20 if len(vol)>=20 else 1
     if adx_v<18 or (avg_vol>0 and vol[-1]<avg_vol*0.4): return "NONE",0
     long_bull=e200 and cl[-1]>e200[-1]; long_bear=e200 and cl[-1]<e200[-1]
-    bp=0; sp=0
-    if e9[-1]>e21[-1]>e50[-1]: bp+=3+(2 if long_bull else 0)
-    if e9[-1]<e21[-1]<e50[-1]: sp+=3+(2 if long_bear else 0)
-    if len(e9)>=2 and e9[-2]<e21[-2] and e9[-1]>e21[-1]: bp+=3
-    if len(e9)>=2 and e9[-2]>e21[-2] and e9[-1]<e21[-1]: sp+=3
-    if adx_v>=35: bp+=2 if pdi_v>mdi_v else 0; sp+=2 if mdi_v>pdi_v else 0
-    if 30<=r<=50 and long_bull: bp+=3
-    elif r<30: bp+=2
-    if 50<=r<=70 and long_bear: sp+=3
-    elif r>70: sp+=2
-    if m>sig_ and m>0: bp+=2
-    elif m>sig_: bp+=1
-    if m<sig_ and m<0: sp+=2
-    elif m<sig_: sp+=1
-    if lo and cl[-1]<=lo: bp+=3
-    if up and cl[-1]>=up: sp+=3
-    if k<20: bp+=2
-    if k>80: sp+=2
+    buy_pts=0; sell_pts=0
+    if e9[-1]>e21[-1]>e50[-1]: buy_pts+=3+(2 if long_bull else 0)
+    if e9[-1]<e21[-1]<e50[-1]: sell_pts+=3+(2 if long_bear else 0)
+    if len(e9)>=2 and e9[-2]<e21[-2] and e9[-1]>e21[-1]: buy_pts+=3
+    if len(e9)>=2 and e9[-2]>e21[-2] and e9[-1]<e21[-1]: sell_pts+=3
+    if adx_v>=35: buy_pts+=2 if pdi_v>mdi_v else 0; sell_pts+=2 if mdi_v>pdi_v else 0
+    elif adx_v>=25: buy_pts+=1 if pdi_v>mdi_v else 0; sell_pts+=1 if mdi_v>pdi_v else 0
+    if 30<=r<=50 and long_bull: buy_pts+=3
+    elif r<30: buy_pts+=2
+    if 50<=r<=70 and long_bear: sell_pts+=3
+    elif r>70: sell_pts+=2
+    if m>sig_ and m>0: buy_pts+=2
+    elif m>sig_: buy_pts+=1
+    if m<sig_ and m<0: sell_pts+=2
+    elif m<sig_: sell_pts+=1
+    if lo and cl[-1]<=lo: buy_pts+=3
+    elif lo and cl[-1]<=lo*1.01: buy_pts+=1
+    if up and cl[-1]>=up: sell_pts+=3
+    elif up and cl[-1]>=up*0.99: sell_pts+=1
+    if k<20: buy_pts+=2
+    elif k<35: buy_pts+=1
+    if k>80: sell_pts+=2
+    elif k>65: sell_pts+=1
     if vol[-1]>avg_vol*2.0:
-        if bp>sp: bp+=3
-        elif sp>bp: sp+=3
+        if buy_pts>sell_pts: buy_pts+=3
+        elif sell_pts>buy_pts: sell_pts+=3
     hi20=max(hi[-21:-1]); lo20=min(lo_[-21:-1])
-    if cl[-1]>hi20 and cl[-2]<=hi20: bp+=3 if vol[-1]>avg_vol*1.5 else 1
-    if cl[-1]<lo20 and cl[-2]>=lo20: sp+=3 if vol[-1]>avg_vol*1.5 else 1
+    if cl[-1]>hi20 and cl[-2]<=hi20:
+        buy_pts+=3 if vol[-1]>avg_vol*1.5 else 1
+    if cl[-1]<lo20 and cl[-2]>=lo20:
+        sell_pts+=3 if vol[-1]>avg_vol*1.5 else 1
     st_sig,_=supertrend(c,p=10,mult=3.0)
-    if st_sig=="BUY": bp+=2
-    if st_sig=="SELL": sp+=2
-    if bp>=8 and bp>sp+2: return "BUY",min(0.92,0.70+bp*0.016)
-    if sp>=8 and sp>bp+2: return "SELL",min(0.92,0.70+sp*0.016)
+    if st_sig=="BUY": buy_pts+=2
+    if st_sig=="SELL": sell_pts+=2
+    if buy_pts>=8 and buy_pts>sell_pts+2: return "BUY",min(0.92,0.70+buy_pts*0.016)
+    if sell_pts>=8 and sell_pts>buy_pts+2: return "SELL",min(0.92,0.70+sell_pts*0.016)
     return "NONE",0
 
 def strat_confluence_binance(c, symbol="BTCUSDT"):
@@ -916,13 +916,15 @@ def strat_confluence_binance(c, symbol="BTCUSDT"):
             s,conf=fn(c)
             if s==primary and conf>=0.65: confirm+=1; total_conf+=conf*w
         except: pass
-    if confirm>=3: return primary,max(0.75,min(0.92,total_conf/(confirm+2)))
+    if confirm>=3:
+        return primary,max(0.75,min(0.92,total_conf/(confirm+2)))
     return "NONE",0
 
 STRATEGIES={
     "confluence":strat_confluence_elite,"deriv_pro":strat_deriv_pro_elite,
-    "supertrend":supertrend,"heikin_ashi":heikin_ashi_trend,"chandelier":chandelier_exit,
-    "ai":strat_ai,"ema":strat_ema,"fibonacci":strat_fibonacci,"fvg":strat_fvg,
+    "supertrend":supertrend,"heikin_ashi":heikin_ashi_trend,
+    "chandelier":chandelier_exit,"ai":strat_ai,
+    "ema":strat_ema,"fibonacci":strat_fibonacci,"fvg":strat_fvg,
     "rsi":strat_rsi,"macd_bollinger":strat_macd,"breakout":strat_breakout,
     "smc":strat_smc,"order_block":strat_ob,"stoch_ema":strat_stoch,
     "scalping_pro":strat_scalping,"binance_gold":strat_binance_gold,
@@ -941,14 +943,17 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
             elif nxt["high"]>=entry+tp*0.0001: pnl=tp*lot*10; wins+=1
             else:
                 pnl=(nxt["close"]-entry)*lot*100000
-                wins+=1 if pnl>0 else 0; losses+=0 if pnl>0 else 1
+                if pnl>0: wins+=1
+                else: losses+=1
         else:
             if nxt["high"]>=entry+sl*0.0001: pnl=-sl*lot*10; losses+=1
             elif nxt["low"]<=entry-tp*0.0001: pnl=tp*lot*10; wins+=1
             else:
                 pnl=(entry-nxt["close"])*lot*100000
-                wins+=1 if pnl>0 else 0; losses+=0 if pnl>0 else 1
-        bal+=pnl; equity.append(round(bal,2)); trades.append({"s":s,"e":round(entry,5),"pnl":round(pnl,2)})
+                if pnl>0: wins+=1
+                else: losses+=1
+        bal+=pnl; equity.append(round(bal,2))
+        trades.append({"s":s,"e":round(entry,5),"pnl":round(pnl,2)})
         if len(trades)>=200: break
     tot=wins+losses; net=round(equity[-1]-equity[0],2)
     dd=0; pk=equity[0]
@@ -960,27 +965,47 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     rets=[equity[i]/equity[i-1]-1 for i in range(1,len(equity))]
     avg=sum(rets)/len(rets) if rets else 0
     std=math.sqrt(sum((r-avg)**2 for r in rets)/len(rets)) if rets else 0
-    return {"trades":tot,"wins":wins,"losses":losses,"win_rate":round(wins/tot*100,1) if tot else 0,
-            "net_pnl":net,"return_pct":round(net/equity[0]*100,2),"max_dd":round(dd,2),
-            "pf":round(gp/gl,2) if gl else 999,"sharpe":round(avg/std*math.sqrt(252),2) if std>0 else 0,
-            "equity":equity[-50:]}
-
+    return {
+        "trades":tot,"wins":wins,"losses":losses,
+        "win_rate":round(wins/tot*100,1) if tot else 0,
+        "net_pnl":net,"return_pct":round(net/equity[0]*100,2),
+        "max_dd":round(dd,2),"pf":round(gp/gl,2) if gl else 999,
+        "sharpe":round(avg/std*math.sqrt(252),2) if std and std>0 else 0,
+        "equity":equity[-50:],
+    }
 
 # ═══════════════════════════════════════════════════════════
-# DERIV CLIENT — WebSocket (TOKEN KLASIK SÈLMAN)
+# DERIV CLIENT — Klasik + PAT (WebSocket unifye)
 # ═══════════════════════════════════════════════════════════
 class DerivClient:
+    """
+    Fonksyone pou TOKEN KLASIK ak TOKEN PAT.
+    Auth   : connect_deriv_token() — Hybrid WebSocket
+    Trading: WebSocket (menm flou)
+    """
     def __init__(self, token: str, app_id: str = "1089"):
-        self.token=token; self.app_id=app_id; self._bal=0.0; self._loginid=None
+        self.token   = token
+        self.app_id  = app_id
+        self._bal    = 0.0
+        self._loginid = None
+        self._is_pat = is_pat_token(token)
 
     def connect(self) -> float:
-        ok,balance,loginid,used_app_id,note=connect_classic_token(self.token,self.app_id)
-        if not ok: raise Exception(note)
-        self._bal=balance; self._loginid=loginid
-        if used_app_id: self.app_id=used_app_id
+        ok, balance, loginid, used_app_id, note = connect_deriv_token(
+            self.token, self.app_id
+        )
+        if not ok:
+            raise Exception(note)
+        self._bal     = balance
+        self._loginid = loginid
+        if used_app_id:
+            self.app_id = used_app_id
+        logger.info(f"DerivClient connected | {note} | ${balance:.2f}")
         return self._bal
 
-    def _auth(self, ws): ws.send(json.dumps({"authorize": self.token}))
+    def _authorize_ws(self, ws):
+        """WebSocket authorize — menm flou pou klasik ak PAT"""
+        ws.send(json.dumps({"authorize": self.token}))
 
     def get_candles(self, symbol="R_100", count=200, gran=60):
         import websocket as wsl
@@ -988,40 +1013,44 @@ class DerivClient:
         def on_msg(ws, msg):
             d=json.loads(msg)
             if d.get("msg_type")=="authorize" and "error" not in d:
-                ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","granularity":gran,"style":"candles","adjust_start_time":1}))
+                ws.send(json.dumps({"ticks_history":symbol,"count":count,
+                    "end":"latest","granularity":gran,"style":"candles","adjust_start_time":1}))
             elif "candles" in d: res[0]=d["candles"]; done.set()
             elif "error" in d: done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=25)
         if not res[0]: return []
         return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),
-                 "close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
+            "close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
 
     def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         ct="CALL" if direction=="BUY" else "PUT"
-        if duration_secs<=60: dv,du=1,"m"
-        elif duration_secs<=300: dv,du=5,"m"
-        elif duration_secs<=900: dv,du=15,"m"
-        elif duration_secs<=3600: dv,du=1,"h"
-        else: dv,du=4,"h"
+        if duration_secs<=60:     dur_val,dur_unit=1,"m"
+        elif duration_secs<=300:  dur_val,dur_unit=5,"m"
+        elif duration_secs<=900:  dur_val,dur_unit=15,"m"
+        elif duration_secs<=3600: dur_val,dur_unit=1,"h"
+        else:                     dur_val,dur_unit=4,"h"
         def on_msg(ws, msg):
             d=json.loads(msg); mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal":1,"amount":max(0.5,float(amount)),"basis":"stake",
-                                    "contract_type":ct,"currency":"USD","symbol":symbol,"duration":dv,"duration_unit":du}))
+                ws.send(json.dumps({"proposal":1,"amount":max(0.5,float(amount)),
+                    "basis":"stake","contract_type":ct,"currency":"USD",
+                    "symbol":symbol,"duration":dur_val,"duration_unit":dur_unit}))
             elif mt=="proposal":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
             elif mt=="buy":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d.get("buy",{}); done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=30)
         if err[0]: raise Exception(err[0])
         return res[0] or {}
@@ -1037,9 +1066,10 @@ class DerivClient:
                 b=d.get("balance",{}).get("balance")
                 if b is not None: res[0]=float(b); done.set()
             elif "error" in d: done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=15)
         if res[0]: self._bal=res[0]
         return res[0] or self._bal
@@ -1050,14 +1080,15 @@ class DerivClient:
         def on_msg(ws, msg):
             d=json.loads(msg); mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"transfer_between_accounts":1,"account_to":account_id,
-                                    "amount":round(float(amount),2),"currency":"USD"}))
+                ws.send(json.dumps({"transfer_between_accounts":1,
+                    "account_to":account_id,"amount":round(float(amount),2),"currency":"USD"}))
             elif mt=="transfer_between_accounts":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d; done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=20)
         if err[0]: raise Exception(err[0])
         return res[0]
@@ -1067,47 +1098,51 @@ class DerivClient:
 
 
 # ═══════════════════════════════════════════════════════════
-# DERIV DIGITS CLIENT — DUAL (PAT=REST / KLASIK=WS)
+# DERIV DIGITS CLIENT
 # ═══════════════════════════════════════════════════════════
 class DerivDigitsClient:
     def __init__(self, token: str, app_id: str = "1089"):
-        self.token=token; self.app_id=app_id; self._bal=0.0
-        self._is_pat=is_pat_token(token)
-        self._rest=DerivRESTClient(token) if self._is_pat else None
+        self.token  = token
+        self.app_id = app_id
+        self._bal   = 0.0
 
     def connect(self) -> float:
-        ok,bal,_,used,note=connect_deriv_token(self.token,self.app_id)
+        ok, balance, loginid, used_app_id, note = connect_deriv_token(
+            self.token, self.app_id
+        )
         if not ok: raise Exception(note)
-        self._bal=bal
-        if used: self.app_id=used
-        if self._rest: self._rest._bal=bal
+        self._bal = balance
+        if used_app_id: self.app_id = used_app_id
         return self._bal
 
-    def _auth(self, ws): ws.send(json.dumps({"authorize": self.token}))
+    def _authorize_ws(self, ws):
+        ws.send(json.dumps({"authorize": self.token}))
 
     def get_ticks(self, symbol="R_10", count=100):
-        if self._is_pat and self._rest: return self._rest.get_ticks(symbol,count)
         import websocket as wsl
         res=[None]; done=threading.Event()
         def on_msg(ws, msg):
             d=json.loads(msg)
             if d.get("msg_type")=="authorize" and "error" not in d:
-                ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest","style":"ticks"}))
+                ws.send(json.dumps({"ticks_history":symbol,"count":count,
+                    "end":"latest","style":"ticks"}))
             elif d.get("msg_type")=="history": res[0]=d.get("history",{}); done.set()
             elif "error" in d: done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=25)
         if not res[0]: return []
-        return [{"price":float(p),"time":t} for p,t in zip(res[0].get("prices",[]),res[0].get("times",[]))]
+        prices=res[0].get("prices",[]); times=res[0].get("times",[])
+        return [{"price":float(p),"time":t} for p,t in zip(prices,times)]
 
     def place_digits_trade(self, symbol, contract_type, amount=0.35, barrier=None):
-        if self._is_pat and self._rest: return self._rest.place_digits_trade(symbol,contract_type,amount,barrier)
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         proposal={"proposal":1,"amount":max(0.35,float(amount)),"basis":"stake",
-                  "contract_type":contract_type,"currency":"USD","symbol":symbol,"duration":5,"duration_unit":"t"}
+            "contract_type":contract_type,"currency":"USD","symbol":symbol,
+            "duration":5,"duration_unit":"t"}
         if barrier is not None: proposal["barrier"]=str(barrier)
         def on_msg(ws, msg):
             d=json.loads(msg); mt=d.get("msg_type","")
@@ -1118,32 +1153,34 @@ class DerivDigitsClient:
             elif mt=="buy":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d.get("buy",{}); done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=30)
         if err[0]: raise Exception(err[0])
         return res[0] or {}
 
     def wait_contract_result(self, contract_id, timeout=30):
-        if self._is_pat and self._rest: return self._rest.wait_contract_result(contract_id,timeout)
         import websocket as wsl
         res=[None]; done=threading.Event()
         def on_msg(ws, msg):
             d=json.loads(msg); mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal_open_contract":1,"contract_id":contract_id,"subscribe":1}))
+                ws.send(json.dumps({"proposal_open_contract":1,
+                    "contract_id":contract_id,"subscribe":1}))
             elif mt=="proposal_open_contract":
                 poc=d.get("proposal_open_contract",{})
-                if poc.get("status","") in ("won","lost","sold"): res[0]=poc; done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+                if poc.get("status","") in ("won","lost","sold"):
+                    res[0]=poc; done.set()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=timeout)
         return res[0]
 
     def get_balance_sync(self) -> float:
-        if self._is_pat and self._rest: return self._rest.get_balance_sync()
         import websocket as wsl
         res=[None]; done=threading.Event()
         def on_msg(ws, msg):
@@ -1154,28 +1191,29 @@ class DerivDigitsClient:
                 b=d.get("balance",{}).get("balance")
                 if b is not None: res[0]=float(b); done.set()
             elif "error" in d: done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=15)
         if res[0]: self._bal=res[0]
         return res[0] or self._bal
 
     def transfer_to_account(self, account_id, amount):
-        if self._is_pat and self._rest: return self._rest.transfer_to_account(account_id,amount)
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         def on_msg(ws, msg):
             d=json.loads(msg); mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"transfer_between_accounts":1,"account_to":account_id,
-                                    "amount":round(float(amount),2),"currency":"USD"}))
+                ws.send(json.dumps({"transfer_between_accounts":1,
+                    "account_to":account_id,"amount":round(float(amount),2),"currency":"USD"}))
             elif mt=="transfer_between_accounts":
                 if "error" in d: err[0]=d["error"]["message"]; done.set(); return
                 res[0]=d; done.set()
-        w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
-                           on_message=on_msg,on_open=lambda ws: self._auth(ws))
-        threading.Thread(target=w.run_forever,daemon=True).start()
+        def on_open(ws): self._authorize_ws(ws)
+        url=f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        w=wsl.WebSocketApp(url, on_message=on_msg, on_open=on_open)
+        threading.Thread(target=w.run_forever, daemon=True).start()
         done.wait(timeout=20)
         if err[0]: raise Exception(err[0])
         return res[0]
@@ -1191,10 +1229,12 @@ class BinanceClient:
     def __init__(self, key, secret):
         from binance.client import Client
         self.c=Client(key,secret)
+
     def connect(self):
         for b in self.c.get_account()["balances"]:
             if b["asset"]=="USDT": return float(b["free"])
         return 0.0
+
     @property
     def balance(self):
         try:
@@ -1202,21 +1242,27 @@ class BinanceClient:
                 if b["asset"]=="USDT": return float(b["free"])
         except: pass
         return 0.0
+
     def get_candles(self, symbol="BTCUSDT", interval="15m", limit=200):
         k=self.c.get_klines(symbol=symbol,interval=interval,limit=limit)
-        return [{"open":float(x[1]),"high":float(x[2]),"low":float(x[3]),"close":float(x[4]),"volume":float(x[5]),"time":x[0]} for x in k]
+        return [{"open":float(x[1]),"high":float(x[2]),"low":float(x[3]),
+            "close":float(x[4]),"volume":float(x[5]),"time":x[0]} for x in k]
+
     def get_symbol_info_cached(self, symbol):
         try: return self.c.get_symbol_info(symbol)
         except: return None
-    def _get_filter(self, symbol, ft):
+
+    def _get_filter(self, symbol, filter_type):
         info=self.get_symbol_info_cached(symbol)
         if not info: return None
         for f in info.get("filters",[]):
-            if f["filterType"]==ft: return f
+            if f["filterType"]==filter_type: return f
         return None
+
     def get_min_notional(self, symbol):
         f=self._get_filter(symbol,"MIN_NOTIONAL") or self._get_filter(symbol,"NOTIONAL")
         return float(f.get("minNotional",10)) if f else 10.0
+
     def get_qty_precision(self, symbol):
         f=self._get_filter(symbol,"LOT_SIZE")
         if not f: return 3
@@ -1224,8 +1270,11 @@ class BinanceClient:
         for p,v in [(0,1),(1,.1),(2,.01),(3,.001)]:
             if step>=v: return p
         return 4
+
     def get_min_qty(self, symbol):
-        f=self._get_filter(symbol,"LOT_SIZE"); return float(f["minQty"]) if f else 0.001
+        f=self._get_filter(symbol,"LOT_SIZE")
+        return float(f["minQty"]) if f else 0.001
+
     def get_price_precision(self, symbol):
         f=self._get_filter(symbol,"PRICE_FILTER")
         if not f: return 2
@@ -1233,6 +1282,7 @@ class BinanceClient:
         for p,v in [(0,1),(1,.1),(2,.01),(3,.001)]:
             if tick>=v: return p
         return 4
+
     def place_trade(self, symbol, direction, amount_usdt=10.0, sl_pct=0.018, tp_pct=0.035):
         from binance.enums import SIDE_BUY,SIDE_SELL,TIME_IN_FORCE_GTC
         ticker=self.c.get_symbol_ticker(symbol=symbol); price=float(ticker["price"])
@@ -1241,8 +1291,10 @@ class BinanceClient:
         qty=round(amount_usdt/price,qp); qty=max(qty,min_qty)
         if qty*price<min_not: qty=round(min_not/price*1.01,qp); qty=max(qty,min_qty)
         side=SIDE_BUY if direction=="BUY" else SIDE_SELL
-        if direction=="BUY": lp=round(price*1.0005,pp); sl=round(price*(1-sl_pct),pp); tp=round(price*(1+tp_pct),pp)
-        else: lp=round(price*0.9995,pp); sl=round(price*(1+sl_pct),pp); tp=round(price*(1-tp_pct),pp)
+        if direction=="BUY":
+            lp=round(price*1.0005,pp); sl=round(price*(1-sl_pct),pp); tp=round(price*(1+tp_pct),pp)
+        else:
+            lp=round(price*0.9995,pp); sl=round(price*(1+sl_pct),pp); tp=round(price*(1-tp_pct),pp)
         order=self.c.order_limit(symbol=symbol,side=side,quantity=qty,price=str(lp),timeInForce=TIME_IN_FORCE_GTC)
         oid=order.get("orderId"); filled=False
         for _ in range(18):
@@ -1258,46 +1310,62 @@ class BinanceClient:
             return self.c.order_market(symbol=symbol,side=side,quantity=qty)
         try:
             if direction=="BUY":
-                self.c.order_oco_sell(symbol=symbol,quantity=qty,price=str(tp),stopPrice=str(sl),
-                                      stopLimitPrice=str(round(sl*0.998,pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC)
+                self.c.order_oco_sell(symbol=symbol,quantity=qty,price=str(tp),
+                    stopPrice=str(sl),stopLimitPrice=str(round(sl*0.998,pp)),
+                    stopLimitTimeInForce=TIME_IN_FORCE_GTC)
             else:
-                self.c.order_oco_buy(symbol=symbol,quantity=qty,price=str(tp),stopPrice=str(sl),
-                                     stopLimitPrice=str(round(sl*1.002,pp)),stopLimitTimeInForce=TIME_IN_FORCE_GTC)
-        except Exception as e: logger.warning(f"OCO echwe ({e})")
+                self.c.order_oco_buy(symbol=symbol,quantity=qty,price=str(tp),
+                    stopPrice=str(sl),stopLimitPrice=str(round(sl*1.002,pp)),
+                    stopLimitTimeInForce=TIME_IN_FORCE_GTC)
+        except Exception as e:
+            logger.warning(f"OCO echwe ({e})")
         return order
+
     def send_profit(self, amount):
         try:
             r=self.c.withdraw(coin="USDT",address=PROFIT_WALLET,amount=amount,network="ERC20")
             logger.info(f"Profit sent: ${amount}"); return r
-        except Exception as e: logger.error(f"Profit: {e}"); return None
+        except Exception as e:
+            logger.error(f"Profit transfer: {e}"); return None
+
 
 class BinanceUSClient(BinanceClient):
     def __init__(self, key, secret):
         from binance.client import Client
         self.c=Client(key,secret,tld="us")
+
     def send_profit(self, amount):
         try:
             r=self.c.withdraw(coin="USDT",address=PROFIT_WALLET,amount=amount,network="ERC20")
-            return r
-        except Exception as e: logger.error(f"Profit BinanceUS: {e}"); return None
+            logger.info(f"Profit sent BinanceUS: ${amount}"); return r
+        except Exception as e:
+            logger.error(f"Profit BinanceUS: {e}"); return None
 
 
 # ═══════════════════════════════════════════════════════════
-# DIGITS LOGIC + UTILS
+# DIGITS LOGIC
 # ═══════════════════════════════════════════════════════════
 def get_last_digit(price):
-    s=f"{price:.5f}".replace('.',''); return int(s[-1])
+    s=f"{price:.5f}".replace('.','')
+    return int(s[-1])
 
 def analyze_digits_ticks(ticks, threshold=4):
     if len(ticks)<50: return "NONE",0
-    digits=[get_last_digit(t["price"]) for t in ticks]
+    prices=[t["price"] for t in ticks]
+    digits=[get_last_digit(p) for p in prices]
     last50=digits[-50:]; last20=digits[-20:]
-    over_count=sum(1 for d in last50 if d>threshold); under_count=sum(1 for d in last50 if d<=threshold)
-    over20=sum(1 for d in last20 if d>threshold); under20=sum(1 for d in last20 if d<=threshold)
-    last5=digits[-5:]; streak_u=all(d<=threshold for d in last5); streak_o=all(d>threshold for d in last5)
-    sig="NONE"; conf=0.0
-    if under_count>=35 and under20>=14: conf=0.65 if streak_u else 0.72; sig="OVER"
-    elif over_count>=35 and over20>=14: conf=0.65 if streak_o else 0.72; sig="UNDER"
+    over_count=sum(1 for d in last50 if d>threshold)
+    under_count=sum(1 for d in last50 if d<=threshold)
+    over20=sum(1 for d in last20 if d>threshold)
+    under20=sum(1 for d in last20 if d<=threshold)
+    last5=digits[-5:]
+    streak_under=all(d<=threshold for d in last5)
+    streak_over=all(d>threshold for d in last5)
+    conf=0.0; sig="NONE"
+    if under_count>=35 and under20>=14:
+        conf=0.65 if streak_under else 0.72; sig="OVER"
+    elif over_count>=35 and over20>=14:
+        conf=0.65 if streak_over else 0.72; sig="UNDER"
     if sig=="NONE":
         if under20>=16: sig="OVER"; conf=0.65
         elif over20>=16: sig="UNDER"; conf=0.65
@@ -1317,24 +1385,28 @@ def add_log(st, msg, level="INFO"):
     st["log"]=st["log"][:80]
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
+# ═══════════════════════════════════════════════════════════
+# TRADING LOOPS
+# ═══════════════════════════════════════════════════════════
 def _check_limits(st, cfg):
-    target=float(cfg.get("profit_target",0)); loss=float(cfg.get("loss_limit",0))
+    target=float(cfg.get("profit_target",0))
+    loss=float(cfg.get("loss_limit",0))
     if target>0 and st["total_pnl"]>=target:
-        add_log(st,f"🎯 OBJEKTIF ${target:.2f} RIVE! Bot kanpe!","SUCCESS"); st["running"]=False; return True
+        add_log(st,f"🎯 OBJEKTIF ${target:.2f} RIVE! Bot kanpe!","SUCCESS")
+        st["running"]=False; return True
     if loss>0 and st["total_pnl"]<=-abs(loss):
-        add_log(st,f"🛑 LIMIT PÈT ${loss:.2f} RIVE! Bot kanpe!","ERROR"); st["running"]=False; return True
+        add_log(st,f"🛑 LIMIT PÈT ${loss:.2f} RIVE! Bot kanpe!","ERROR")
+        st["running"]=False; return True
     return False
 
 def _refresh_balance(api, st):
     try:
-        b=api.get_balance_sync()
-        if b and b>0: st["balance"]=b
+        b = api.get_balance_sync()
+        if b and b > 0:
+            st["balance"] = b
     except: pass
 
 
-# ═══════════════════════════════════════════════════════════
-# TRADING LOOPS
-# ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
     cfg=st["config"]; symbol=cfg.get("symbol","R_10"); lot=float(cfg.get("lot",0.35))
@@ -1364,26 +1436,30 @@ def digits_trading_loop(st, bot_id=None):
                 if action=="EVEN": contract_type="DIGITEVEN"; sig="EVEN"
                 elif action=="ODD": contract_type="DIGITODD"; sig="ODD"
             if sig=="NONE": add_log(st,"⏭ Pa gen siyal klè — tann 15sek..."); time.sleep(15); continue
-            if conf<min_conf: add_log(st,f"⏭ Conf {conf:.0%} < {min_conf:.0%}"); time.sleep(15); continue
+            if conf<min_conf: add_log(st,f"⏭ Conf {conf:.0%} < {min_conf:.0%} — tann 15sek..."); time.sleep(15); continue
             add_log(st,f"✅ Siyal | {sig} | Conf:{conf:.0%} | Mise:${current_lot:.2f}")
             bal_before=st["balance"]
             try:
                 r=api.place_digits_trade(symbol,contract_type,current_lot,barrier)
                 cid=r.get("contract_id")
                 if not cid: add_log(st,"Trade echwe — pa gen contract_id","ERROR"); time.sleep(10); continue
-                bal_open=float(r.get("balance_after",bal_before-current_lot)); st["balance"]=bal_open
-                add_log(st,f"⏳ #{cid} | {sig} | ${bal_open:.2f} | Ap tann...","SUCCESS")
+                bal_open=float(r.get("balance_after",bal_before-current_lot))
+                st["balance"]=bal_open
+                add_log(st,f"⏳ #{cid} | {sig} | Balans: ${bal_open:.2f} | Ap tann rezilta...","SUCCESS")
                 result=api.wait_contract_result(cid,timeout=35)
                 pnl=0.0; won=False
                 if result:
                     status=result.get("status","")
-                    buy_price=float(result.get("buy_price",current_lot)); sell_price=float(result.get("sell_price",0))
+                    buy_price=float(result.get("buy_price",current_lot))
+                    sell_price=float(result.get("sell_price",0))
                     if status=="won":
-                        pnl=sell_price-buy_price; won=True; st["balance"]=bal_open+pnl
-                        add_log(st,f"✅ WON! +${pnl:.2f} | ${st['balance']:.2f}","SUCCESS")
+                        pnl=sell_price-buy_price; won=True
+                        st["balance"]=bal_open+pnl
+                        add_log(st,f"✅ WON! +${pnl:.2f} | Balans: ${st['balance']:.2f}","SUCCESS")
                     elif status=="lost":
-                        pnl=-buy_price; won=False; st["balance"]=bal_open+pnl
-                        add_log(st,f"❌ LOST -${buy_price:.2f} | ${st['balance']:.2f}","WARN")
+                        pnl=-buy_price; won=False
+                        st["balance"]=bal_open+pnl
+                        add_log(st,f"❌ LOST -${buy_price:.2f} | Balans: ${st['balance']:.2f}","WARN")
                     else:
                         time.sleep(5); nb=api.get_balance_sync()
                         if nb and nb>0: pnl=nb-bal_before; st["balance"]=nb; won=pnl>0
@@ -1397,15 +1473,16 @@ def digits_trading_loop(st, bot_id=None):
                 else:
                     loss=abs(pnl) if abs(pnl)>0.01 else current_lot; total_lost+=loss; consec_losses+=1
                     if consec_losses<=4:
-                        current_lot=max(base_lot,min(round((total_lost+base_lot)/PAYOUT,2),50.0))
+                        next_lot=round((total_lost+base_lot)/PAYOUT,2)
+                        current_lot=max(base_lot,min(next_lot,50.0))
                         add_log(st,f"⚠ Pèt #{consec_losses}/4 | Rekipere:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
                     else:
-                        add_log(st,"🔄 Reset apre 4 pèt | Tann 90sek...","WARN")
+                        add_log(st,f"🔄 Reset apre 4 pèt | Tann 90sek...","WARN")
                         current_lot=base_lot; consec_losses=0; total_lost=0.0; time.sleep(90)
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                       "symbol":symbol,"side":sig,"entry":round(ticks[-1]["price"],5),
-                       "conf":f"{conf:.0%}","strategy":f"Digits-{digit_type}","tf":"ticks",
-                       "stake":round(current_lot,2),"pnl":round(pnl,2),"status":"won" if won else "lost","regime":"—"}
+                    "symbol":symbol,"side":sig,"entry":round(ticks[-1]["price"],5),
+                    "conf":f"{conf:.0%}","strategy":f"Digits-{digit_type}","tf":"ticks",
+                    "stake":round(current_lot,2),"pnl":round(pnl,2),"status":"won" if won else "lost"}
                 st["trades"].insert(0,trade); st["total_pnl"]+=pnl
                 if won and pnl>0:
                     ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
@@ -1423,11 +1500,12 @@ def digits_trading_loop(st, bot_id=None):
 def binance_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
     cfg=st["config"]; symbol=cfg.get("symbol","BTCUSDT"); strategy=cfg.get("strategy","confluence")
-    lot=float(cfg.get("lot",11.0)); tf=int(cfg.get("tf_secs",900)); min_conf=float(cfg.get("min_conf",0.75))
+    lot=float(cfg.get("lot",11.0)); tf=int(cfg.get("tf_secs",900))
+    min_conf=float(cfg.get("min_conf",0.75))
     is_gold="XAU" in symbol.upper() or "GOLD" in symbol.upper() or "XAG" in symbol.upper()
     SL_PCT=0.015 if is_gold else 0.020; TP_PCT=0.030 if is_gold else 0.040
-    if strategy=="binance_gold" or is_gold: fn=strat_binance_gold
-    elif strategy=="binance_crypto": fn=strat_binance_crypto
+    if strategy=="binance_gold" or is_gold: fn=lambda c: strat_binance_gold(c)
+    elif strategy=="binance_crypto": fn=lambda c: strat_binance_crypto(c)
     elif strategy=="confluence": fn=lambda c: strat_confluence_binance(c,symbol)
     else: fn=STRATEGIES.get(strategy,strat_confluence_elite)
     iv={60:"1m",300:"5m",900:"15m",3600:"1h",14400:"4h"}.get(tf,"15m")
@@ -1445,29 +1523,39 @@ def binance_trading_loop(st, bot_id=None):
             except: pass
             try:
                 min_notional=api.get_min_notional(symbol)
-                if current_lot<min_notional*1.05: current_lot=round(min_notional*1.1,2)
-            except: pass
+                if current_lot<min_notional*1.05:
+                    current_lot=round(min_notional*1.1,2)
+                    add_log(st,f"ℹ Mise ajiste: ${current_lot:.2f}","WARN")
+            except: min_notional=10.0
             if st["balance"]<current_lot:
                 add_log(st,f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f}","WARN")
-                current_lot=base_lot; time.sleep(30); continue
+                current_lot=base_lot; consec_losses=0; total_lost=0.0; time.sleep(30); continue
             candles=api.get_candles(symbol,iv,200)
             if len(candles)<50: add_log(st,f"Pa ase done ({len(candles)}) — tann...","WARN"); time.sleep(60); continue
+            cl_vals=[x["close"] for x in candles]
+            e200_v=ema(cl_vals,200) if len(cl_vals)>=200 else ema(cl_vals,100)
+            adx_v,pdi_v,mdi_v=calc_adx_full(candles,14)
             sig,conf=fn(candles)
-            add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%}")
+            add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | ADX:{adx_v:.0f}")
             if sig=="NONE" or conf<min_conf: add_log(st,"⏭ Siyal fèb — tann..."); time.sleep(tf); continue
+            if e200_v:
+                if sig=="BUY" and cl_vals[-1]<e200_v[-1]*0.995: add_log(st,"⛔ REJTE BUY — ANBA EMA200","WARN"); time.sleep(tf); continue
+                if sig=="SELL" and cl_vals[-1]>e200_v[-1]*1.005: add_log(st,"⛔ REJTE SELL — ANLÈ EMA200","WARN"); time.sleep(tf); continue
             entry=candles[-1]["close"]; bal_before=api.balance
             try:
                 order=api.place_trade(symbol,sig,current_lot,SL_PCT,TP_PCT)
                 add_log(st,f"✅ Limit+OCO plase | SL:{SL_PCT*100:.1f}% TP:{TP_PCT*100:.1f}%","SUCCESS")
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                       "symbol":symbol,"side":sig,"entry":round(entry,4),"conf":f"{conf:.0%}",
-                       "strategy":strategy,"tf":iv,"stake":round(current_lot,2),"pnl":0.0,"status":"open","regime":"—"}
+                    "symbol":symbol,"side":sig,"entry":round(entry,4),"conf":f"{conf:.0%}",
+                    "strategy":strategy,"tf":iv,"stake":round(current_lot,2),
+                    "sl":f"{SL_PCT*100:.1f}%","tp":f"{TP_PCT*100:.1f}%","pnl":0.0,"status":"open"}
                 st["trades"].insert(0,trade)
             except Exception as e:
                 add_log(st,f"Trade echwe: {e}","ERROR"); time.sleep(30); continue
             time.sleep(15)
             try:
-                bal_after=api.balance; st["balance"]=bal_after; pnl_chk=bal_after-bal_before
+                bal_after=api.balance; st["balance"]=bal_after
+                pnl_chk=bal_after-bal_before
                 if abs(pnl_chk)>0.01:
                     if st["trades"]: st["trades"][0]["pnl"]=round(pnl_chk,4); st["trades"][0]["status"]="won" if pnl_chk>0 else "open"
                     st["total_pnl"]+=pnl_chk
@@ -1486,11 +1574,12 @@ def binance_trading_loop(st, bot_id=None):
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
     cfg=st["config"]; symbol=cfg.get("symbol","R_100"); strategy=cfg.get("strategy","confluence")
-    lot=float(cfg.get("lot",0.5)); tf=int(cfg.get("tf_secs",900)); min_conf=float(cfg.get("min_conf",0.65))
+    lot=float(cfg.get("lot",0.5)); tf=int(cfg.get("tf_secs",900))
+    min_conf=float(cfg.get("min_conf",0.65))
     fn=STRATEGIES.get(strategy,strat_confluence_elite)
     wait_after=tf+90; base_lot=round(max(0.5,lot),2); current_lot=base_lot
-    consec_losses=0; total_lost=0.0; MAX_LOSSES=3; PAUSE=45
-    is_pat_mode=False  # sera defini apre
+    consec_losses=0; total_lost=0.0
+    MAX_LOSSES_BEFORE_PAUSE=3; PAUSE_WAIT_SECS=45
     add_log(st,f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Bot anile","WARN"); return
@@ -1501,48 +1590,59 @@ def trading_loop(st, bot_id=None):
             _refresh_balance(api,st)
             candles=api.get_candles(symbol,200,tf)
             if len(candles)<20: add_log(st,f"Pa ase done ({len(candles)}) — tann...","WARN"); time.sleep(30); continue
-            regime,_=market_regime(candles); adx_val,_,_=calc_adx_full(candles,14)
+            regime,regime_score=market_regime(candles); adx_val,pdi_val,mdi_val=calc_adx_full(candles,14)
             st_sig,st_c=supertrend(candles); ha_sig,ha_c=heikin_ashi_trend(candles)
-            add_log(st,f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | ST:{st_sig}({st_c:.0%})")
-            if consec_losses>=MAX_LOSSES:
+            add_log(st,f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
+            if consec_losses>=MAX_LOSSES_BEFORE_PAUSE:
                 mache_bon=regime in("TRENDING_UP","TRENDING_DN","RANGING") and adx_val>=12
+                if regime=="RANGING": mache_bon=(st_sig!="NONE") and (ha_sig!="NONE") and adx_val>=10
                 if not mache_bon:
-                    add_log(st,f"⏸ PÒZ APRE {consec_losses} PÈT | Ap tann {PAUSE}sek...","WARN")
-                    time.sleep(PAUSE); continue
-                else: add_log(st,f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f}","SUCCESS")
+                    add_log(st,f"⏸ PÒZ APRE {consec_losses} PÈT | Mache:{regime}(ADX:{adx_val:.0f}) — Ap tann... ({PAUSE_WAIT_SECS}sek)","WARN")
+                    time.sleep(PAUSE_WAIT_SECS); continue
+                else:
+                    add_log(st,f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | Reprann avèk ${current_lot:.2f}","SUCCESS")
             if regime=="VOLATILE":
-                add_log(st,f"⏸ VOLATILE — pa trade. Tann {min(tf,120)}sek...","WARN"); time.sleep(min(tf,120)); continue
+                add_log(st,f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...","WARN"); time.sleep(min(tf,120)); continue
             if strategy=="confluence":
-                req=3 if consec_losses==0 else(4 if consec_losses<=2 else 5)
-                sig,conf=strat_confluence_elite(candles,min_strats=req,min_per_conf=0.65)
-            elif strategy=="deriv_pro": sig,conf=strat_deriv_pro_elite(candles)
-            elif strategy=="supertrend": sig,conf=supertrend(candles)
-            elif strategy=="heikin_ashi": sig,conf=heikin_ashi_trend(candles)
-            elif strategy=="chandelier": sig,conf=chandelier_exit(candles)
-            else: sig,conf=fn(candles)
-            add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
-            if sig=="BUY" and regime=="TRENDING_DN": add_log(st,"⛔ REJTE BUY — TRENDING_DN","WARN"); time.sleep(tf); continue
-            if sig=="SELL" and regime=="TRENDING_UP": add_log(st,"⛔ REJTE SELL — TRENDING_UP","WARN"); time.sleep(tf); continue
-            adaptive=min_conf+(0.02 if consec_losses==1 else(0.04 if consec_losses>=2 else 0))
-            if sig=="NONE" or conf<adaptive:
-                reason="Pa gen siyal" if sig=="NONE" else f"Conf {conf:.0%} < {adaptive:.0%}"
-                add_log(st,f"⏭ {reason} — tann..."); time.sleep(tf); continue
+                req_strats=3 if consec_losses==0 else(4 if consec_losses<=2 else 5)
+                sig,conf=strat_confluence_elite(candles,min_strats=req_strats,min_per_conf=0.65)
+                add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Elite({req_strats}strat)")
+            elif strategy=="deriv_pro":
+                sig,conf=strat_deriv_pro_elite(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | DerivPro Elite")
+            elif strategy=="supertrend":
+                sig,conf=supertrend(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | SuperTrend")
+            elif strategy=="heikin_ashi":
+                sig,conf=heikin_ashi_trend(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Heikin Ashi")
+            elif strategy=="chandelier":
+                sig,conf=chandelier_exit(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Chandelier")
+            else:
+                sig,conf=fn(candles); add_log(st,f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
+            if sig=="BUY" and regime=="TRENDING_DN": add_log(st,"⛔ REJTE BUY — Mache ap DESANN","WARN"); time.sleep(tf); continue
+            if sig=="SELL" and regime=="TRENDING_UP": add_log(st,"⛔ REJTE SELL — Mache ap MONTE","WARN"); time.sleep(tf); continue
+            adaptive_conf=min_conf+(0.02 if consec_losses==1 else(0.04 if consec_losses>=2 else 0))
+            if sig=="NONE" or conf<adaptive_conf:
+                reason="Pa gen siyal" if sig=="NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
+                add_log(st,f"⏭ {reason} — tann pwochen bouji..."); time.sleep(tf); continue
+            pv_sig_dir="TRENDING_UP" if sig=="BUY" else "TRENDING_DN"
+            in_pivot,piv_bonus=pivot_signal(candles,pv_sig_dir)
+            pivot_info=" 🎯+PIVOT" if in_pivot else ""
             if st["balance"]<current_lot:
                 add_log(st,f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
                 current_lot=base_lot; consec_losses=0; total_lost=0.0
-            _,piv_b=pivot_signal(candles,"TRENDING_UP" if sig=="BUY" else "TRENDING_DN")
             entry=candles[-1]["close"]
-            add_log(st,f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ${current_lot:.2f}{' 🎯+PIVOT' if piv_b>0 else ''}")
+            add_log(st,f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | ST:{st_sig} | HA:{ha_sig} | Mise:${current_lot:.2f}{pivot_info}")
             bal_before=st["balance"]; pnl=0.0; ok=False
             try:
                 r=api.place_trade(symbol,sig,max(0.5,current_lot),duration_secs=tf)
                 if r.get("contract_id"):
-                    cid=r["contract_id"]; bal_open=float(r.get("balance_after",bal_before-current_lot))
-                    st["balance"]=bal_open; ok=True
-                    add_log(st,f"⏳ #{cid} | ${bal_open:.2f} | Ap tann {wait_after//60}min...","SUCCESS")
+                    cid=r["contract_id"]
+                    bal_open=float(r.get("balance_after",bal_before-current_lot))
+                    st["balance"]=bal_open
+                    ok=True
+                    add_log(st,f"⏳ #{cid} | Balans: ${bal_open:.2f} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
                     time.sleep(wait_after)
                     bal_close=None
-                    for _ in range(5):
+                    for attempt in range(5):
                         try:
                             nb=api.get_balance_sync()
                             if nb and nb>0 and abs(nb-bal_open)>0.01: bal_close=nb; break
@@ -1550,28 +1650,29 @@ def trading_loop(st, bot_id=None):
                         except: time.sleep(30)
                     if bal_close:
                         st["balance"]=bal_close; pnl=bal_close-bal_before
-                        if pnl>0.10: add_log(st,f"✅ GENYEN! +${pnl:.2f} | ${bal_close:.2f}","SUCCESS")
-                        else: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | ${bal_close:.2f}","WARN")
+                        if pnl>0.10: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Balans:${bal_close:.2f}","SUCCESS")
+                        else: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Balans:${bal_close:.2f}","WARN")
                     else:
                         pnl=-(bal_before-bal_open); add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
             except Exception as e:
                 add_log(st,f"Trade echwe: {e}","ERROR")
             if ok:
                 if pnl>0:
-                    prev_l=consec_losses; current_lot=base_lot; consec_losses=0; total_lost=0.0
-                    if prev_l>0: add_log(st,f"🏆 REKIPERE! (te gen {prev_l} pèt)","SUCCESS")
+                    prev_losses=consec_losses; current_lot=base_lot; consec_losses=0; total_lost=0.0
+                    if prev_losses>0: add_log(st,f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}","SUCCESS")
+                    else: add_log(st,f"✅ Genyen +${pnl:.2f}","SUCCESS")
                 else:
                     loss=abs(pnl) if abs(pnl)>0.01 else current_lot; total_lost+=loss; consec_losses+=1
-                    if consec_losses<MAX_LOSSES:
-                        current_lot=max(0.5,min(round((total_lost+base_lot)/0.95,2),100.0))
-                        add_log(st,f"⚠ PÈT #{consec_losses} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
+                    if consec_losses<MAX_LOSSES_BEFORE_PAUSE:
+                        next_lot=round((total_lost+base_lot)/0.95,2); current_lot=max(0.5,min(next_lot,100.0))
+                        add_log(st,f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
                     else:
-                        current_lot=max(0.5,min(round((total_lost+base_lot)/0.95,2),100.0))
-                        add_log(st,f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | ${current_lot:.2f} | Ap tann mache...","WARN")
+                        next_lot=round((total_lost+base_lot)/0.95,2); current_lot=max(0.5,min(next_lot,100.0))
+                        add_log(st,f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f} | Ap tann mache...","WARN")
                 trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                       "symbol":symbol,"side":sig,"entry":round(entry,5),"conf":f"{conf:.0%}",
-                       "strategy":strategy,"tf":f"{tf//60}min","stake":round(current_lot,2),
-                       "pnl":round(pnl,2),"status":"won" if pnl>0 else "lost","regime":regime}
+                    "symbol":symbol,"side":sig,"entry":round(entry,5),"conf":f"{conf:.0%}",
+                    "strategy":strategy,"tf":f"{tf//60}min","stake":round(current_lot,2),
+                    "pnl":round(pnl,2),"status":"won" if pnl>0 else "lost","regime":regime}
                 st["trades"].insert(0,trade); st["total_pnl"]+=pnl
                 if pnl>0:
                     ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
@@ -1585,55 +1686,88 @@ def trading_loop(st, bot_id=None):
 
 
 # ═══════════════════════════════════════════════════════════
-# FLASK ROUTES
+# API ROUTES
 # ═══════════════════════════════════════════════════════════
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
     st=get_state()
     try:
-        d=freq.json; broker=d.get("broker")
+        d=request.json; broker=d.get("broker")
+
         if broker=="deriv":
-            raw_token=d.get("token","").strip(); app_id=d.get("app_id","1089").strip() or "1089"
-            if not raw_token: return jsonify({"ok":False,"error":"Kole token ou anvan!"})
-            tok_type="PAT" if is_pat_token(raw_token) else "Klasik"
-            add_log(st,f"🔑 {tok_type} token → {'REST API Bearer' if tok_type=='PAT' else f'WebSocket app_id={app_id}'}","INFO")
-            ok,balance,loginid,used_app_id,note=connect_deriv_token(raw_token,app_id)
+            import websocket  # ensure websocket-client installed
+            raw_token = d.get("token","").strip()
+            app_id    = d.get("app_id","1089").strip() or "1089"
+            if not raw_token:
+                return jsonify({"ok":False,"error":"Kole token ou anvan!"})
+
+            tok_type = "PAT" if is_pat_token(raw_token) else "Klasik"
+            add_log(st,f"🔑 Token {tok_type} détecté — WebSocket auth (app_id={app_id})...","INFO")
+
+            ok, balance, loginid, used_app_id, note = connect_deriv_token(raw_token, app_id)
+
             if not ok:
-                if tok_type=="PAT":
-                    err=(f"❌ Token PAT echwe via REST API\n\n{note}\n\n"
-                         f"SOLISYON — ITILIZE TOKEN KLASIK:\n"
-                         f"1. app.deriv.com → foto ou → API Token\n"
-                         f"2. Create new token → ✓ Read ✓ Trade ✓ Payments\n"
-                         f"3. Kole token (PA kòmanse ak pat_) — App ID: 1089")
+                # Konpoze mesaj erè klè ak tip token
+                if tok_type == "PAT":
+                    err_html = (
+                        f"❌ Token PAT echwe\n\n"
+                        f"DETAY: {note}\n\n"
+                        f"╔══════════════════════════════════╗\n"
+                        f"║  SOLISYON PI FASIL — TOKEN KLASIK ║\n"
+                        f"╚══════════════════════════════════╝\n\n"
+                        f"1. Ale sou app.deriv.com\n"
+                        f"2. Klike foto ou → API Token\n"
+                        f"3. Kreye TOKEN KLASIK (pa PAT):\n"
+                        f"   ✓ Read  ✓ Trade  ✓ Payments\n"
+                        f"4. Kole token — li pa kòmanse ak 'pat_'\n\n"
+                        f"OU si ou vlè PAT absoliman:\n"
+                        f"   App ID DWE = app ou kreye a sou Deriv\n"
+                        f"   (pa 1089 — sa se app Deriv ofisyèl)"
+                    )
                 else:
-                    err=(f"❌ Koneksyon echwe\n\n{note}\n\n"
-                         f"VERIFYE:\n✓ Token valid epi pa ekspire\n✓ Pèmisyon: Read + Trade + Payments\n"
-                         f"✓ Kreye nouvo sou app.deriv.com → API Token")
-                return jsonify({"ok":False,"error":err})
+                    err_html = (
+                        f"❌ Koneksyon echwe\n\n{note}\n\n"
+                        f"📋 VERIFYE:\n"
+                        f"  ✓ Token valid epi pa ekspire\n"
+                        f"  ✓ Pèmisyon: Read + Trade + Payments\n"
+                        f"  ✓ App ID kòrèk\n\n"
+                        f"Kreye token: app.deriv.com → foto ou → API Token"
+                    )
+                return jsonify({"ok": False, "error": err_html})
 
-            # Kreye bon client selon tip token
-            if is_pat_token(raw_token):
-                api_main=DerivRESTClient(raw_token); api_main._bal=balance; api_main._loginid=loginid
-                api_digits=DerivDigitsClient(raw_token,app_id); api_digits._bal=balance; api_digits._rest=api_main
-            else:
-                api_main=DerivClient(raw_token,used_app_id or app_id); api_main._bal=balance; api_main._loginid=loginid
-                api_digits=DerivDigitsClient(raw_token,used_app_id or app_id); api_digits._bal=balance
+            # Kreye API clients
+            api_main          = DerivClient(raw_token, used_app_id or app_id)
+            api_main._bal     = balance
+            api_digits        = DerivDigitsClient(raw_token, used_app_id or app_id)
+            api_digits._bal   = balance
 
-            st["deriv_api"]=api_main; st["deriv_digits_api"]=api_digits
-            st["broker"]="deriv"; st["balance"]=balance; st["connected"]=True
-            note_msg=f"✓ {tok_type} | {loginid or 'OK'} | ${balance:.2f}"
-            add_log(st,note_msg,"SUCCESS")
-            return jsonify({"ok":True,"balance":balance,"broker":"deriv","note":note_msg,"token_type":tok_type})
+            st["deriv_api"]        = api_main
+            st["deriv_digits_api"] = api_digits
+            st["broker"]    = "deriv"
+            st["balance"]   = balance
+            st["connected"] = True
+
+            note_msg = f"✓ {tok_type} | {loginid or 'OK'} | ${balance:.2f} | app_id={used_app_id}"
+            add_log(st, note_msg, "SUCCESS")
+            return jsonify({"ok":True,"balance":balance,"broker":"deriv",
+                            "note":note_msg,"token_type":tok_type})
 
         elif broker=="binance":
-            api=BinanceClient(d["api_key"],d["api_secret"]); bal=api.connect()
-            st["binance_api"]=api; st["broker"]="binance"; st["balance"]=bal; st["connected"]=True
+            api=BinanceClient(d["api_key"],d["api_secret"])
+            bal=api.connect()
+            st["binance_api"]=api; st["broker"]="binance"
+            st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"binance"})
+
         elif broker=="binance_us":
-            api=BinanceUSClient(d["api_key"],d["api_secret"]); bal=api.connect()
-            st["binance_api"]=api; st["broker"]="binance_us"; st["balance"]=bal; st["connected"]=True
+            api=BinanceUSClient(d["api_key"],d["api_secret"])
+            bal=api.connect()
+            st["binance_api"]=api; st["broker"]="binance_us"
+            st["balance"]=bal; st["connected"]=True
             return jsonify({"ok":True,"balance":bal,"broker":"binance_us"})
+
         return jsonify({"ok":False,"error":"Broker enkoni"})
+
     except Exception as e:
         logger.error(f"Connect: {e}",exc_info=True)
         return jsonify({"ok":False,"error":str(e)})
@@ -1645,14 +1779,14 @@ def api_start():
     if not st.get("access"): return jsonify({"ok":False,"error":"⚠ Ou bezwen yon kòd aksè valid!"})
     if not st["connected"]: return jsonify({"ok":False,"error":"Konekte broker anvan!"})
     if st["running"]: return jsonify({"ok":False,"error":"Bot déjà ap kouri"})
-    d=freq.json or {}
+    d=request.json or {}
     tf_map={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}
     st["config"]={
-        "broker":st["broker"],"symbol":d.get("symbol","R_100"),"strategy":d.get("strategy","confluence"),
-        "lot":d.get("lot",0.5),"tf_secs":tf_map.get(d.get("tf","15m"),900),
-        "min_conf":d.get("min_conf",0.65),"profit_target":float(d.get("profit_target",0)),
-        "loss_limit":float(d.get("loss_limit",0)),"mode":d.get("mode","forex"),
-        "digit_type":d.get("digit_type","over_under"),
+        "broker":st["broker"],"symbol":d.get("symbol","R_100"),
+        "strategy":d.get("strategy","confluence"),"lot":d.get("lot",0.5),
+        "tf_secs":tf_map.get(d.get("tf","15m"),900),"min_conf":d.get("min_conf",0.65),
+        "profit_target":float(d.get("profit_target",0)),"loss_limit":float(d.get("loss_limit",0)),
+        "mode":d.get("mode","forex"),"digit_type":d.get("digit_type","over_under"),
     }
     import random,string
     bot_id=''.join(random.choices(string.ascii_uppercase+string.digits,k=8))
@@ -1668,37 +1802,44 @@ def api_start():
         threading.Thread(target=trading_loop,args=(st,bot_id),daemon=True).start()
     return jsonify({"ok":True})
 
+
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     st=get_state(); st["running"]=False; st["bot_id"]=None
     return jsonify({"ok":True})
 
+
 @app.route("/api/status")
 def api_status():
     st=get_state()
-    return jsonify({"connected":st["connected"],"broker":st["broker"],"running":st["running"],
-                    "balance":round(st["balance"],2),"pnl":round(st["total_pnl"],2),
-                    "profit_sent":round(st["profit_sent"],4),"trades":st["trades"][:20],
-                    "log":st["log"][:30],"config":st["config"]})
+    return jsonify({
+        "connected":st["connected"],"broker":st["broker"],
+        "running":st["running"],"balance":round(st["balance"],2),
+        "pnl":round(st["total_pnl"],2),"profit_sent":round(st["profit_sent"],4),
+        "trades":st["trades"][:20],"log":st["log"][:30],"config":st["config"],
+    })
+
 
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():
     st=get_state()
     try:
-        d=freq.json or {}; symbol=d.get("symbol","R_100"); strat=d.get("strategy","confluence")
-        candles=[]; api=st.get("deriv_api") or st.get("binance_api")
-        if api:
-            try: candles=api.get_candles(symbol,500,3600)
-            except: pass
+        d=request.json or {}
+        symbol=d.get("symbol","R_100"); strat=d.get("strategy","confluence")
+        candles=[]
+        if st.get("deriv_api"): candles=st["deriv_api"].get_candles(symbol,500,3600)
+        elif st.get("binance_api"): candles=st["binance_api"].get_candles(symbol,"1h",500)
         if len(candles)<100: return jsonify({"ok":False,"error":f"Pa ase done ({len(candles)}) — konekte broker anvan"})
-        r=run_backtest(candles,strat,float(d.get("balance",10000)),float(d.get("lot",0.01)),
-                       float(d.get("sl",20)),float(d.get("tp",40)))
+        r=run_backtest(candles,strat,float(d.get("balance",10000)),float(d.get("lot",0.01)),float(d.get("sl",20)),float(d.get("tp",40)))
         return jsonify({"ok":True,"result":r})
-    except Exception as e: return jsonify({"ok":False,"error":str(e)})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)})
+
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
-    st=get_state(); d=freq.json or {}
+    st=get_state()
+    d=request.json or {}
     token=d.get("session_token","").strip(); code=d.get("code","").strip().upper()
     if token:
         ok,msg_text=validate_session(token)
@@ -1706,57 +1847,67 @@ def api_login():
             with _sess_lock: is_adm=_sessions.get(token,{}).get("is_admin",False)
             st["access"]=True; st["session_token"]=token; st["is_admin"]=is_adm
             return jsonify({"ok":True,"msg":msg_text,"session_token":token,"is_admin":is_adm})
-        st["access"]=False
-        return jsonify({"ok":False,"msg":msg_text,"need_code":True})
+        else:
+            st["access"]=False
+            return jsonify({"ok":False,"msg":msg_text,"need_code":True})
     if not code: return jsonify({"ok":False,"msg":"Mete kòd aksè ou a","need_code":True})
     ok,msg_text=check_access(code)
     if ok:
         use_code(code); new_token,expire=create_session()
         is_adm=ACCESS_CODES.get(code,{}).get("is_adm",False) or ACCESS_CODES.get(code,{}).get("created_at") is None
-        with _sess_lock: _sessions[new_token]["is_admin"]=is_adm; _save_sessions()
+        with _sess_lock:
+            _sessions[new_token]["is_admin"]=is_adm; _save_sessions()
         st["access"]=True; st["session_token"]=new_token; st["is_admin"]=is_adm
-        return jsonify({"ok":True,"msg":"✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete",
-                        "session_token":new_token,"expire":expire,"is_admin":is_adm})
+        msg_out="✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete"
+        return jsonify({"ok":True,"msg":msg_out,"session_token":new_token,"expire":expire,"is_admin":is_adm})
     return jsonify({"ok":False,"msg":msg_text,"need_code":True})
+
 
 def require_admin(d):
     token=d.get("admin_token","").strip()
     if not token: return False
     with _sess_lock: sess=_sessions.get(token)
-    return sess.get("is_admin",False) if sess else False
+    if not sess: return False
+    return sess.get("is_admin",False)
+
 
 @app.route("/api/admin/codes", methods=["POST"])
 def admin_get_codes():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     now=time.time(); codes=[]
     for c,entry in ACCESS_CODES.items():
-        if entry["created_at"] is None or entry.get("is_adm"): status="ADM"; remaining="∞"
-        elif entry["used"]: status="ITILIZE"; remaining="0"
+        if entry["created_at"] is None or entry.get("is_adm"):
+            status="ADM"; remaining="∞"
+        elif entry["used"]:
+            status="ITILIZE"; remaining="0"
         else:
             age=now-entry["created_at"]
             if age>CODE_TTL_SECONDS: status="EKSPIRE"; remaining="0"
             else: status="AKTIF"; remaining=str(int((CODE_TTL_SECONDS-age)/86400))+" jou"
         codes.append({"code":c,"status":status,"remaining":remaining,"used":entry["used"],
-                      "is_adm":entry.get("is_adm",False) or entry["created_at"] is None})
+            "is_adm":entry.get("is_adm",False) or entry["created_at"] is None})
     today=date.today()
     active_sess=sum(1 for s in _sessions.values() if date.fromisoformat(s["expire"])>today)
     return jsonify({"ok":True,"codes":codes,"total_sessions":active_sess})
 
+
 @app.route("/api/admin/add_code", methods=["POST"])
 def admin_add_code():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     code=d.get("code","").strip().upper()
     if not code or len(code)<3: return jsonify({"ok":False,"error":"Kòd dwe gen 3+ karaktè"})
     if code in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
     is_adm=d.get("is_adm",False)
     ACCESS_CODES[code]={"created_at":None if is_adm else time.time(),"used":False,"is_adm":is_adm}
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye [{'Admin' if is_adm else 'Itilizatè'}]"})
+    typ="Admin" if is_adm else "Itilizatè (1 mwa)"
+    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye [{typ}]"})
+
 
 @app.route("/api/admin/revoke_code", methods=["POST"])
 def admin_revoke_code():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     code=d.get("code","").strip().upper()
     if not code or code not in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd pa jwenn"})
@@ -1764,9 +1915,10 @@ def admin_revoke_code():
     del ACCESS_CODES[code]
     return jsonify({"ok":True,"msg":f"✓ Kòd {code} revoke"})
 
+
 @app.route("/api/admin/reset_code", methods=["POST"])
 def admin_reset_code():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     code=d.get("code","").strip().upper()
     if code not in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd pa jwenn"})
@@ -1775,23 +1927,25 @@ def admin_reset_code():
         ACCESS_CODES[code]["created_at"]=time.time()
     return jsonify({"ok":True,"msg":f"✓ Kòd {code} reset"})
 
+
 @app.route("/api/admin/users", methods=["POST"])
 def admin_get_users():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     users=[]
     with _user_lock:
         for uid,ust in _user_states.items():
             users.append({"uid":uid[:8]+"...","connected":ust.get("connected",False),
-                          "broker":ust.get("broker","—"),"running":ust.get("running",False),
-                          "balance":round(ust.get("balance",0),2),"pnl":round(ust.get("total_pnl",0),2),
-                          "trades":len(ust.get("trades",[])),"symbol":ust.get("config",{}).get("symbol","—"),
-                          "strategy":ust.get("config",{}).get("strategy","—")})
+                "broker":ust.get("broker","—"),"running":ust.get("running",False),
+                "balance":round(ust.get("balance",0),2),"pnl":round(ust.get("total_pnl",0),2),
+                "trades":len(ust.get("trades",[])),"symbol":ust.get("config",{}).get("symbol","—"),
+                "strategy":ust.get("config",{}).get("strategy","—")})
     return jsonify({"ok":True,"users":users,"total":len(users)})
+
 
 @app.route("/api/admin/stop_user", methods=["POST"])
 def admin_stop_user():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     uid_prefix=d.get("uid","").replace("...",""); stopped=0
     with _user_lock:
@@ -1799,22 +1953,24 @@ def admin_stop_user():
             if uid.startswith(uid_prefix): ust["running"]=False; ust["bot_id"]=None; stopped+=1
     return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
 
+
 @app.route("/api/admin/sessions", methods=["POST"])
 def admin_sessions():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     today=date.today(); sessions=[]
     with _sess_lock:
         for token,sess in _sessions.items():
             exp=date.fromisoformat(sess["expire"])
             sessions.append({"token":token[:8]+"...","expire":sess["expire"],
-                             "days_left":(exp-today).days,"is_admin":sess.get("is_admin",False),
-                             "active":(exp-today).days>0})
+                "days_left":(exp-today).days,"is_admin":sess.get("is_admin",False),
+                "active":(exp-today).days>0})
     return jsonify({"ok":True,"sessions":sessions,"total":len(sessions)})
+
 
 @app.route("/api/admin/clean_sessions", methods=["POST"])
 def admin_clean_sessions():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     today=date.today(); count=0
     with _sess_lock:
@@ -1823,9 +1979,10 @@ def admin_clean_sessions():
         if count: _save_sessions()
     return jsonify({"ok":True,"msg":f"✓ {count} sesyon ekspire efase"})
 
+
 @app.route("/api/admin/clear_user", methods=["POST"])
 def admin_clear_user():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     uid_prefix=d.get("uid","").replace("...",""); cleared=0
     with _user_lock:
@@ -1834,27 +1991,30 @@ def admin_clear_user():
                 ust["trades"]=[]; ust["total_pnl"]=0.0; ust["profit_sent"]=0.0; ust["log"]=[]; cleared+=1
     return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè efase"})
 
+
 @app.route("/api/admin/clear_trades", methods=["POST"])
 def admin_clear_trades():
-    d=freq.json or {}
+    d=request.json or {}
     if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
     uid_prefix=d.get("uid","").replace("...",""); cleared=0
     with _user_lock:
         for uid,ust in _user_states.items():
             if uid.startswith(uid_prefix): ust["trades"]=[]; cleared+=1
-    return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè: trades efase"})
+    return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè: trades efase (log + pnl konsève)"})
+
 
 @app.route("/")
 def index(): return render_template_string(HTML)
 
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE KONPLÈ — v6 ELITE — VRÈ PAT FIX
+# HTML INTERFACE — v6 ELITE — PAT FIX
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>💰 BonheurBot v6 ELITE</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;900&display=swap');
@@ -1862,7 +2022,8 @@ HTML = r"""<!DOCTYPE html>
 body{background:#040A0F;color:#C8E8F0;font-family:'JetBrains Mono',monospace;font-size:13px}
 ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:#0D2233}
 .hdr{background:#071219;border-bottom:1px solid #0D2233;padding:0 20px;display:flex;align-items:center;justify-content:space-between;height:54px;position:sticky;top:0;z-index:99}
-.logo{font-size:17px;font-weight:900;letter-spacing:2px;color:#00FF88}.logo span{color:#C8E8F0}
+.logo{font-size:17px;font-weight:900;letter-spacing:2px;color:#00FF88}
+.logo span{color:#C8E8F0}
 .tabs{background:#071219;border-bottom:1px solid #0D2233;padding:0 20px;display:flex;overflow-x:auto}
 .tab{background:transparent;border:none;border-bottom:2px solid transparent;color:#4A7080;padding:12px 16px;cursor:pointer;font-family:inherit;font-size:11px;letter-spacing:2px;font-weight:700;white-space:nowrap;transition:.2s}
 .tab.on{color:#00FF88;border-bottom-color:#00FF88}
@@ -1876,7 +2037,8 @@ body{background:#040A0F;color:#C8E8F0;font-family:'JetBrains Mono',monospace;fon
 .sv{font-size:21px;font-weight:700}
 .box{background:#071219;border:1px solid #0D2233;border-radius:10px;padding:16px;margin-bottom:14px}
 .bt{color:#00FF88;font-size:10px;letter-spacing:2px;font-weight:700;margin-bottom:12px}
-.iw{margin-bottom:10px}.il{color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:4px}
+.iw{margin-bottom:10px}
+.il{color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:4px}
 input,select{width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:8px 10px;font-size:12px;font-family:inherit;outline:none}
 input:focus,select:focus{border-color:#00FF88}
 select option{background:#071219}
@@ -1890,6 +2052,7 @@ select option{background:#071219}
 .al.ok{background:#00FF8815;color:#00FF88;border:1px solid #00FF8833}
 .al.er{background:#FF3B6B15;color:#FF3B6B;border:1px solid #FF3B6B33}
 .al.in{background:#00D4FF15;color:#00D4FF;border:1px solid #00D4FF33}
+.al.wa{background:#FFD60015;color:#FFD600;border:1px solid #FFD60033}
 .tag{border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700}
 .tg{background:#4A708022;border:1px solid #4A708044;color:#4A7080}
 .tb{background:#00FF8822;border:1px solid #00FF8844;color:#00FF88}
@@ -1898,22 +2061,23 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 th{padding:7px 10px;text-align:left;border-bottom:1px solid #0D2233;color:#4A7080;font-size:10px;letter-spacing:1px}
 td{padding:7px 10px;border-bottom:1px solid #0D223320}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
-.dl{background:#00FF88;box-shadow:0 0 8px #00FF88}.di{background:#3A6070}
+.dl{background:#00FF88;box-shadow:0 0 8px #00FF88}
+.di{background:#3A6070}
 .le{padding:5px 8px;border-bottom:1px solid #0D223318;font-size:11px}
 .lt{color:#4A7080;margin-right:8px}
-.lS{color:#00FF88}.lE{color:#FF3B6B}.lW{color:#FFD600}.lI{color:#C8E8F0}.lP{color:#FFD600}
-.badge-p{background:#FFD60018;border:1px solid #FFD60044;color:#FFD600;border-radius:4px;padding:2px 8px;font-size:10px;font-weight:700}
-.badge-k{background:#00FF8818;border:1px solid #00FF8844;color:#00FF88;border-radius:4px;padding:2px 8px;font-size:10px;font-weight:700}
+.lS{color:#00FF88}.lP{color:#FFD600}.lE{color:#FF3B6B}.lW{color:#FFD600}.lI{color:#C8E8F0}
+.badge-pat{background:#00D4FF18;border:1px solid #00D4FF44;color:#00D4FF;border-radius:4px;padding:2px 8px;font-size:10px;font-weight:700}
+.badge-classic{background:#00FF8818;border:1px solid #00FF8844;color:#00FF88;border-radius:4px;padding:2px 8px;font-size:10px;font-weight:700}
 </style>
 </head>
 <body>
 
-<!-- LOGIN -->
+<!-- ══ LOGIN PAGE ══ -->
 <div id="login-page" style="display:none;min-height:100vh;background:#040A0F;align-items:center;justify-content:center;flex-direction:column">
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v6 ELITE — VRÈ PAT Fix</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl v6 ELITE — PAT Fix</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
       <input id="login-code" type="text" placeholder="BB-XXXX-XXXX"
@@ -1925,9 +2089,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div style="margin-top:20px;background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:14px;text-align:left">
       <div style="color:#FFD600;font-size:10px;letter-spacing:1px;font-weight:700;margin-bottom:8px">💳 ABÒNMAN — $40 USDT/MWA</div>
       <div style="color:#4A7080;font-size:10px;line-height:1.9">
-        1. Voye <span style="color:#00FF88;font-weight:700">$40 USDT</span> sou:<br>
+        1. Voye <span style="color:#00FF88;font-weight:700">$40 USDT</span> sou adrès sa:<br>
         <span style="color:#C8E8F0;font-size:9px;word-break:break-all;background:#071219;padding:4px 6px;border-radius:4px;display:block;margin:4px 0">0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef</span>
         <span style="color:#FFD600;font-size:9px">⚠ Rezo: BEP20 (BSC) sèlman</span><br><br>
+        2. Voye prèv peman sou WhatsApp:<br>
         <a href="https://wa.me/50942867885" target="_blank"
           style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;background:#25D36618;border:1px solid #25D36644;color:#25D366;border-radius:6px;padding:6px 12px;text-decoration:none;font-size:11px;font-weight:700">
           📱 WhatsApp: +509 4286-7885
@@ -1937,7 +2102,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-<!-- APP -->
+<!-- ══ APP PAGE ══ -->
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
@@ -1953,6 +2118,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <button onclick="doLogout()" style="background:transparent;border:1px solid #3A6070;color:#3A6070;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px;font-family:inherit">DEKONEKTE</button>
   </div>
 </div>
+
 <div class="tabs">
   <button class="tab on" onclick="sw('dashboard',this)">DASHBOARD</button>
   <button class="tab" onclick="sw('control',this)">KONTWÒL</button>
@@ -1962,6 +2128,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <button class="tab" onclick="sw('log',this)">LOGS</button>
   <button class="tab" id="tab-admin" style="display:none;color:#FFD600" onclick="sw('admin',this)">⚙ ADMIN</button>
 </div>
+
 <div class="wrap">
 
 <!-- DASHBOARD -->
@@ -1975,62 +2142,93 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
   <div class="g2">
     <div class="box">
-      <div class="bt">KONEKSYON BROKER</div>
+      <div class="bt">KONEKSYON BROKER — DERIV + BINANCE</div>
       <div class="iw"><div class="il">BROKER</div>
         <select id="d-br" onchange="togBroker()">
           <option value="deriv">Deriv (Synthetic / Digits)</option>
           <option value="binance">Binance Global (Crypto / Gold)</option>
-          <option value="binance_us">Binance US</option>
+          <option value="binance_us">Binance US (Crypto / Gold)</option>
         </select>
       </div>
+
+      <!-- ══ DERIV FIELDS ══ -->
       <div id="fd">
-        <!-- PAT vs Klasik info -->
-        <div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:12px;margin-bottom:12px">
-          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ VRÈ PAT FIX — ACHITEKTI DUAL</div>
+        <!-- FIX GUIDE -->
+        <div style="background:#FF3B6B10;border:1px solid #FF3B6B33;border-radius:8px;padding:12px;margin-bottom:12px">
+          <div style="color:#FF3B6B;font-size:10px;font-weight:700;letter-spacing:1px;margin-bottom:8px">⚠ TOKEN PAT — RÈG ENPÒTAN (FIX)</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px">
-              <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:4px">✅ TOKEN KLASIK</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">PA kòmanse ak <code>pat_</code><br>→ WebSocket authorize<br>App ID: <b>1089</b> (defot)<br>Pèmisyon: Read+Trade+Pay</div>
+              <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:4px">✅ TOKEN KLASIK (REKÒMANDE)</div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">
+                Pa kòmanse ak <code style="color:#C8E8F0">pat_</code><br>
+                App ID: <span style="color:#00FF88">1089</span> (defot — mache!)<br>
+                Pèmisyon: <span style="color:#00FF88">Read + Trade + Payments</span><br>
+                <span style="color:#00FF88;font-weight:700">→ Itilize sa si ou ka</span>
+              </div>
             </div>
             <div style="background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px">
-              <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:4px">⚡ TOKEN PAT (pat_xxx)</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">Kòmanse ak <code>pat_</code><br>→ REST API Bearer HTTP<br>App ID: <b>pa nesesè</b><br>Mete nenpòt valè</div>
+              <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:4px">⚠ TOKEN PAT (pat_xxx)</div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">
+                Bezwen App ID espesifik ou a<br>
+                App ID: <span style="color:#FFD600">app ou kreye sou Deriv</span><br>
+                PA mete <code>1089</code> pou PAT!<br>
+                <span style="color:#FFD600;font-weight:700">→ Mete bon app_id</span>
+              </div>
             </div>
           </div>
         </div>
+
+        <!-- Token Input -->
         <div class="iw">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-            <div class="il" style="margin-bottom:0">TOKEN DERIV (Klasik oswa pat_xxx)</div>
+            <div class="il" style="margin-bottom:0">TOKEN DERIV (Klasik oswa PAT — déteksyon otomatik)</div>
             <span id="tok-badge" style="display:none"></span>
           </div>
-          <input id="d-tk" type="password" placeholder="Token Klasik oswa PAT (pat_xxx)..." oninput="autoDetectToken()">
-          <div id="tok-hint" style="color:#4A7080;font-size:9px;margin-top:4px">Token Klasik PA kòmanse ak <code>pat_</code></div>
+          <input id="d-tk" type="password" placeholder="Kole token ou a isit..." oninput="autoDetectToken()">
+          <div id="tok-hint" style="color:#4A7080;font-size:9px;margin-top:4px;line-height:1.6">
+            Token Klasik <b>PA</b> kòmanse ak <code>pat_</code> • Token PAT kòmanse ak <code>pat_xxxx</code>
+          </div>
         </div>
-        <div class="iw" id="appid-row">
-          <div class="il">APP ID <span id="appid-note" style="color:#4A7080">(Token Klasik sèlman)</span></div>
-          <input id="d-ai" value="1089" placeholder="1089">
-          <div id="appid-hint" style="color:#4A7080;font-size:9px;margin-top:3px">Token Klasik: <b>1089</b> • Token PAT: app_id pa nesesè</div>
+
+        <!-- App ID — avètisman klè pou PAT -->
+        <div class="iw">
+          <div class="il" id="appid-label">APP ID DERIV</div>
+          <input id="d-ai" value="1089" placeholder="1089 pou Klasik / ton app_id pou PAT" oninput="updateAppIdHint()">
+          <div id="appid-hint" style="color:#4A7080;font-size:9px;margin-top:3px;line-height:1.6">
+            Token Klasik: mete <b>1089</b> (defot) • Token PAT: mete <b>app_id ou kreye a</b> sou app.deriv.com
+          </div>
         </div>
+
+        <!-- Instruks -->
         <div style="background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:10px;font-size:10px;line-height:1.9;color:#4A7080">
-          <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📖 KREYE TOKEN KLASIK:</div>
-          app.deriv.com → foto ou → API Token → Create new token<br>
-          Pèmisyon: ✓ Read ✓ Trade ✓ Payments → App ID: 1089<br><br>
-          <div style="color:#FFD600;font-weight:700;margin-bottom:4px">📖 SI OU GEN PAT (pat_xxx):</div>
-          Kole dirèkteman — sistèm ap itilize REST API Bearer HTTP
+          <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📖 KIJAN KREYE TOKEN KLASIK (REKÒMANDE):</div>
+          1. ale sou <span style="color:#C8E8F0">app.deriv.com</span><br>
+          2. klike foto ou (anlè adwat) → <span style="color:#C8E8F0">API Token</span><br>
+          3. klike <span style="color:#00FF88">Create new token</span><br>
+          4. Pèmisyon: <span style="color:#00FF88">✓ Read ✓ Trade ✓ Payments</span><br>
+          5. Kopye token (pa kòmanse ak pat_) — kole isit<br>
+          6. App ID: <span style="color:#00FF88">1089</span> (defot — okenn chanjman pou Klasik)
         </div>
       </div>
+
+      <!-- BINANCE FIELDS -->
       <div id="fb" style="display:none">
         <div class="iw"><div class="il">API KEY</div><input id="b-k" type="password" placeholder="Binance API Key"></div>
         <div class="iw"><div class="il">API SECRET</div><input id="b-s" type="password" placeholder="Binance API Secret"></div>
-        <div id="fb-note" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600">🇺🇸 Binance US — api.binance.us</div>
+        <div id="fb-note" style="display:none;background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:8px;margin-bottom:8px;font-size:10px;color:#FFD600">
+          🇺🇸 Binance US — Konekte sou api.binance.us
+        </div>
       </div>
+
       <div id="cm" style="margin-bottom:8px"></div>
       <button class="btn b fw" onclick="doConn()">⚡ KONEKTE</button>
       <div id="cs" style="margin-top:10px"></div>
     </div>
+
     <div class="box">
       <div class="bt" style="display:flex;justify-content:space-between">
-        <span>COURBE P&L</span><span id="s-pnl2" style="color:#00FF88;font-size:13px;font-weight:700">+$0.00</span>
+        <span>COURBE P&L</span>
+        <span id="s-pnl2" style="color:#00FF88;font-size:13px;font-weight:700">+$0.00</span>
       </div>
       <svg id="chart" viewBox="0 0 500 120" style="width:100%;height:120px">
         <text x="250" y="65" text-anchor="middle" fill="#3A6070" font-size="12" font-family="monospace">Pa gen trades ankò</text>
@@ -2039,6 +2237,34 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="stat"><div class="sl">STRATEGY</div><div id="s-strat" style="color:#FFD600;font-size:12px;font-weight:700">—</div></div>
         <div class="stat"><div class="sl">SENBOL</div><div id="s-sym" style="font-size:12px;font-weight:700">—</div></div>
         <div class="stat"><div class="sl">BROKER</div><div id="s-br2" style="font-size:12px;font-weight:700;color:#3A6070">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EXPLICATION FIX PAT -->
+  <div class="box" style="background:#FFD60008;border-color:#FFD60022">
+    <div class="bt" style="color:#FFD600">🔧 POURQUOI PAT ECHWE — EKSPLIKA TEKNIK</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
+      <div>
+        <div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">❌ PWOBLÈM ORIJINAL</div>
+        PAT avèk app_id=1089<br>
+        1089 = app Deriv ofisyèl<br>
+        PAT lye ak <b>TON</b> app_id<br>
+        <span style="color:#FF3B6B">Rejte: app_id pa matche</span>
+      </div>
+      <div>
+        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">✅ FIX APLLIKE</div>
+        PAT → eseye app_id ou ban nou an<br>
+        Si app_id kòrèk → konekte!<br>
+        Klasik → 1089/36544/16929<br>
+        <span style="color:#00FF88">Tout via WebSocket</span>
+      </div>
+      <div>
+        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">💡 REKÒMANDASON</div>
+        Kreye TOKEN KLASIK<br>
+        App ID: 1089 (defot)<br>
+        Pi senp, pi fiab<br>
+        <span style="color:#00D4FF">Fonksyone pou tout moun</span>
       </div>
     </div>
   </div>
@@ -2070,8 +2296,11 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </div>
           <div class="iw"><div class="il">TIMEFRAME</div>
             <select id="c-tf">
-              <option value="1m">1 minit</option><option value="5m">5 minit</option>
-              <option value="15m" selected>15 minit ★★★</option><option value="1h">1 è</option><option value="4h">4 è</option>
+              <option value="1m">1 minit</option>
+              <option value="5m">5 minit ★</option>
+              <option value="15m" selected>15 minit ★★★</option>
+              <option value="1h">1 è ★★★</option>
+              <option value="4h">4 è</option>
             </select>
           </div>
         </div>
@@ -2079,11 +2308,11 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="iw"><div class="il">MISE ($) — Min $0.50</div><input id="c-lot-forex" type="number" value="0.50" step="0.50" min="0.50"></div>
           <div class="iw"><div class="il">STRATEGY</div>
             <select id="c-st-forex">
-              <option value="confluence">🔥 Confluence ELITE</option>
+              <option value="confluence">🔥 Confluence ELITE (ST+HA+CE)</option>
               <option value="deriv_pro">🚀 Deriv Pro ELITE</option>
-              <option value="supertrend">📈 SuperTrend</option>
-              <option value="heikin_ashi">🕯 Heikin Ashi</option>
-              <option value="chandelier">🔔 Chandelier Exit</option>
+              <option value="supertrend">📈 SuperTrend Sèl</option>
+              <option value="heikin_ashi">🕯 Heikin Ashi Sèl</option>
+              <option value="chandelier">🔔 Chandelier Exit Sèl</option>
               <option value="ai">🤖 AI Score</option>
               <option value="smc">🏛 Smart Money</option>
               <option value="scalping_pro">⚡ Scalping Pro</option>
@@ -2094,46 +2323,82 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
       </div>
       <div id="opts-digits" style="display:none">
-        <div class="g2">
-          <div class="iw"><div class="il">SENBOL</div>
-            <select id="c-sy-digits"><option value="R_10" selected>R_10</option><option value="R_25">R_25</option><option value="R_50">R_50</option></select>
+        <div style="background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:12px;margin-bottom:10px">
+          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🎲 DIGITS MODE</div>
+          <div class="g2">
+            <div class="iw"><div class="il">SENBOL</div>
+              <select id="c-sy-digits">
+                <option value="R_10" selected>R_10 — Volatility 10</option>
+                <option value="R_25">R_25 — Volatility 25</option>
+                <option value="R_50">R_50 — Volatility 50</option>
+              </select>
+            </div>
+            <div class="iw"><div class="il">TIP DIGITS</div>
+              <select id="c-digit-type">
+                <option value="over_under">Over 4 / Under 5</option>
+                <option value="even_odd">Even / Odd</option>
+              </select>
+            </div>
           </div>
-          <div class="iw"><div class="il">TIP DIGITS</div>
-            <select id="c-digit-type"><option value="over_under">Over 4 / Under 5</option><option value="even_odd">Even / Odd</option></select>
-          </div>
+          <div class="iw"><div class="il">MISE ($) — Min $0.35</div><input id="c-lot-digits" type="number" value="0.35" step="0.10" min="0.35"></div>
         </div>
-        <div class="iw"><div class="il">MISE ($) — Min $0.35</div><input id="c-lot-digits" type="number" value="0.35" step="0.10" min="0.35"></div>
       </div>
       <div id="opts-gold" style="display:none">
-        <div class="g2">
-          <div class="iw"><div class="il">SENBOL</div>
-            <select id="c-sy-gold"><option value="XAUUSDT">XAUUSDT — Or</option><option value="XAGUSDT">XAGUSDT — Ajan</option></select>
+        <div style="background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:12px;margin-bottom:10px">
+          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🥇 GOLD / METALS</div>
+          <div class="g2">
+            <div class="iw"><div class="il">SENBOL</div>
+              <select id="c-sy-gold">
+                <option value="XAUUSDT">XAUUSDT — Or (Gold)</option>
+                <option value="XAGUSDT">XAGUSDT — Ajan (Silver)</option>
+              </select>
+            </div>
+            <div class="iw"><div class="il">TIMEFRAME</div>
+              <select id="c-tf-gold">
+                <option value="5m">5 minit</option>
+                <option value="15m" selected>15 minit</option>
+                <option value="1h">1 è</option>
+              </select>
+            </div>
           </div>
-          <div class="iw"><div class="il">TIMEFRAME</div>
-            <select id="c-tf-gold"><option value="5m">5 minit</option><option value="15m" selected>15 minit</option><option value="1h">1 è</option></select>
-          </div>
+          <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-gold" type="number" value="11" step="1" min="11"></div>
         </div>
-        <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-gold" type="number" value="11" step="1" min="11"></div>
       </div>
       <div id="opts-crypto" style="display:none">
-        <div class="g2">
-          <div class="iw"><div class="il">SENBOL</div>
-            <select id="c-sy-crypto">
-              <option value="BTCUSDT" selected>BTCUSDT</option><option value="ETHUSDT">ETHUSDT</option>
-              <option value="BNBUSDT">BNBUSDT</option><option value="SOLUSDT">SOLUSDT</option><option value="XRPUSDT">XRPUSDT</option>
-            </select>
+        <div style="background:#00D4FF10;border:1px solid #00D4FF33;border-radius:6px;padding:12px;margin-bottom:10px">
+          <div style="color:#00D4FF;font-size:11px;font-weight:700;margin-bottom:8px">🪙 CRYPTO — BINANCE</div>
+          <div class="g2">
+            <div class="iw"><div class="il">SENBOL</div>
+              <select id="c-sy-crypto">
+                <option value="BTCUSDT" selected>BTCUSDT — Bitcoin</option>
+                <option value="ETHUSDT">ETHUSDT — Ethereum</option>
+                <option value="BNBUSDT">BNBUSDT — BNB</option>
+                <option value="SOLUSDT">SOLUSDT — Solana</option>
+                <option value="XRPUSDT">XRPUSDT — XRP</option>
+                <option value="ADAUSDT">ADAUSDT — Cardano</option>
+                <option value="DOGEUSDT">DOGEUSDT — Dogecoin</option>
+              </select>
+            </div>
+            <div class="iw"><div class="il">TIMEFRAME</div>
+              <select id="c-tf-crypto">
+                <option value="5m">5 minit</option>
+                <option value="15m" selected>15 minit</option>
+                <option value="1h">1 è</option>
+                <option value="4h">4 è</option>
+              </select>
+            </div>
           </div>
-          <div class="iw"><div class="il">TIMEFRAME</div>
-            <select id="c-tf-crypto"><option value="5m">5 minit</option><option value="15m" selected>15 minit</option><option value="1h">1 è</option><option value="4h">4 è</option></select>
-          </div>
+          <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-crypto" type="number" value="11" step="1" min="11"></div>
         </div>
-        <div class="iw"><div class="il">MISE USDT — Min $11</div><input id="c-lot-crypto" type="number" value="11" step="1" min="11"></div>
       </div>
       <div class="g2">
         <div class="iw"><div class="il">KONFIDANS MIN</div>
           <select id="c-conf">
-            <option value="0.60">60%</option><option value="0.65" selected>65% (rekòmande)</option>
-            <option value="0.70">70%</option><option value="0.75">75%</option><option value="0.80">80%</option>
+            <option value="0.60">60% (maksimòm siyal)</option>
+            <option value="0.65" selected>65% (rekòmande ★)</option>
+            <option value="0.70">70% (balans)</option>
+            <option value="0.75">75% (konsèvatif)</option>
+            <option value="0.80">80% (presiz)</option>
           </select>
         </div>
         <div class="iw"><div class="il">🎯 OBJEKTIF PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"><div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div></div>
@@ -2180,9 +2445,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div class="iw"><div class="il">STRATEGY</div>
       <select id="bt-st">
-        <option value="confluence">🔥 Confluence ELITE</option><option value="deriv_pro">🚀 Deriv Pro ELITE</option>
-        <option value="supertrend">📈 SuperTrend</option><option value="heikin_ashi">🕯 Heikin Ashi</option>
-        <option value="ai">🤖 AI Score</option><option value="smc">🏛 SMC</option><option value="rsi">📉 RSI</option>
+        <option value="confluence">🔥 Confluence ELITE</option>
+        <option value="deriv_pro">🚀 Deriv Pro ELITE</option>
+        <option value="supertrend">📈 SuperTrend</option>
+        <option value="heikin_ashi">🕯 Heikin Ashi</option>
+        <option value="chandelier">🔔 Chandelier Exit</option>
+        <option value="ai">🤖 AI Score</option>
+        <option value="binance_gold">🥇 Gold Strategy</option>
+        <option value="binance_crypto">🪙 Crypto Strategy</option>
+        <option value="smc">🏛 SMC</option>
+        <option value="rsi">📉 RSI</option>
       </select>
     </div>
     <div id="btm"></div>
@@ -2201,7 +2473,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 
 <!-- LOGS -->
 <div id="pg-log" class="pg">
-  <div class="box"><div class="bt">LOGS SISTEM</div><div id="logs"></div></div>
+  <div class="box">
+    <div class="bt">LOGS SISTEM</div>
+    <div id="logs"></div>
+  </div>
 </div>
 
 <!-- ADMIN -->
@@ -2210,15 +2485,20 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="stat"><div class="sl">KÒD TOTAL</div><div class="sv" id="adm-total" style="color:#FFD600">—</div></div>
     <div class="stat"><div class="sl">KÒD AKTIF</div><div class="sv" id="adm-aktif" style="color:#00FF88">—</div></div>
     <div class="stat"><div class="sl">ITILIZE</div><div class="sv" id="adm-used" style="color:#FF3B6B">—</div></div>
-    <div class="stat"><div class="sl">SESYON</div><div class="sv" id="adm-sess" style="color:#00D4FF">—</div></div>
+    <div class="stat"><div class="sl">SESYON AKTIF</div><div class="sv" id="adm-sess" style="color:#00D4FF">—</div></div>
     <div class="stat"><div class="sl">ITILIZATÈ</div><div class="sv" id="adm-users-count" style="color:#FFD600">—</div></div>
   </div>
   <div class="g2">
     <div class="box">
       <div class="bt">➕ KREYE KÒD AKSÈ</div>
-      <div class="iw"><div class="il">KÒD</div><input id="new-code" type="text" placeholder="BB-2025-XXXX" oninput="this.value=this.value.toUpperCase()"></div>
-      <div class="iw"><div class="il">TIP</div>
-        <select id="new-code-type"><option value="user">👤 Itilizatè — 1 mwa</option><option value="adm">👑 Admin — pa janm ekspire</option></select>
+      <div class="iw"><div class="il">KÒD</div>
+        <input id="new-code" type="text" placeholder="BB-2025-XXXX" oninput="this.value=this.value.toUpperCase()">
+      </div>
+      <div class="iw"><div class="il">TIP KÒD</div>
+        <select id="new-code-type">
+          <option value="user">👤 Itilizatè — 1 mwa</option>
+          <option value="adm">👑 Admin — pa janm ekspire</option>
+        </select>
       </div>
       <button class="btn fw" onclick="admAddCode()">➕ KREYE KÒD</button>
       <div id="add-code-msg" style="margin-top:8px"></div>
@@ -2260,17 +2540,19 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-</div></div><!-- wrap / app-page -->
+</div><!-- end .wrap -->
+</div><!-- end app-page -->
 
 <script>
-const SK="bb_session_v6";
-function saveToken(t){try{localStorage.setItem(SK,t)}catch(e){}try{sessionStorage.setItem(SK,t)}catch(e){}try{const x=new Date();x.setDate(x.getDate()+30);document.cookie=`${SK}=${t};expires=${x.toUTCString()};path=/;SameSite=Lax`}catch(e){}}
-function getStoredToken(){try{const t=localStorage.getItem(SK);if(t)return t}catch(e){}try{const t=sessionStorage.getItem(SK);if(t)return t}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SK+"=([^;]+)"));if(m)return m[2]}catch(e){}return""}
-function clearToken(){try{localStorage.removeItem(SK)}catch(e){}try{sessionStorage.removeItem(SK)}catch(e){}try{document.cookie=`${SK}=;expires=Thu,01 Jan 1970 00:00:00 UTC;path=/;`}catch(e){}}
-function updateAdminTab(a){const t=document.getElementById("tab-admin");if(t)t.style.display=a?"block":"none"}
+const SESSION_KEY="bb_session_v6";
+function saveToken(t){try{localStorage.setItem(SESSION_KEY,t)}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t)}catch(e){}try{const x=new Date();x.setDate(x.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${x.toUTCString()};path=/;SameSite=Lax`}catch(e){}}
+function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2]}catch(e){}return""}
+function clearToken(){try{localStorage.removeItem(SESSION_KEY)}catch(e){}try{sessionStorage.removeItem(SESSION_KEY)}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`}catch(e){}}
+function updateAdminTab(isAdmin){const t=document.getElementById("tab-admin");if(t)t.style.display=isAdmin?"block":"none"}
 
 async function checkLogin(){
-  const token=getStoredToken();if(!token){showLogin("");return}
+  const token=getStoredToken();
+  if(!token){showLogin("");return}
   try{
     const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_token:token,code:""})});
     const d=await r.json();
@@ -2303,31 +2585,56 @@ async function doLogin(){
 }
 function doLogout(){clearToken();showLogin("Ou dekonekte.")}
 
+// ── Token auto-detect + App ID hint ──
 function autoDetectToken(){
   const val=document.getElementById("d-tk").value.trim().toLowerCase();
   const badge=document.getElementById("tok-badge");
   const hint=document.getElementById("tok-hint");
-  const appRow=document.getElementById("appid-row");
+  const appInput=document.getElementById("d-ai");
   const appHint=document.getElementById("appid-hint");
-  const appNote=document.getElementById("appid-note");
+  const appLabel=document.getElementById("appid-label");
+
   if(val.startsWith("pat_")){
-    badge.style.display="inline"; badge.className="badge-p"; badge.textContent="⚡ PAT → REST Bearer";
-    hint.innerHTML='<span style="color:#FFD600">⚡ PAT token détecté → REST API Bearer (HTTP). App ID pa nesesè.</span>';
-    appRow.style.opacity="0.4";
-    appHint.innerHTML='<span style="color:#FFD600">App ID pa nesesè pou PAT — sistèm itilize REST API Bearer otomatikman</span>';
-    appNote.innerHTML='<span style="color:#FFD600">(PAT: pa nesesè)</span>';
+    badge.style.display="inline";
+    badge.className="badge-pat";
+    badge.textContent="⚠ TOKEN PAT — Bezwen bon app_id!";
+    hint.innerHTML='<span style="color:#FFD600">⚠ PAT token — CHANJE App ID a: mete app_id ou kreye sou app.deriv.com (pa 1089!)</span>';
+    // Avèti si app_id toujou 1089
+    if(appInput.value==="1089"||appInput.value==="36544"||appInput.value==="16929"){
+      appInput.style.borderColor="#FFD600";
+      appHint.innerHTML='<span style="color:#FF3B6B">⚠ CHANJE App ID! PAT bezwen app_id espesifik ou kreye — PA 1089. Mete: 33ifAjI7cFab3IsUV8u9q (oswa bon app_id ou a)</span>';
+      appLabel.innerHTML='APP ID DERIV <span style="color:#FF3B6B">← CHANJE POU PAT!</span>';
+    }
   }else if(val.length>10){
-    badge.style.display="inline"; badge.className="badge-k"; badge.textContent="✅ KLASIK → WebSocket";
-    hint.innerHTML='<span style="color:#00FF88">✅ Token Klasik détecté → WebSocket authorize. App ID: 1089 ok!</span>';
-    appRow.style.opacity="1";
-    appHint.innerHTML='Token Klasik: <b>1089</b> (defot — bon!)';
-    appNote.innerHTML='(Token Klasik sèlman)';
+    badge.style.display="inline";
+    badge.className="badge-classic";
+    badge.textContent="✅ TOKEN KLASIK — App ID: 1089 OK";
+    hint.innerHTML='<span style="color:#00FF88">✅ Token Klasik détecté — App ID 1089 mache pafètman!</span>';
+    appInput.style.borderColor="";
+    appHint.innerHTML='Token Klasik: <b>1089</b> (defot — bon!) • Si echwe eseye: 36544 oswa 16929';
+    appLabel.textContent="APP ID DERIV";
   }else{
     badge.style.display="none";
-    hint.innerHTML='Token Klasik PA kòmanse ak <code>pat_</code>';
-    appRow.style.opacity="1";
-    appHint.innerHTML='Token Klasik: <b>1089</b> (defot) • Token PAT: app_id pa nesesè';
-    appNote.innerHTML='(Token Klasik sèlman)';
+    hint.innerHTML='Token Klasik <b>PA</b> kòmanse ak <code>pat_</code> • Token PAT kòmanse ak <code>pat_xxxx</code>';
+    appInput.style.borderColor="";
+    appHint.innerHTML='Token Klasik: mete <b>1089</b> (defot) • Token PAT: mete <b>app_id ou kreye a</b> sou app.deriv.com';
+    appLabel.textContent="APP ID DERIV";
+  }
+}
+
+function updateAppIdHint(){
+  const val=document.getElementById("d-tk").value.trim().toLowerCase();
+  const appVal=document.getElementById("d-ai").value.trim();
+  const appHint=document.getElementById("appid-hint");
+  const appInput=document.getElementById("d-ai");
+  if(val.startsWith("pat_")){
+    if(appVal==="1089"||appVal==="36544"||appVal==="16929"){
+      appInput.style.borderColor="#FF3B6B";
+      appHint.innerHTML='<span style="color:#FF3B6B">⚠ App ID sa PA valab pou PAT! Mete app_id ou kreye sou app.deriv.com</span>';
+    }else if(appVal.length>5){
+      appInput.style.borderColor="#00FF88";
+      appHint.innerHTML='<span style="color:#00FF88">✅ App ID espesifik détecté — bon pou PAT!</span>';
+    }
   }
 }
 
@@ -2358,17 +2665,30 @@ function getStartParams(){
   return{mode:"forex",symbol:document.getElementById("c-sy-crypto").value,strategy:"binance_crypto",lot:parseFloat(document.getElementById("c-lot-crypto").value),tf:document.getElementById("c-tf-crypto").value,min_conf:conf,profit_target:target,loss_limit:loss};
 }
 
+// ── CONNECT ──
 async function doConn(){
   const br=document.getElementById("d-br").value;
-  const btn=event.target; btn.textContent="AP KONEKTE..."; btn.disabled=true;
+  const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
   const body={broker:br};
   if(br==="deriv"){
     const rawToken=document.getElementById("d-tk").value.trim();
     if(!rawToken){msg("cm","✗ Kole token ou anvan!",false);btn.textContent="⚡ KONEKTE";btn.disabled=false;return}
     const appId=document.getElementById("d-ai").value.trim()||"1089";
     const isPat=rawToken.toLowerCase().startsWith("pat_");
-    body.token=rawToken; body.app_id=appId;
-    msg("cm",`⏳ ${isPat?"PAT → REST API Bearer":"Klasik → WebSocket app_id="+appId} | Ap konekte...`,"ok");
+
+    // Avètisman si PAT + app_id klasik
+    if(isPat&&(appId==="1089"||appId==="36544"||appId==="16929")){
+      const cont=confirm(
+        "⚠ AVÈTISMAN!\n\n"+
+        "Token PAT (pat_xxx) avèk App ID "+appId+" ka pa fonksyone.\n\n"+
+        "PAT bezwen App ID ou kreye sou app.deriv.com.\n\n"+
+        "Ou vle kontinye kanmenm? (Si app_id "+appId+" pa mache, chanje li)"
+      );
+      if(!cont){btn.textContent="⚡ KONEKTE";btn.disabled=false;return}
+    }
+
+    body.token=rawToken;body.app_id=appId;
+    msg("cm",`⏳ ${isPat?"PAT":"Klasik"} token | App ID: ${appId} | Ap konekte...`,"ok");
   }
   if(br==="binance"||br==="binance_us"){
     body.api_key=document.getElementById("b-k").value.trim();
@@ -2381,15 +2701,18 @@ async function doConn(){
     const d=await r.json();
     if(d.ok){
       msg("cm",`✅ KONEKTE! $${d.balance.toFixed(2)} | ${d.note||""}`, "ok");
-      document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${d.broker||br}</b> | ${d.note||""} | $${d.balance.toFixed(2)}</div>`;
+      document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${d.broker||br}</b> | ${d.note||""} | Balans: <b>$${d.balance.toFixed(2)}</b></div>`;
       if(d.token_type){
-        const hb=document.getElementById("h-tok-type"); hb.style.display="inline";
-        hb.className=d.token_type==="PAT"?"badge-p":"badge-k";
-        hb.textContent=d.token_type==="PAT"?"⚡ PAT-REST":"✅ Klasik-WS";
+        const hbadge=document.getElementById("h-tok-type");
+        hbadge.style.display="inline";
+        hbadge.className=d.token_type==="PAT"?"badge-pat":"badge-classic";
+        hbadge.textContent=d.token_type==="PAT"?"⚠ PAT":"✅ Klasik";
       }
-    }else msg("cm",d.error||"✗ Echèk koneksyon",false);
+    }else{
+      msg("cm",d.error||"✗ Echèk koneksyon",false);
+    }
   }catch(e){msg("cm","✗ Erè rezo: "+e.message,false)}
-  btn.textContent="⚡ KONEKTE"; btn.disabled=false;
+  btn.textContent="⚡ KONEKTE";btn.disabled=false;
 }
 
 async function doStart(){
@@ -2407,17 +2730,15 @@ async function doStop(){
 }
 
 async function doBt(){
-  const btn=event.target; btn.textContent="⏳ AP KALKILE..."; btn.disabled=true;
+  const btn=event.target;btn.textContent="⏳ AP KALKILE...";btn.disabled=true;
   document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest — tann...</div>`;
-  const body={symbol:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,
-    balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),
-    sl:parseFloat(document.getElementById("bt-sl").value),tp:parseFloat(document.getElementById("bt-tp").value)};
+  const body={symbol:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),sl:parseFloat(document.getElementById("bt-sl").value),tp:parseFloat(document.getElementById("bt-tp").value)};
   try{
     const r=await fetch("/api/backtest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const d=await r.json();
     document.getElementById("btm").innerHTML="";
     if(d.ok){
-      const v=d.result; const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";
+      const v=d.result;const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";
       document.getElementById("btr").innerHTML=`<div class="stats">
         <div class="stat"><div class="sl">NET P&L</div><div class="sv" style="color:${c}">$${v.net_pnl}</div></div>
         <div class="stat"><div class="sl">RETOU</div><div class="sv" style="color:${c}">${v.return_pct}%</div></div>
@@ -2429,37 +2750,37 @@ async function doBt(){
       </div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
     }else document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
   }catch(e){document.getElementById("btm").innerHTML=`<div class="al er">✗ ${e.message}</div>`}
-  btn.textContent="▶ KÒMANSE BACKTEST"; btn.disabled=false;
+  btn.textContent="▶ KÒMANSE BACKTEST";btn.disabled=false;
 }
 
 function drawC(vals){
   const W=500,H=110,p=8;
   const mn=Math.min(...vals),mx=Math.max(...vals),rng=mx-mn||1;
   const pts=vals.map((v,i)=>`${p+(i/(vals.length-1))*(W-p*2)},${H-p-((v-mn)/rng)*(H-p*2)}`).join(" ");
+  const area=`${p},${H} ${pts} ${W-p},${H}`;
   const col=vals[vals.length-1]>=vals[0]?"#00FF88":"#FF3B6B";
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${p},${H} ${pts} ${W-p},${H}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${area}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
 }
 
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+10 strategies klasik. ADX≥12, 3 strat minimòm.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3+ strat"]},
-  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5.0/15 + ADX≥12 + SuperTrend bonus.",tags:["score 5/15","ADX≥12","ST bonus"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0. Siyal klè BUY/SELL.",tags:["ATR×3","75-92%"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon.",tags:["5 bouji","72-83%"]},
-  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 / Lowest Low + ATR×3.",tags:["HH-ATR×3","75-90%"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè: EMA+RSI+MACD+BB+momentum+vol+position+trend.",tags:["8 faktè","68-92%"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing + EMA50.",tags:["BOS","swing","EMA50"]},
-  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9"]},
-  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50.",tags:["RSI 14","OB 70","OS 30"]},
-  binance_gold:{l:"🥇 Gold",d:"XAU/USD: EMA+RSI+MACD+BB+Stoch+Volume.",tags:["EMA 20/50/200"]},
-  binance_crypto:{l:"🪙 Crypto",d:"Binance: Trend+Volume+RSI+MACD+Breakout.",tags:["EMA 9/21/50","Volume"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+10 strategies klasik. ADX≥12, 3 strat minimòm.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts.",tags:["score 5/15","ADX≥12","ST bonus"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0. Siyal klè BUY/SELL. Pi reliable pou Deriv synthetic.",tags:["ATR×3","travèse=BUY","conf 75-92%"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid.",tags:["5 bouji","filtre bwi","conf 72-83%"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short).",tags:["HH-ATR×3","LL+ATR×3","conf 75-90%"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["8 faktè","pwa","conf 68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre.",tags:["BOS","swing","EMA50"]},
+  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m"]},
+  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI 14","OB 70","OS 30"]},
+  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA+RSI+MACD+BB+Stoch+Volume.",tags:["EMA 20/50/200","RSI+Stoch","BB"]},
+  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: Trend+Volume+RSI+MACD+Breakout.",tags:["EMA 9/21/50","Volume","MACD+BB"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
 Object.keys(SI).forEach(k=>{
   const b=document.createElement("button");
-  b.className="btn"+(k===sel?" b":""); b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
-  b.textContent=SI[k].l;
-  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88"};
+  b.className="btn"+(k===sel?" b":"");b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
+  b.textContent=SI[k].l;b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88"};
   sb.appendChild(b);
 });
 function renderS(){
@@ -2471,7 +2792,7 @@ renderS();
 function sw(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
-  document.getElementById("pg-"+id).classList.add("on"); el.classList.add("on");
+  document.getElementById("pg-"+id).classList.add("on");el.classList.add("on");
 }
 function msg(id,txt,ok){
   const cls=ok===true?"ok":(ok===false?"er":"in");
@@ -2479,7 +2800,7 @@ function msg(id,txt,ok){
 }
 
 function upd(d){
-  const col=d.pnl>=0?"#00FF88":"#FF3B6B"; const sign=d.pnl>=0?"+":"";
+  const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
   const blab={"deriv":"DERIV","binance":"BINANCE","binance_us":"BINANCE US"}[d.broker]||(d.broker?d.broker.toUpperCase():"DISCONNECTED");
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("hbal").style.color=d.connected?"#00D4FF":"#3A6070";
@@ -2501,10 +2822,10 @@ function upd(d){
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
   else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none"}
   if(d.trades.length>1){
-    let cum=0; const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum});
+    let cum=0;const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum});
     const svg=document.getElementById("chart");
-    const ch=drawC(eq); const tmp=document.createElement("div"); tmp.innerHTML=ch;
-    const ns=tmp.firstChild; while(svg.firstChild)svg.removeChild(svg.firstChild); while(ns&&ns.firstChild)svg.appendChild(ns.firstChild);
+    const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;
+    const ns=tmp.firstChild;while(svg.firstChild)svg.removeChild(svg.firstChild);while(ns&&ns.firstChild)svg.appendChild(ns.firstChild);
   }
   if(d.trades.length){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
@@ -2515,9 +2836,9 @@ function upd(d){
 
 async function poll(){try{const r=await fetch("/api/status");const d=await r.json();upd(d)}catch(e){}setTimeout(poll,3000)}
 
-// ADMIN
+// ══ ADMIN ══
 async function admRefresh(){
-  const token=getStoredToken(); if(!token)return;
+  const token=getStoredToken();if(!token)return;
   try{
     const r=await fetch("/api/admin/codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
     const d=await r.json();
@@ -2538,14 +2859,15 @@ async function admRefresh(){
       document.getElementById("adm-users-list").innerHTML=d2.total===0
         ?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>'
         :`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr>
-          <td style="color:#4A7080;font-size:10px">${u.uid}</td><td>${u.broker||"—"}</td>
-          <td style="font-weight:700">${u.symbol||"—"}</td>
+          <td style="color:#4A7080;font-size:10px">${u.uid}</td>
+          <td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td>
           <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
           <td style="color:#00D4FF">$${u.balance}</td>
           <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
           <td>${u.trades}</td>
-          <td style="display:flex;gap:4px">
+          <td style="display:flex;gap:4px;align-items:center">
             ${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
+            <button onclick="admClearTrades('${u.uid}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button>
             <button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
           </td></tr>`).join("")}</table>`;
     }
@@ -2553,13 +2875,11 @@ async function admRefresh(){
   try{
     const r3=await fetch("/api/admin/sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
     const d3=await r3.json();
-    if(d3.ok){document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0
-      ?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>'
-      :d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between"><span style="color:#4A7080">${s.token}</span><span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span><span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span></div>`).join("")}
+    if(d3.ok){document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>':d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between"><span style="color:#4A7080">${s.token}</span><span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span><span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span></div>`).join("")}
   }catch(e){}
 }
 async function admAddCode(){
-  const token=getStoredToken(); const code=document.getElementById("new-code").value.trim().toUpperCase();
+  const token=getStoredToken();const code=document.getElementById("new-code").value.trim().toUpperCase();
   if(!code){document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>';return}
   const isAdm=document.getElementById("new-code-type").value==="adm";
   const r=await fetch("/api/admin/add_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code,is_adm:isAdm})});
@@ -2572,6 +2892,7 @@ async function admReset(code){const token=getStoredToken();const r=await fetch("
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh()}
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh()}
 async function admClearUser(uid){if(!confirm(`Efase TOUT istorik ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh()}
+async function admClearTrades(uid){if(!confirm(`Efase trades sèlman pou ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh()}
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let r="";for(let i=0;i<len;i++){if(i>0&&i%4===0)r+="-";r+=chars[Math.floor(Math.random()*chars.length)]}document.getElementById("gen-result").textContent=r;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=r}
 function admCopyGen(){admAddCode()}
 
@@ -2582,5 +2903,5 @@ checkLogin();
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"BonheurBot ELITE v6 — VRÈ PAT FIX (REST Bearer) — port {port}")
+    logger.info(f"BonheurBot ELITE v6 — PAT Fix — starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

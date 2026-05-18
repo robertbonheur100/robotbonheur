@@ -1,33 +1,19 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║      BONHEURBOT PRO v6 ELITE — PAT OTP FIX FINAL v3        ║
+║      BONHEURBOT PRO v6 ELITE — PAT OTP FIX FINAL v4        ║
 ║       Multi-User Trading Bot — Deriv + Binance              ║
 ║                                                             ║
-║  KOREKSYON PRENSIPAL v3:                                    ║
-║   • place_trade / place_digits_trade: itilize 'underlying'  ║
-║     olye 'symbol' nan REST API Deriv nouvo a                ║
-║   • Proposal params: duration_unit → "minutes" pa "m"      ║
-║   • Fallback WS klasik si REST proposal echwe               ║
-║   • connect_deriv_token() retounen objè konplè              ║
-║   • DerivRESTClient.connect() konsève account_id FIABLEMAN  ║
+║  KÒREKSYON v4 (Properties not allowed: symbol):             ║
+║   • connect_deriv_token: eseye WS authorize ANVAN REST      ║
+║     PAT tokens mache ak WS authorize dirèk (PI FYAB)        ║
+║   • place_trade WS fallback: "underlying" olye "symbol"     ║
+║   • place_trade WS fallback: duration_unit "minutes"/"ticks"║
+║   • place_digits_trade fallback: menm kòreksyon             ║
+║   • api_connect: jere 2 chemen PAT (WS + REST)              ║
 ║                                                             ║
-║  DERIV REST API (api.derivws.com):                          ║
-║   BASE:    https://api.derivws.com/trading/v1/             ║
-║   HEADERS: Deriv-App-ID + Authorization: Bearer pat_xxx    ║
-║   PROPOSAL BODY:                                            ║
-║     { "underlying": "R_100",   ← PA "symbol"!             ║
-║       "contract_type": "CALL",                              ║
-║       "duration": 5,                                        ║
-║       "duration_unit": "minutes",  ← PA "m"!              ║
-║       "stake": 1.0,            ← PA "amount"+"basis"!     ║
-║       "currency": "USD" }                                   ║
-║                                                             ║
-║  OTP WORKFLOW:                                              ║
-║   1. GET  /options/accounts          → accountId           ║
-║   2. POST /options/accounts/{id}/otp → { data: { url } }  ║
-║   3. ws = new WebSocket(data.url)    → pa bezwen authorize ║
-║                                                             ║
-║  ⚠ OTP SHORT-LIVED: kreye FRESH chak fwa anvan trade       ║
+║  RÈGL SENP:                                                 ║
+║   TOKEN KLASIK (REKÒMANDE) → WS ws.derivws.com              ║
+║   PAT (pat_xxx) → eseye WS anvan → REST+OTP si echwe        ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -142,14 +128,6 @@ def is_pat_token(token: str) -> bool:
 # ═══════════════════════════════════════════════════════════
 # ██  DERIV REST — MAPPING PARAMÈT KÒRÈK  ██
 # ═══════════════════════════════════════════════════════════
-
-# KOREKSYON KLE: REST API Deriv itilize non paramèt diferan de WS API
-# WS:   symbol → REST: underlying
-# WS:   amount + basis:"stake" → REST: stake (float dirèkteman)
-# WS:   duration_unit:"m" → REST: duration_unit:"minutes"
-# WS:   duration_unit:"h" → REST: duration_unit:"hours"
-# WS:   duration_unit:"t" → REST: duration_unit:"ticks"
-
 _WS_DU_TO_REST = {
     "m": "minutes",
     "h": "hours",
@@ -164,18 +142,14 @@ def _rest_duration_unit(ws_unit: str) -> str:
 
 def _build_rest_proposal(underlying, contract_type, stake, duration, duration_unit_ws,
                           currency="USD", barrier=None):
-    """
-    Kreye payload kòrèk pou REST API Deriv.
-    underlying = senbol (R_100, DIGITOVER, etc.)
-    duration_unit_ws = "m", "h", "t" (fòma WS) — konvèti otomatikman
-    """
+    """Kreye payload kòrèk pou REST API Deriv."""
     body = {
-        "underlying":     underlying,          # ← PA "symbol"
-        "contract_type":  contract_type,
-        "stake":          round(float(stake), 2),  # ← PA "amount"+"basis"
-        "duration":       int(duration),
-        "duration_unit":  _rest_duration_unit(duration_unit_ws),  # ← "minutes" pa "m"
-        "currency":       currency,
+        "underlying":    underlying,
+        "contract_type": contract_type,
+        "stake":         round(float(stake), 2),
+        "duration":      int(duration),
+        "duration_unit": _rest_duration_unit(duration_unit_ws),
+        "currency":      currency,
     }
     if barrier is not None:
         body["barrier"] = str(barrier)
@@ -183,18 +157,9 @@ def _build_rest_proposal(underlying, contract_type, stake, duration, duration_un
 
 
 # ═══════════════════════════════════════════════════════════
-# ██  DERIV PAT REST CLIENT — OTP FIX FINAL v3  ██
+# ██  DERIV PAT REST CLIENT — OTP FIX FINAL v4  ██
 # ═══════════════════════════════════════════════════════════
 class DerivRESTClient:
-    """
-    PAT Token client — REST + OTP WebSocket.
-
-    KOREKSYON v3:
-      - _build_proposal() itilize 'underlying' ak 'stake' ak 'duration_unit' kòrèk
-      - Fallback WS klasik si REST proposal echwe
-      - account_id konsève FIABLEMAN
-    """
-
     def __init__(self, pat_token: str, app_id: str = "1089", timeout: int = 25):
         self.token       = pat_token
         self.app_id      = app_id
@@ -207,10 +172,9 @@ class DerivRESTClient:
             "Deriv-App-ID":  app_id,
             "Content-Type":  "application/json",
             "Accept":        "application/json",
-            "User-Agent":    "BonheurBot/6.3",
+            "User-Agent":    "BonheurBot/6.4",
         }
 
-    # ── HTTP helpers ──────────────────────────────────────
     def _get(self, path, params=None):
         url = f"{DERIV_REST_BASE}{path}"
         r   = requests.get(url, headers=self._headers, params=params or {}, timeout=self.timeout)
@@ -225,7 +189,6 @@ class DerivRESTClient:
         r.raise_for_status()
         return r.json()
 
-    # ── Extract account_id ────────────────────────────────
     def _extract_account_id(self, accounts: list) -> str:
         if not accounts: return ""
         real = next(
@@ -237,7 +200,6 @@ class DerivRESTClient:
             real.get("loginid") or real.get("account") or ""
         )
 
-    # ── OTP: FRESH chak fwa ───────────────────────────────
     def _fresh_ws_url(self) -> str:
         if not self._account_id:
             logger.error(
@@ -249,7 +211,6 @@ class DerivRESTClient:
             logger.info(f"PAT OTP: ap mande URL pou account_id='{self._account_id}'")
             resp = self._post_rest(f"/options/accounts/{self._account_id}/otp")
             logger.info(f"PAT OTP raw response: {str(resp)[:400]}")
-
             ws_url = ""
             if isinstance(resp, dict):
                 data = resp.get("data") or {}
@@ -261,7 +222,6 @@ class DerivRESTClient:
                               resp.get("websocket_url") or "")
                 if not ws_url and isinstance(resp.get("data"), str):
                     ws_url = resp["data"]
-
             if ws_url:
                 logger.info(f"PAT OTP ✓ WS URL: {ws_url[:120]}")
                 return ws_url
@@ -275,31 +235,24 @@ class DerivRESTClient:
             logger.error(f"PAT OTP error: {e}")
             return ""
 
-    # ── WS helper via OTP ─────────────────────────────────
     def _ws_call(self, build_msg_fn, check_done_fn, timeout=30):
         ws_url = self._fresh_ws_url()
         if not ws_url:
             return None, "Pa ka kreye OTP WS URL — verifye account_id ak App ID"
-
         import websocket as wsl
         res  = [None]; err  = [None]; done = threading.Event()
-
         def on_open(ws):
             try: build_msg_fn(ws)
             except Exception as e: err[0] = str(e); done.set()
-
         def on_msg(ws, msg):
             try:
                 d = json.loads(msg)
                 check_done_fn(d, ws, res, err, done)
             except Exception as e:
                 err[0] = str(e); done.set()
-
         def on_err(ws, e):
             if not done.is_set(): err[0] = f"WS erè: {str(e)[:150]}"; done.set()
-
         def on_close(ws, *a): pass
-
         try:
             ws = wsl.WebSocketApp(ws_url, on_open=on_open, on_message=on_msg,
                                   on_error=on_err, on_close=on_close)
@@ -314,13 +267,11 @@ class DerivRESTClient:
         except Exception as e:
             return None, f"WS koneksyon echwe: {e}"
 
-    # ── Connect ───────────────────────────────────────────
     def connect(self) -> float:
         errors = []
         try:
             data = self._get("/options/accounts")
             logger.info(f"PAT /options/accounts: {str(data)[:500]}")
-
             accounts = []
             if isinstance(data, list):
                 accounts = data
@@ -337,7 +288,6 @@ class DerivRESTClient:
                     )
                     logger.info(f"PAT balance dirèk: ${self._bal:.2f} account_id='{self._account_id}'")
                     return self._bal
-
             if accounts:
                 self._account_id = self._extract_account_id(accounts)
                 real = next(
@@ -354,12 +304,10 @@ class DerivRESTClient:
                 if test_url: logger.info("PAT OTP WS URL ✓ — trading pral fonksyone")
                 else: logger.warning("PAT OTP echwe nan test. Verifye pèmisyon PAT + App ID.")
                 return self._bal
-
         except requests.HTTPError as e:
             errors.append(f"GET /options/accounts: HTTP {e.response.status_code} → {e.response.text[:200]}")
         except Exception as e:
             errors.append(f"GET /options/accounts: {str(e)[:200]}")
-
         try:
             data = self._post_rest(
                 "/options/accounts",
@@ -374,16 +322,14 @@ class DerivRESTClient:
                 return self._bal
         except Exception as e:
             errors.append(f"POST /options/accounts: {str(e)[:100]}")
-
         try:
             self._get("/health")
             logger.warning("PAT health OK men pa jwenn accounts")
             return 0.0
         except Exception as e:
             errors.append(f"GET /health: {str(e)[:80]}")
-
         raise Exception(
-            "Token PAT echwe ak tout endpoints.\n\nDETAY ERÈ:\n" +
+            "Token PAT echwe ak tout endpoints REST.\n\nDETAY ERÈ:\n" +
             "\n".join(errors) +
             "\n\nSOLISYON:\n"
             "TOKEN KLASIK (Pi Fasil):\n"
@@ -395,7 +341,6 @@ class DerivRESTClient:
             "  Scope: trade + account_manage"
         )
 
-    # ── Balance ───────────────────────────────────────────
     def get_balance_sync(self) -> float:
         try:
             data = self._get("/options/accounts")
@@ -411,7 +356,6 @@ class DerivRESTClient:
         except: pass
         return self._bal
 
-    # ── Candles ───────────────────────────────────────────
     def get_candles(self, symbol="R_100", count=200, gran=60):
         if self._account_id:
             def send(ws):
@@ -452,7 +396,6 @@ class DerivRESTClient:
                  "low":  float(c["low"]),  "close": float(c["close"]),
                  "volume": 1000, "time": c["epoch"]} for c in res[0]]
 
-    # ── Ticks ─────────────────────────────────────────────
     def get_ticks(self, symbol="R_10", count=100):
         import websocket as wsl
         res = [None]; done = threading.Event()
@@ -471,14 +414,13 @@ class DerivRESTClient:
         return [{"price": float(p), "time": t}
                 for p, t in zip(res[0].get("prices", []), res[0].get("times", []))]
 
-    # ── Place Trade — KOREKSYON KLE v3 ───────────────────
+    # ── Place Trade — KÒREKSYON v4 ────────────────────────
     def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
         """
-        KOREKSYON v3:
-        - REST body itilize 'underlying' (pa 'symbol')
-        - 'stake' olye 'amount'+'basis'
-        - duration_unit = "minutes" (pa "m")
-        - Si REST echwe → fallback WS OTP ak fòma WS standard
+        KÒREKSYON v4:
+        - REST body: 'underlying' + 'stake' + duration_unit kòrèk
+        - WS OTP fallback: 'underlying' olye 'symbol' (FIX Properties not allowed: symbol)
+        - WS OTP fallback: duration_unit konvèti ("minutes" olye "m")
         """
         ct = "CALL" if direction == "BUY" else "PUT"
         if   duration_secs <= 60:    dv, du_ws = 1,  "m"
@@ -489,14 +431,14 @@ class DerivRESTClient:
 
         stake = max(0.5, float(amount))
 
-        # ── Metòd 1: REST API Deriv (si account_id disponib) ──
+        # ── Metòd 1: REST API ──────────────────────────────
         if self._account_id:
             try:
                 rest_body = _build_rest_proposal(
-                    underlying    = symbol,
-                    contract_type = ct,
-                    stake         = stake,
-                    duration      = dv,
+                    underlying       = symbol,
+                    contract_type    = ct,
+                    stake            = stake,
+                    duration         = dv,
                     duration_unit_ws = du_ws,
                 )
                 logger.info(f"PAT REST proposal: {json.dumps(rest_body)}")
@@ -505,14 +447,12 @@ class DerivRESTClient:
                     rest_body
                 )
                 logger.info(f"PAT REST proposal response: {str(resp)[:400]}")
-
                 inner = resp.get("data") or resp
                 proposal_id = (
                     inner.get("proposal_id") or inner.get("id") or
                     inner.get("contract_id") or ""
                 )
                 ask_price = float(inner.get("ask_price") or inner.get("price") or stake)
-
                 if proposal_id:
                     buy_resp = self._post_rest(
                         f"/options/accounts/{self._account_id}/buy",
@@ -521,7 +461,6 @@ class DerivRESTClient:
                     logger.info(f"PAT REST buy response: {str(buy_resp)[:300]}")
                     buy_data = buy_resp.get("data") or buy_resp
                     return buy_data
-
             except requests.HTTPError as e:
                 body_txt = e.response.text[:500]
                 logger.warning(
@@ -531,15 +470,21 @@ class DerivRESTClient:
             except Exception as e:
                 logger.warning(f"PAT REST proposal echwe: {e} → Ap eseye WS OTP fallback...")
 
-        # ── Metòd 2: WS OTP fallback (fòma WS standard) ──
+        # ── Metòd 2: WS OTP fallback ──────────────────────
+        # KÒREKSYON v4: "underlying" olye "symbol" + duration_unit konvèti
         logger.info(f"PAT WS OTP fallback: {symbol} {ct} stake={stake} dur={dv}{du_ws}")
         state = {"pid": None}
 
         def send(ws):
             ws.send(json.dumps({
-                "proposal": 1, "amount": stake, "basis": "stake",
-                "contract_type": ct, "currency": "USD",
-                "symbol": symbol, "duration": dv, "duration_unit": du_ws
+                "proposal":      1,
+                "amount":        stake,
+                "basis":         "stake",
+                "contract_type": ct,
+                "currency":      "USD",
+                "underlying":    symbol,                      # ← FIX v4: "underlying" olye "symbol"
+                "duration":      dv,
+                "duration_unit": _rest_duration_unit(du_ws), # ← FIX v4: "minutes" olye "m"
             }))
 
         def recv(d, ws, res, err, done):
@@ -559,27 +504,26 @@ class DerivRESTClient:
         if e: raise Exception(e)
         return result or {}
 
-    # ── Place Digits Trade — KOREKSYON KLE v3 ────────────
+    # ── Place Digits Trade — KÒREKSYON v4 ────────────────
     def place_digits_trade(self, symbol, contract_type, amount=0.35, barrier=None):
         """
-        KOREKSYON v3:
-        - REST body itilize 'underlying' (pa 'symbol')
-        - 'stake' olye 'amount'+'basis'
-        - duration_unit = "ticks" (pa "t")
-        - Fallback WS OTP si REST echwe
+        KÒREKSYON v4:
+        - REST body: 'underlying' + 'stake' + 'ticks'
+        - WS OTP fallback: 'underlying' olye 'symbol' (FIX Properties not allowed: symbol)
+        - WS OTP fallback: duration_unit "ticks" olye "t"
         """
         stake = max(0.35, float(amount))
 
-        # ── Metòd 1: REST API ──
+        # ── Metòd 1: REST API ──────────────────────────────
         if self._account_id:
             try:
                 rest_body = _build_rest_proposal(
-                    underlying    = symbol,
-                    contract_type = contract_type,
-                    stake         = stake,
-                    duration      = 5,
-                    duration_unit_ws = "t",  # → "ticks"
-                    barrier       = barrier,
+                    underlying       = symbol,
+                    contract_type    = contract_type,
+                    stake            = stake,
+                    duration         = 5,
+                    duration_unit_ws = "t",
+                    barrier          = barrier,
                 )
                 logger.info(f"PAT REST digits proposal: {json.dumps(rest_body)}")
                 resp = self._post_rest(
@@ -587,14 +531,12 @@ class DerivRESTClient:
                     rest_body
                 )
                 logger.info(f"PAT REST digits response: {str(resp)[:400]}")
-
                 inner = resp.get("data") or resp
                 proposal_id = (
                     inner.get("proposal_id") or inner.get("id") or
                     inner.get("contract_id") or ""
                 )
                 ask_price = float(inner.get("ask_price") or inner.get("price") or stake)
-
                 if proposal_id:
                     buy_resp = self._post_rest(
                         f"/options/accounts/{self._account_id}/buy",
@@ -602,7 +544,6 @@ class DerivRESTClient:
                     )
                     buy_data = buy_resp.get("data") or buy_resp
                     return buy_data
-
             except requests.HTTPError as e:
                 body_txt = e.response.text[:500]
                 logger.warning(
@@ -612,14 +553,21 @@ class DerivRESTClient:
             except Exception as e:
                 logger.warning(f"PAT REST digits echwe: {e} → WS OTP fallback...")
 
-        # ── Metòd 2: WS OTP fallback ──
+        # ── Metòd 2: WS OTP fallback ──────────────────────
+        # KÒREKSYON v4: "underlying" olye "symbol" + "ticks" olye "t"
         logger.info(f"PAT WS OTP digits fallback: {symbol} {contract_type}")
         proposal_msg = {
-            "proposal": 1, "amount": stake, "basis": "stake",
-            "contract_type": contract_type, "currency": "USD",
-            "symbol": symbol, "duration": 5, "duration_unit": "t"
+            "proposal":      1,
+            "amount":        stake,
+            "basis":         "stake",
+            "contract_type": contract_type,
+            "currency":      "USD",
+            "underlying":    symbol,   # ← FIX v4: "underlying" olye "symbol"
+            "duration":      5,
+            "duration_unit": "ticks",  # ← FIX v4: "ticks" olye "t"
         }
-        if barrier is not None: proposal_msg["barrier"] = str(barrier)
+        if barrier is not None:
+            proposal_msg["barrier"] = str(barrier)
 
         def send(ws): ws.send(json.dumps(proposal_msg))
 
@@ -639,7 +587,6 @@ class DerivRESTClient:
         if e: raise Exception(e)
         return result or {}
 
-    # ── Wait contract result ──────────────────────────────
     def wait_contract_result(self, contract_id, timeout=35):
         def send(ws):
             ws.send(json.dumps({"proposal_open_contract": 1,
@@ -655,7 +602,6 @@ class DerivRESTClient:
         result, _ = self._ws_call(send, recv, timeout=timeout)
         return result
 
-    # ── Transfer ──────────────────────────────────────────
     def transfer_to_account(self, account_id, amount):
         def send(ws):
             ws.send(json.dumps({"transfer_between_accounts": 1,
@@ -680,7 +626,7 @@ class DerivRESTClient:
 
 
 # ═══════════════════════════════════════════════════════════
-# WEBSOCKET AUTHORIZE — TOKEN KLASIK SÈLMAN
+# WEBSOCKET AUTHORIZE — TOKEN KLASIK + PAT (FIX v4)
 # ═══════════════════════════════════════════════════════════
 def connect_ws_authorize(token: str, app_id: str, timeout: int = 20):
     import websocket as wsl
@@ -742,16 +688,37 @@ def connect_classic_token(token: str, app_id: str = "1089"):
     )
 
 
+# ═══════════════════════════════════════════════════════════
+# KÒREKSYON v4 — connect_deriv_token: WS anvan REST
+# ═══════════════════════════════════════════════════════════
 def connect_deriv_token(token: str, app_id: str = "1089"):
     if is_pat_token(token):
-        logger.info(f"PAT → REST api.derivws.com app_id={app_id}")
+        # ── KÒREKSYON v4: eseye WS authorize ANVAN REST ────────────
+        # PAT tokens Deriv aksepte authorize WS dirèk — PI FYAB
+        # Evite tout erè REST ak OTP WS "Properties not allowed: symbol"
+        logger.info(f"PAT → tante WS authorize standard anvan REST app_id={app_id}")
+        ok, bal, lid, used_aid, note = connect_classic_token(token, app_id)
+        if ok:
+            logger.info(f"PAT WS ✓ loginid={lid} app_id={used_aid} ${bal:.2f}")
+            return ok, bal, lid, used_aid, f"PAT (WS) | {lid} | app_id={used_aid}"
+
+        # ── Fallback REST+OTP si WS echwe ──────────────────────────
+        logger.info(f"PAT WS echwe ({note[:80]}) → tante REST+OTP api.derivws.com...")
         try:
             c   = DerivRESTClient(token, app_id)
             bal = c.connect()
-            logger.info(f"PAT OK | loginid={c.loginid} | account_id={c._account_id} | ${bal:.2f}")
+            logger.info(f"PAT REST ✓ loginid={c.loginid} account_id={c._account_id} ${bal:.2f}")
             return True, bal, c.loginid, c, f"PAT (REST+OTP) | {c.loginid} | account={c._account_id}"
         except Exception as e:
-            return False, 0.0, None, None, str(e)
+            return False, 0.0, None, None, (
+                f"PAT echwe WS + REST.\n\n"
+                f"WS: {note}\n"
+                f"REST: {str(e)[:300]}\n\n"
+                "SOLISYON PI FASIL:\n"
+                "  app.deriv.com → foto ou → API Token\n"
+                "  Create token → ✓ Read ✓ Trade ✓ Payments\n"
+                "  Kole token (PA pat_xxx) — App ID: 1089"
+            )
     else:
         logger.info(f"Klasik → WebSocket app_id={app_id}")
         ok, bal, lid, used_aid, note = connect_classic_token(token, app_id)
@@ -1436,10 +1403,12 @@ class DerivDigitsClient:
         if not ok: raise Exception(note)
         self._bal=bal
         if self._is_pat and isinstance(used, DerivRESTClient):
-            self._rest=used
-            self._rest._bal=bal
+            self._rest=used; self._rest._bal=bal
         elif not self._is_pat and used:
             self.app_id=used
+        elif self._is_pat and isinstance(used, str):
+            # PAT via WS — trète kòm klasik
+            self._is_pat=False; self.app_id=used; self._rest=None
         return self._bal
 
     def _auth(self,ws): ws.send(json.dumps({"authorize":self.token}))
@@ -1826,7 +1795,7 @@ def trading_loop(st,bot_id=None):
     fn=STRATEGIES.get(strategy,strat_confluence_elite)
     wait_after=tf+90; base_lot=round(max(0.5,lot),2); current_lot=base_lot
     consec_losses=0; total_lost=0.0; MAX_LOSSES=3; PAUSE=45
-    add_log(st,f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
+    add_log(st,f"🚀 BonheurBot ELITE v6.4 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Bot anile","WARN"); return
         if _check_limits(st,cfg): break
@@ -1911,7 +1880,7 @@ def trading_loop(st,bot_id=None):
                         except Exception as e: add_log(st,f"Transfer echwe: {e}","ERROR")
         except Exception as e: add_log(st,f"Erè: {e}","ERROR")
         time.sleep(tf)
-    add_log(st,"⏹ BonheurBot ELITE v6 arrêté")
+    add_log(st,"⏹ BonheurBot ELITE v6.4 arrêté")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1947,24 +1916,39 @@ def api_connect():
                 )
                 return jsonify({"ok": False, "error": err})
 
+            # ── KÒREKSYON v4: jere 2 chemen PAT (WS oswa REST) ──────
             if is_pat_token(raw_token):
-                api_main = client_obj
-                api_main._bal     = balance
-                api_main._loginid = loginid or api_main._loginid
+                if isinstance(client_obj, DerivRESTClient):
+                    # Chemen REST+OTP
+                    api_main            = client_obj
+                    api_main._bal       = balance
+                    api_main._loginid   = loginid or api_main._loginid
 
-                api_digits              = DerivDigitsClient(raw_token, app_id)
-                api_digits._bal         = balance
-                api_digits._rest        = api_main
-                api_digits._is_pat      = True
+                    api_digits          = DerivDigitsClient(raw_token, app_id)
+                    api_digits._bal     = balance
+                    api_digits._rest    = api_main
+                    api_digits._is_pat  = True
 
-                add_log(
-                    st,
-                    f"PAT ✓ account_id='{api_main._account_id}' "
-                    f"loginid='{api_main._loginid}' ${balance:.2f}",
-                    "SUCCESS"
-                )
+                    add_log(st,
+                        f"PAT REST+OTP ✓ account_id='{api_main._account_id}' "
+                        f"loginid='{api_main._loginid}' ${balance:.2f}",
+                        "SUCCESS")
+                else:
+                    # Chemen WS standard (PAT via authorize) — PI FYAB
+                    used_app_id         = client_obj or app_id
+                    api_main            = DerivClient(raw_token, used_app_id)
+                    api_main._bal       = balance
+                    api_main._loginid   = loginid
+
+                    api_digits          = DerivDigitsClient(raw_token, used_app_id)
+                    api_digits._bal     = balance
+                    api_digits._is_pat  = False  # WS klasik
+
+                    add_log(st,
+                        f"PAT WS ✓ loginid='{loginid}' app_id={used_app_id} ${balance:.2f}",
+                        "SUCCESS")
             else:
-                used_app_id = client_obj or app_id
+                used_app_id            = client_obj or app_id
                 api_main               = DerivClient(raw_token, used_app_id)
                 api_main._bal          = balance
                 api_main._loginid      = loginid
@@ -2236,7 +2220,7 @@ def index():
 
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — v6 ELITE
+# HTML INTERFACE — v6.4 ELITE
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
@@ -2295,7 +2279,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v6 ELITE — PAT FIX v3 (underlying)</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v6.4 ELITE — PAT FIX v4</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
       <input id="login-code" type="text" placeholder="BB-XXXX-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
@@ -2317,7 +2301,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
-    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6.3</span></div>
+    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6.4</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
     <span id="h-tok-type" style="display:none"></span>
@@ -2360,15 +2344,15 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
       <div id="fd">
         <div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:12px;margin-bottom:12px">
-          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ PAT FIX v3 — underlying + duration_unit kòrèk</div>
+          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ PAT FIX v4 — WS anvan REST | underlying kòrèk</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px">
               <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:4px">✅ TOKEN KLASIK (REKÒMANDE)</div>
               <div style="color:#4A7080;font-size:9px;line-height:1.8">PA kòmanse ak <code>pat_</code><br>→ WebSocket ws.derivws.com<br>App ID: <b>1089</b> | Read+Trade+Pay</div>
             </div>
             <div style="background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px">
-              <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:4px">⚡ PAT (pat_xxx) — FIX v3</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">REST: underlying + stake<br>duration_unit: "minutes"/"ticks"<br>Fallback WS si REST echwe<br>developers.deriv.com</div>
+              <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:4px">⚡ PAT (pat_xxx) — FIX v4</div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">1. Eseye WS authorize dirèk<br>2. Si echwe → REST+OTP<br>underlying+ticks kòrèk<br>developers.deriv.com</div>
             </div>
           </div>
         </div>
@@ -2413,7 +2397,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
-      <div class="bt">PARAMÈT BOT ELITE v6</div>
+      <div class="bt">PARAMÈT BOT ELITE v6.4</div>
       <div class="iw"><div class="il">MOD TRADING</div>
         <select id="c-mode" onchange="toggleMode()">
           <option value="forex">📈 Rise/Fall — Deriv Synthetic</option>
@@ -2654,8 +2638,8 @@ function autoDetectToken(){
   const hint=document.getElementById("tok-hint");
   const appNote=document.getElementById("appid-note");
   if(val.startsWith("pat_")){
-    badge.style.display="inline";badge.className="bp";badge.textContent="⚡ PAT→REST+OTP+Fallback";
-    hint.innerHTML='<span style="color:#FFD600">⚡ PAT v3: REST underlying+stake+minutes → Fallback WS si echwe</span>';
+    badge.style.display="inline";badge.className="bp";badge.textContent="⚡ PAT→WS d'abord→REST fallback";
+    hint.innerHTML='<span style="color:#FFD600">⚡ PAT v4: eseye WS authorize anvan → REST+OTP si echwe</span>';
     appNote.innerHTML='<span style="color:#FFD600">(PAT: App ID ou a nan developers.deriv.com)</span>';
   }else if(val.length>10){
     badge.style.display="inline";badge.className="bk";badge.textContent="✅ KLASIK→WS";
@@ -2701,7 +2685,7 @@ async function doConn(){
     const appId=document.getElementById("d-ai").value.trim()||"1089";
     const isPat=rawToken.toLowerCase().startsWith("pat_");
     body.token=rawToken;body.app_id=appId;
-    msg("cm",`⏳ ${isPat?"PAT v3 → REST underlying+stake+minutes | Fallback WS":"Klasik → WS app_id="+appId} | Ap konekte...`,"ok");
+    msg("cm",`⏳ ${isPat?"PAT v4 → WS authorize anvan → REST fallback":"Klasik → WS app_id="+appId} | Ap konekte...`,"ok");
   }
   if(br==="binance"||br==="binance_us"){
     body.api_key=document.getElementById("b-k").value.trim();body.api_secret=document.getElementById("b-s").value.trim();
@@ -2714,7 +2698,7 @@ async function doConn(){
     if(d.ok){
       msg("cm",`✅ KONEKTE! $${d.balance.toFixed(2)} | ${d.note||""}`, "ok");
       document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${d.broker||br}</b> | ${d.note||""} | $${d.balance.toFixed(2)}</div>`;
-      if(d.token_type){const hb=document.getElementById("h-tok-type");hb.style.display="inline";hb.className=d.token_type==="PAT"?"bp":"bk";hb.textContent=d.token_type==="PAT"?"⚡ PAT-OTP-v3":"✅ Klasik-WS";}
+      if(d.token_type){const hb=document.getElementById("h-tok-type");hb.style.display="inline";hb.className=d.token_type==="PAT"?"bp":"bk";hb.textContent=d.token_type==="PAT"?"⚡ PAT-v4":"✅ Klasik-WS";}
     }else msg("cm",d.error||"✗ Echèk koneksyon",false);
   }catch(e){msg("cm","✗ Erè rezo: "+e.message,false)}
   btn.textContent="⚡ KONEKTE";btn.disabled=false;
@@ -2723,7 +2707,7 @@ async function doStart(){
   const body=getStartParams();
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
-  if(d.ok){msg("ctm","✅ BonheurBot ELITE v6 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
+  if(d.ok){msg("ctm","✅ BonheurBot ELITE v6.4 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
   else msg("ctm","✗ "+d.error,false);
 }
 async function doStop(){
@@ -2867,5 +2851,5 @@ checkLogin();
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"BonheurBot ELITE v6.3 — PAT FIX v3 (underlying+duration_unit+fallback) — port {port}")
+    logger.info(f"BonheurBot ELITE v6.4 — PAT FIX v4 (WS anvan REST | underlying+ticks) — port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

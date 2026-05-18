@@ -3,11 +3,10 @@
 ║        BONHEURBOT PRO v6 ELITE — VRÈ PAT FIX KONPLÈ        ║
 ║         Multi-User Trading Bot — Deriv + Binance            ║
 ║                                                             ║
-║  FIX v6.1:                                                  ║
-║   ✅ TOUTES STRATEGIES retabli (ansyen + nouvo)             ║
-║   ✅ PAT token place_trade → REST API (pa WebSocket)        ║
-║   ✅ PAT token get_candles → REST API                       ║
-║   ✅ DerivClient (Klasik) pa chanje — WebSocket ok          ║
+║  VRÈ PAT FIX (konfime avèk prèv teknik):                   ║
+║   PAT + WebSocket = 401 + {"error":"InvalidAppID"} TOUJOU  ║
+║   PAT SÈLMAN fonksyone: Authorization: Bearer pat_xxx       ║
+║                         nan HTTP REST API                   ║
 ║                                                             ║
 ║  ACHITEKTI DUAL CLIENT:                                      ║
 ║   TOKEN PAT    → DerivRESTClient  (HTTP REST Bearer)        ║
@@ -121,28 +120,37 @@ def get_state():
 
 # ═══════════════════════════════════════════════════════════
 # ██  VRÈ PAT FIX — DUAL CLIENT SYSTEM  ██
+#
+#  PRÈV TEKNIK (konfime):
+#   PAT + WebSocket {"authorize":"pat_xxx"} = 401 + InvalidAppID
+#   Kèlkeswa app_id (1089, 36544, nenpòt) — PA fonksyone
+#
+#  SOLISYON KÒRÈK:
+#   PAT    → HTTP REST  api.deriv.com/v2/  + Authorization: Bearer pat_xxx
+#   KLASIK → WebSocket  ws.derivws.com     + {"authorize": "token"}
+#
 # ═══════════════════════════════════════════════════════════
+
 def is_pat_token(token: str) -> bool:
     return token.strip().lower().startswith("pat_")
 
 
 # ─────────────────────────────────────────────────────────────
 # REST CLIENT — PAT TOKEN VIA HTTP Bearer
-# ✅ FIX: place_trade + get_candles + get_ticks tout itilize REST
 # ─────────────────────────────────────────────────────────────
 class DerivRESTClient:
     """REST API client pou PAT token (Authorization: Bearer)"""
 
     def __init__(self, pat_token: str, timeout: int = 20):
-        self.token    = pat_token
-        self.timeout  = timeout
-        self._bal     = 0.0
+        self.token   = pat_token
+        self.timeout = timeout
+        self._bal    = 0.0
         self._loginid = "PAT_USER"
         self._headers = {
             "Authorization": f"Bearer {pat_token}",
             "Content-Type":  "application/json",
             "Accept":        "application/json",
-            "User-Agent":    "BonheurBot/6.1",
+            "User-Agent":    "BonheurBot/6.0",
         }
 
     def _get(self, endpoint, params=None):
@@ -158,7 +166,9 @@ class DerivRESTClient:
         return r.json()
 
     def connect(self) -> float:
+        """Authenticate PAT via REST — eseye plizyè endpoints"""
         errors = []
+
         # Metòd 1: GET /v2/account
         try:
             data = self._get("/account")
@@ -173,11 +183,13 @@ class DerivRESTClient:
                             try:
                                 lv = data
                                 for k in lpath: lv = lv[k]
-                                self._loginid = str(lv); break
+                                self._loginid = str(lv)
+                                break
                             except: pass
                         return self._bal
                     except: pass
-                self._loginid = "PAT_USER"; return 0.0
+                self._loginid = "PAT_USER"
+                return 0.0
         except requests.HTTPError as e:
             errors.append(f"GET /account: {e.response.status_code} → {e.response.text[:80]}")
         except Exception as e:
@@ -186,9 +198,12 @@ class DerivRESTClient:
         # Metòd 2: GET /v2/account/balance
         try:
             data = self._get("/account/balance")
+            logger.info(f"PAT REST /balance: {str(data)[:200]}")
             if "error" not in data:
                 for k in ["balance","amount"]:
-                    if k in data: self._bal = float(data[k]); return self._bal
+                    if k in data:
+                        self._bal = float(data[k])
+                        return self._bal
         except requests.HTTPError as e:
             errors.append(f"GET /balance: {e.response.status_code} → {e.response.text[:80]}")
         except Exception as e:
@@ -197,6 +212,7 @@ class DerivRESTClient:
         # Metòd 3: POST /v2/account/authorize
         try:
             data = self._post("/account/authorize", {"token": self.token})
+            logger.info(f"PAT REST /authorize: {str(data)[:200]}")
             if "error" not in data:
                 bal = data.get("balance") or data.get("account", {}).get("balance") or 0
                 self._bal = float(bal)
@@ -207,9 +223,11 @@ class DerivRESTClient:
         except Exception as e:
             errors.append(f"POST /authorize: {str(e)[:80]}")
 
-        # Metòd 4: ping
+        # Metòd 4: GET /v2/ping (jis pou verifye token valid)
         try:
-            self._get("/ping"); self._bal = 0.0; self._loginid = "PAT_USER"
+            data = self._get("/ping")
+            logger.info(f"PAT REST /ping: {str(data)[:100]}")
+            self._bal = 0.0; self._loginid = "PAT_USER"
             logger.warning("PAT: ping OK men balance unavailable — mete 0")
             return 0.0
         except requests.HTTPError as e:
@@ -220,17 +238,21 @@ class DerivRESTClient:
         raise Exception(
             f"Token PAT echwe ak tout REST endpoints.\n\nDETAY ERÈ:\n" +
             "\n".join(errors) +
-            "\n\nSOLISYON: Itilize Token Klasik (pa pat_xxx)\n"
+            "\n\n╔══════════════════════════════════════╗\n"
+            "║   ITILIZE TOKEN KLASIK (REKÒMANDE)  ║\n"
+            "╚══════════════════════════════════════╝\n"
             "1. app.deriv.com → foto ou → API Token\n"
             "2. Create new token → Read+Trade+Payments\n"
-            "3. Kole token, App ID: 1089"
+            "3. Kole token (PA kòmanse ak pat_)\n"
+            "4. App ID: 1089"
         )
 
     def get_balance_sync(self) -> float:
         try:
             data = self._get("/account/balance")
             for k in ["balance","amount"]:
-                if k in data: self._bal = float(data[k]); return self._bal
+                if k in data:
+                    self._bal = float(data[k]); return self._bal
         except: pass
         try:
             data = self._get("/account")
@@ -239,7 +261,6 @@ class DerivRESTClient:
         except: pass
         return self._bal
 
-    # ✅ FIX PRENSIPAL: get_candles pa itilize WebSocket ankò — REST sèlman
     def get_candles(self, symbol="R_100", count=200, gran=60):
         try:
             data = self._get("/ticks/history", {
@@ -247,44 +268,11 @@ class DerivRESTClient:
                 "granularity": gran, "style": "candles", "end": "latest"
             })
             candles = data.get("candles") or data.get("data",{}).get("candles") or []
-            if candles:
-                return [{"open":float(c.get("open",0)),"high":float(c.get("high",0)),
-                         "low":float(c.get("low",0)),"close":float(c.get("close",0)),
-                         "volume":1000,"time":c.get("epoch",0)} for c in candles]
+            return [{"open":float(c.get("open",0)),"high":float(c.get("high",0)),
+                     "low":float(c.get("low",0)),"close":float(c.get("close",0)),
+                     "volume":1000,"time":c.get("epoch",0)} for c in candles]
         except Exception as e:
-            logger.error(f"PAT get_candles REST: {e}")
-        # Fallback: eseye WebSocket piblik (san authorize) pou jwenn done
-        try:
-            return self._get_candles_ws_public(symbol, count, gran)
-        except Exception as e2:
-            logger.error(f"PAT get_candles WS fallback: {e2}")
-            return []
-
-    def _get_candles_ws_public(self, symbol, count, gran):
-        """WebSocket piblik (san token) jis pou done mache — PA pou trading"""
-        import websocket as wsl
-        res=[None]; done=threading.Event()
-        def on_open(ws):
-            ws.send(json.dumps({"ticks_history":symbol,"count":count,"end":"latest",
-                                "granularity":gran,"style":"candles","adjust_start_time":1}))
-        def on_msg(ws, msg):
-            d=json.loads(msg)
-            if "candles" in d: res[0]=d["candles"]; done.set()
-            elif "error" in d: done.set()
-        for aid in ["1089","36544"]:
-            url=f"wss://ws.derivws.com/websockets/v3?app_id={aid}"
-            try:
-                w=wsl.WebSocketApp(url,on_open=on_open,on_message=on_msg)
-                t=threading.Thread(target=w.run_forever,daemon=True); t.start()
-                done.wait(timeout=20)
-                if res[0]:
-                    return [{"open":float(c["open"]),"high":float(c["high"]),"low":float(c["low"]),
-                             "close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
-                done.clear()
-                try: w.close()
-                except: pass
-            except: pass
-        return []
+            logger.error(f"PAT get_candles: {e}"); return []
 
     def get_ticks(self, symbol="R_10", count=100):
         try:
@@ -295,110 +283,36 @@ class DerivRESTClient:
         except Exception as e:
             logger.error(f"PAT get_ticks: {e}"); return []
 
-    # ✅ FIX PRENSIPAL: place_trade itilize REST API — PA WebSocket
     def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
         ct = "CALL" if direction == "BUY" else "PUT"
-        if duration_secs<=60:   dv,du=1,"m"
+        if duration_secs<=60: dv,du=1,"m"
         elif duration_secs<=300: dv,du=5,"m"
         elif duration_secs<=900: dv,du=15,"m"
         elif duration_secs<=3600: dv,du=1,"h"
         else: dv,du=4,"h"
-
-        # Eseye REST API proposal/buy
-        try:
-            prop = self._post("/trade/proposal", {
-                "contract_type":ct,"symbol":symbol,"amount":max(0.5,float(amount)),
-                "basis":"stake","duration":dv,"duration_unit":du,"currency":"USD"})
-            if "error" in prop:
-                raise Exception(prop["error"].get("message","Proposal echwe"))
-            pid = prop.get("proposal",{}).get("id") or prop.get("id")
-            ask = prop.get("proposal",{}).get("ask_price") or prop.get("ask_price")
-            if not pid: raise Exception(f"Pa jwenn proposal_id: {str(prop)[:100]}")
-            result = self._post("/trade/buy", {"buy":pid,"price":ask})
-            if "error" in result: raise Exception(result["error"].get("message","Buy echwe"))
-            buy_data = result.get("buy") or result
-            logger.info(f"PAT REST trade OK: {str(buy_data)[:100]}")
-            return buy_data
-        except Exception as e:
-            logger.warning(f"PAT REST trade echwe ({e}), eseye WebSocket authorize...")
-            # Fallback: WebSocket ak authorize (PAT pa toujou fonksyone men eseye)
-            return self._place_trade_ws_fallback(symbol, direction, amount, dv, du, ct)
-
-    def _place_trade_ws_fallback(self, symbol, direction, amount, dv, du, ct):
-        """Fallback WebSocket trading ak PAT token — dènyè opsyon"""
-        import websocket as wsl
-        res=[None]; err=[None]; done=threading.Event()
-        token=self.token
-        def on_msg(ws, msg):
-            d=json.loads(msg); mt=d.get("msg_type","")
-            if mt=="authorize":
-                if "error" in d:
-                    err[0]=f"Auth echwe: {d['error'].get('message','')}"
-                    done.set(); return
-                ws.send(json.dumps({"proposal":1,"amount":max(0.5,float(amount)),"basis":"stake",
-                                    "contract_type":ct,"currency":"USD","symbol":symbol,
-                                    "duration":dv,"duration_unit":du}))
-            elif mt=="proposal":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
-            elif mt=="buy":
-                if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                res[0]=d.get("buy",{}); done.set()
-        for aid in DERIV_WS_APP_IDS:
-            done2=threading.Event(); res[0]=None; err[0]=None
-            def on_open(ws): ws.send(json.dumps({"authorize": token}))
-            w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={aid}",
-                               on_message=on_msg,on_open=on_open)
-            t=threading.Thread(target=w.run_forever,daemon=True); t.start()
-            done.wait(timeout=30)
-            try: w.close()
-            except: pass
-            if res[0]: return res[0]
-            if err[0]: logger.warning(f"WS fallback app_id={aid}: {err[0]}")
-            done.clear()
-        raise Exception(err[0] or "Trade echwe — PA gen koneksyon valid. Itilize Token Klasik pou trading.")
+        prop = self._post("/trade/proposal", {
+            "contract_type":ct,"symbol":symbol,"amount":max(0.5,float(amount)),
+            "basis":"stake","duration":dv,"duration_unit":du,"currency":"USD"})
+        if "error" in prop: raise Exception(prop["error"].get("message","Proposal echwe"))
+        pid = prop.get("proposal",{}).get("id") or prop.get("id")
+        ask = prop.get("proposal",{}).get("ask_price") or prop.get("ask_price")
+        if not pid: raise Exception(f"Pa jwenn proposal_id: {prop}")
+        result = self._post("/trade/buy", {"buy":pid,"price":ask})
+        if "error" in result: raise Exception(result["error"].get("message","Buy echwe"))
+        return result.get("buy") or result
 
     def place_digits_trade(self, symbol, contract_type, amount=0.35, barrier=None):
         payload = {"contract_type":contract_type,"symbol":symbol,
                    "amount":max(0.35,float(amount)),"basis":"stake",
                    "duration":5,"duration_unit":"t","currency":"USD"}
         if barrier is not None: payload["barrier"] = str(barrier)
-        try:
-            prop = self._post("/trade/proposal", payload)
-            if "error" in prop: raise Exception(prop["error"].get("message","Proposal echwe"))
-            pid = prop.get("proposal",{}).get("id") or prop.get("id")
-            ask = prop.get("proposal",{}).get("ask_price") or prop.get("ask_price")
-            result = self._post("/trade/buy", {"buy":pid,"price":ask})
-            if "error" in result: raise Exception(result["error"].get("message","Buy echwe"))
-            return result.get("buy") or result
-        except Exception as e:
-            logger.warning(f"PAT REST digits echwe ({e}), WS fallback...")
-            import websocket as wsl
-            res=[None]; err=[None]; done=threading.Event(); token=self.token
-            proposal_ws={"proposal":1,"amount":max(0.35,float(amount)),"basis":"stake",
-                         "contract_type":contract_type,"currency":"USD","symbol":symbol,
-                         "duration":5,"duration_unit":"t"}
-            if barrier is not None: proposal_ws["barrier"]=str(barrier)
-            def on_msg(ws, msg):
-                d=json.loads(msg); mt=d.get("msg_type","")
-                if mt=="authorize" and "error" not in d: ws.send(json.dumps(proposal_ws))
-                elif mt=="proposal":
-                    if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                    ws.send(json.dumps({"buy":d["proposal"]["id"],"price":d["proposal"]["ask_price"]}))
-                elif mt=="buy":
-                    if "error" in d: err[0]=d["error"]["message"]; done.set(); return
-                    res[0]=d.get("buy",{}); done.set()
-            for aid in DERIV_WS_APP_IDS:
-                res[0]=None; err[0]=None; done.clear()
-                def on_open(ws): ws.send(json.dumps({"authorize": token}))
-                w=wsl.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={aid}",
-                                   on_message=on_msg,on_open=on_open)
-                threading.Thread(target=w.run_forever,daemon=True).start()
-                done.wait(timeout=30)
-                try: w.close()
-                except: pass
-                if res[0]: return res[0]
-            raise Exception(err[0] or "Digits trade echwe konplètman")
+        prop = self._post("/trade/proposal", payload)
+        if "error" in prop: raise Exception(prop["error"].get("message","Proposal echwe"))
+        pid = prop.get("proposal",{}).get("id") or prop.get("id")
+        ask = prop.get("proposal",{}).get("ask_price") or prop.get("ask_price")
+        result = self._post("/trade/buy", {"buy":pid,"price":ask})
+        if "error" in result: raise Exception(result["error"].get("message","Buy echwe"))
+        return result.get("buy") or result
 
     def wait_contract_result(self, contract_id, timeout=30):
         deadline = time.time() + timeout
@@ -412,12 +326,9 @@ class DerivRESTClient:
         return None
 
     def transfer_to_account(self, account_id, amount):
-        try:
-            result = self._post("/account/transfer", {
-                "account_to":account_id,"amount":round(float(amount),2),"currency":"USD"})
-            return result
-        except Exception as e:
-            logger.error(f"PAT transfer echwe: {e}"); return None
+        result = self._post("/account/transfer", {
+            "account_to":account_id,"amount":round(float(amount),2),"currency":"USD"})
+        return result
 
     @property
     def balance(self): return self._bal
@@ -431,7 +342,7 @@ class DerivRESTClient:
 def connect_ws_authorize(token: str, app_id: str, timeout: int = 20):
     import websocket as wsl
     done = threading.Event()
-    result = [None, None, None, None]
+    result = [None, None, None, None]  # [ok, balance, loginid, error]
 
     def on_open(ws): ws.send(json.dumps({"authorize": token}))
     def on_msg(ws, msg):
@@ -488,6 +399,12 @@ def connect_classic_token(token: str, app_id: str = "1089"):
 
 
 def connect_deriv_token(token: str, app_id: str = "1089"):
+    """
+    ROUTER PRENSIPAL:
+      PAT (pat_xxx) → DerivRESTClient.connect()   [REST Bearer HTTP]
+      KLASIK        → connect_classic_token()      [WebSocket]
+    Retounen: (ok, balance, loginid, used_app_id, note)
+    """
     if is_pat_token(token):
         logger.info("PAT token → REST API Bearer")
         try:
@@ -1002,25 +919,13 @@ def strat_confluence_binance(c, symbol="BTCUSDT"):
     if confirm>=3: return primary,max(0.75,min(0.92,total_conf/(confirm+2)))
     return "NONE",0
 
-# ✅ TOUT STRATEGIES — KONPLÈ
 STRATEGIES={
-    "confluence":    strat_confluence_elite,
-    "deriv_pro":     strat_deriv_pro_elite,
-    "supertrend":    supertrend,
-    "heikin_ashi":   heikin_ashi_trend,
-    "chandelier":    chandelier_exit,
-    "ai":            strat_ai,
-    "ema":           strat_ema,
-    "fibonacci":     strat_fibonacci,
-    "fvg":           strat_fvg,
-    "rsi":           strat_rsi,
-    "macd_bollinger":strat_macd,
-    "breakout":      strat_breakout,
-    "smc":           strat_smc,
-    "order_block":   strat_ob,
-    "stoch_ema":     strat_stoch,
-    "scalping_pro":  strat_scalping,
-    "binance_gold":  strat_binance_gold,
+    "confluence":strat_confluence_elite,"deriv_pro":strat_deriv_pro_elite,
+    "supertrend":supertrend,"heikin_ashi":heikin_ashi_trend,"chandelier":chandelier_exit,
+    "ai":strat_ai,"ema":strat_ema,"fibonacci":strat_fibonacci,"fvg":strat_fvg,
+    "rsi":strat_rsi,"macd_bollinger":strat_macd,"breakout":strat_breakout,
+    "smc":strat_smc,"order_block":strat_ob,"stoch_ema":strat_stoch,
+    "scalping_pro":strat_scalping,"binance_gold":strat_binance_gold,
     "binance_crypto":strat_binance_crypto,
 }
 
@@ -1585,7 +1490,8 @@ def trading_loop(st, bot_id=None):
     fn=STRATEGIES.get(strategy,strat_confluence_elite)
     wait_after=tf+90; base_lot=round(max(0.5,lot),2); current_lot=base_lot
     consec_losses=0; total_lost=0.0; MAX_LOSSES=3; PAUSE=45
-    add_log(st,f"🚀 BonheurBot ELITE v6.1 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
+    is_pat_mode=False  # sera defini apre
+    add_log(st,f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Bot anile","WARN"); return
         if _check_limits(st,cfg): break
@@ -1675,7 +1581,7 @@ def trading_loop(st, bot_id=None):
         except Exception as e:
             add_log(st,f"Erè: {e}","ERROR")
         time.sleep(tf)
-    add_log(st,"⏹ BonheurBot ELITE v6.1 arrêté")
+    add_log(st,"⏹ BonheurBot ELITE v6 arrêté")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1705,6 +1611,7 @@ def api_connect():
                          f"✓ Kreye nouvo sou app.deriv.com → API Token")
                 return jsonify({"ok":False,"error":err})
 
+            # Kreye bon client selon tip token
             if is_pat_token(raw_token):
                 api_main=DerivRESTClient(raw_token); api_main._bal=balance; api_main._loginid=loginid
                 api_digits=DerivDigitsClient(raw_token,app_id); api_digits._bal=balance; api_digits._rest=api_main
@@ -1942,7 +1849,7 @@ def index(): return render_template_string(HTML)
 
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — IDANTIK ANSYEN KOD LA (pa chanje)
+# HTML INTERFACE KONPLÈ — v6 ELITE — VRÈ PAT FIX
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
@@ -2000,33 +1907,41 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </style>
 </head>
 <body>
+
+<!-- LOGIN -->
 <div id="login-page" style="display:none;min-height:100vh;background:#040A0F;align-items:center;justify-content:center;flex-direction:column">
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v6.1 ELITE — PAT Fix + All Strategies</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v6 ELITE — VRÈ PAT Fix</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
-      <input id="login-code" type="text" placeholder="BB-XXXX-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
+      <input id="login-code" type="text" placeholder="BB-XXXX-XXXX"
+        style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
     </div>
     <div id="login-err"></div>
-    <button id="login-btn" onclick="doLogin()" style="width:100%;background:#00FF8818;border:1px solid #00FF88;color:#00FF88;border-radius:6px;padding:11px;cursor:pointer;font-size:13px;font-family:inherit;font-weight:700;letter-spacing:1px">⚡ ANTRE</button>
+    <button id="login-btn" onclick="doLogin()"
+      style="width:100%;background:#00FF8818;border:1px solid #00FF88;color:#00FF88;border-radius:6px;padding:11px;cursor:pointer;font-size:13px;font-family:inherit;font-weight:700;letter-spacing:1px">⚡ ANTRE</button>
     <div style="margin-top:20px;background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:14px;text-align:left">
       <div style="color:#FFD600;font-size:10px;letter-spacing:1px;font-weight:700;margin-bottom:8px">💳 ABÒNMAN — $40 USDT/MWA</div>
       <div style="color:#4A7080;font-size:10px;line-height:1.9">
         1. Voye <span style="color:#00FF88;font-weight:700">$40 USDT</span> sou:<br>
         <span style="color:#C8E8F0;font-size:9px;word-break:break-all;background:#071219;padding:4px 6px;border-radius:4px;display:block;margin:4px 0">0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef</span>
         <span style="color:#FFD600;font-size:9px">⚠ Rezo: BEP20 (BSC) sèlman</span><br><br>
-        <a href="https://wa.me/50942867885" target="_blank" style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;background:#25D36618;border:1px solid #25D36644;color:#25D366;border-radius:6px;padding:6px 12px;text-decoration:none;font-size:11px;font-weight:700">📱 WhatsApp: +509 4286-7885</a>
+        <a href="https://wa.me/50942867885" target="_blank"
+          style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;background:#25D36618;border:1px solid #25D36644;color:#25D366;border-radius:6px;padding:6px 12px;text-decoration:none;font-size:11px;font-weight:700">
+          📱 WhatsApp: +509 4286-7885
+        </a>
       </div>
     </div>
   </div>
 </div>
 
+<!-- APP -->
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
-    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6.1</span></div>
+    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
     <span id="h-tok-type" style="display:none"></span>
@@ -2049,6 +1964,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div>
 <div class="wrap">
 
+<!-- DASHBOARD -->
 <div id="pg-dashboard" class="pg on">
   <div class="stats">
     <div class="stat"><div class="sl">BALANS</div><div class="sv" id="s-bal" style="color:#00D4FF">$0.00</div></div>
@@ -2068,22 +1984,23 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </select>
       </div>
       <div id="fd">
+        <!-- PAT vs Klasik info -->
         <div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:12px;margin-bottom:12px">
-          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ VRÈ PAT FIX v6.1 — DUAL SYSTEM</div>
+          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ VRÈ PAT FIX — ACHITEKTI DUAL</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px">
               <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:4px">✅ TOKEN KLASIK</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">PA kòmanse ak <code>pat_</code><br>→ WebSocket authorize<br>App ID: <b>1089</b><br>✅ Trade + Candles WS</div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">PA kòmanse ak <code>pat_</code><br>→ WebSocket authorize<br>App ID: <b>1089</b> (defot)<br>Pèmisyon: Read+Trade+Pay</div>
             </div>
             <div style="background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px">
               <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:4px">⚡ TOKEN PAT (pat_xxx)</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">Kòmanse ak <code>pat_</code><br>→ REST API Bearer<br>✅ Trade REST + fallback WS<br>✅ Candles REST + fallback WS</div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">Kòmanse ak <code>pat_</code><br>→ REST API Bearer HTTP<br>App ID: <b>pa nesesè</b><br>Mete nenpòt valè</div>
             </div>
           </div>
         </div>
         <div class="iw">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-            <div class="il" style="margin-bottom:0">TOKEN DERIV</div>
+            <div class="il" style="margin-bottom:0">TOKEN DERIV (Klasik oswa pat_xxx)</div>
             <span id="tok-badge" style="display:none"></span>
           </div>
           <input id="d-tk" type="password" placeholder="Token Klasik oswa PAT (pat_xxx)..." oninput="autoDetectToken()">
@@ -2092,6 +2009,14 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="iw" id="appid-row">
           <div class="il">APP ID <span id="appid-note" style="color:#4A7080">(Token Klasik sèlman)</span></div>
           <input id="d-ai" value="1089" placeholder="1089">
+          <div id="appid-hint" style="color:#4A7080;font-size:9px;margin-top:3px">Token Klasik: <b>1089</b> • Token PAT: app_id pa nesesè</div>
+        </div>
+        <div style="background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:10px;font-size:10px;line-height:1.9;color:#4A7080">
+          <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📖 KREYE TOKEN KLASIK:</div>
+          app.deriv.com → foto ou → API Token → Create new token<br>
+          Pèmisyon: ✓ Read ✓ Trade ✓ Payments → App ID: 1089<br><br>
+          <div style="color:#FFD600;font-weight:700;margin-bottom:4px">📖 SI OU GEN PAT (pat_xxx):</div>
+          Kole dirèkteman — sistèm ap itilize REST API Bearer HTTP
         </div>
       </div>
       <div id="fb" style="display:none">
@@ -2119,10 +2044,11 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
+<!-- KONTWÒL -->
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
-      <div class="bt">PARAMÈT BOT ELITE v6.1</div>
+      <div class="bt">PARAMÈT BOT ELITE v6</div>
       <div class="iw"><div class="il">MOD TRADING</div>
         <select id="c-mode" onchange="toggleMode()">
           <option value="forex">📈 Rise/Fall — Deriv Synthetic</option>
@@ -2163,12 +2089,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               <option value="scalping_pro">⚡ Scalping Pro</option>
               <option value="ema">📊 EMA Classic</option>
               <option value="rsi">📉 RSI Classic</option>
-              <option value="macd_bollinger">📈 MACD+Bollinger</option>
-              <option value="breakout">💥 Breakout</option>
-              <option value="order_block">🧱 Order Block</option>
-              <option value="stoch_ema">🔄 Stoch+EMA</option>
-              <option value="fibonacci">🌀 Fibonacci</option>
-              <option value="fvg">📐 Fair Value Gap</option>
             </select>
           </div>
         </div>
@@ -2241,11 +2161,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
+<!-- STRATEGIES -->
 <div id="pg-strategies" class="pg">
   <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px" id="sbts"></div>
   <div class="box" id="sdet"></div>
 </div>
 
+<!-- BACKTEST -->
 <div id="pg-backtest" class="pg">
   <div class="box">
     <div class="bt">BACKTEST ENGINE</div>
@@ -2261,8 +2183,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <option value="confluence">🔥 Confluence ELITE</option><option value="deriv_pro">🚀 Deriv Pro ELITE</option>
         <option value="supertrend">📈 SuperTrend</option><option value="heikin_ashi">🕯 Heikin Ashi</option>
         <option value="ai">🤖 AI Score</option><option value="smc">🏛 SMC</option><option value="rsi">📉 RSI</option>
-        <option value="macd_bollinger">📈 MACD+Bollinger</option><option value="breakout">💥 Breakout</option>
-        <option value="order_block">🧱 Order Block</option><option value="fibonacci">🌀 Fibonacci</option>
       </select>
     </div>
     <div id="btm"></div>
@@ -2271,6 +2191,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
+<!-- TRADES -->
 <div id="pg-trades" class="pg">
   <div class="box">
     <div class="bt" id="trtit">HISTOIRIK TRADES</div>
@@ -2278,10 +2199,12 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
+<!-- LOGS -->
 <div id="pg-log" class="pg">
   <div class="box"><div class="bt">LOGS SISTEM</div><div id="logs"></div></div>
 </div>
 
+<!-- ADMIN -->
 <div id="pg-admin" class="pg">
   <div class="stats">
     <div class="stat"><div class="sl">KÒD TOTAL</div><div class="sv" id="adm-total" style="color:#FFD600">—</div></div>
@@ -2337,10 +2260,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-</div></div>
+</div></div><!-- wrap / app-page -->
 
 <script>
-const SK="bb_session_v61";
+const SK="bb_session_v6";
 function saveToken(t){try{localStorage.setItem(SK,t)}catch(e){}try{sessionStorage.setItem(SK,t)}catch(e){}try{const x=new Date();x.setDate(x.getDate()+30);document.cookie=`${SK}=${t};expires=${x.toUTCString()};path=/;SameSite=Lax`}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SK);if(t)return t}catch(e){}try{const t=sessionStorage.getItem(SK);if(t)return t}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SK+"=([^;]+)"));if(m)return m[2]}catch(e){}return""}
 function clearToken(){try{localStorage.removeItem(SK)}catch(e){}try{sessionStorage.removeItem(SK)}catch(e){}try{document.cookie=`${SK}=;expires=Thu,01 Jan 1970 00:00:00 UTC;path=/;`}catch(e){}}
@@ -2385,20 +2308,29 @@ function autoDetectToken(){
   const badge=document.getElementById("tok-badge");
   const hint=document.getElementById("tok-hint");
   const appRow=document.getElementById("appid-row");
+  const appHint=document.getElementById("appid-hint");
+  const appNote=document.getElementById("appid-note");
   if(val.startsWith("pat_")){
-    badge.style.display="inline";badge.className="badge-p";badge.textContent="⚡ PAT → REST Bearer";
-    hint.innerHTML='<span style="color:#FFD600">⚡ PAT token → REST API + WS fallback. Trade fonksyone!</span>';
+    badge.style.display="inline"; badge.className="badge-p"; badge.textContent="⚡ PAT → REST Bearer";
+    hint.innerHTML='<span style="color:#FFD600">⚡ PAT token détecté → REST API Bearer (HTTP). App ID pa nesesè.</span>';
     appRow.style.opacity="0.4";
+    appHint.innerHTML='<span style="color:#FFD600">App ID pa nesesè pou PAT — sistèm itilize REST API Bearer otomatikman</span>';
+    appNote.innerHTML='<span style="color:#FFD600">(PAT: pa nesesè)</span>';
   }else if(val.length>10){
-    badge.style.display="inline";badge.className="badge-k";badge.textContent="✅ KLASIK → WebSocket";
-    hint.innerHTML='<span style="color:#00FF88">✅ Token Klasik → WebSocket authorize. Trade + Candles WS!</span>';
+    badge.style.display="inline"; badge.className="badge-k"; badge.textContent="✅ KLASIK → WebSocket";
+    hint.innerHTML='<span style="color:#00FF88">✅ Token Klasik détecté → WebSocket authorize. App ID: 1089 ok!</span>';
     appRow.style.opacity="1";
+    appHint.innerHTML='Token Klasik: <b>1089</b> (defot — bon!)';
+    appNote.innerHTML='(Token Klasik sèlman)';
   }else{
     badge.style.display="none";
     hint.innerHTML='Token Klasik PA kòmanse ak <code>pat_</code>';
     appRow.style.opacity="1";
+    appHint.innerHTML='Token Klasik: <b>1089</b> (defot) • Token PAT: app_id pa nesesè';
+    appNote.innerHTML='(Token Klasik sèlman)';
   }
 }
+
 function togBroker(){
   const v=document.getElementById("d-br").value;
   document.getElementById("fd").style.display=v==="deriv"?"block":"none";
@@ -2406,6 +2338,7 @@ function togBroker(){
   const note=document.getElementById("fb-note");
   if(note)note.style.display=v==="binance_us"?"block":"none";
 }
+
 function toggleMode(){
   const mode=document.getElementById("c-mode").value;
   document.getElementById("opts-forex").style.display=mode==="forex"?"block":"none";
@@ -2413,6 +2346,7 @@ function toggleMode(){
   document.getElementById("opts-gold").style.display=mode==="binance_gold"?"block":"none";
   document.getElementById("opts-crypto").style.display=mode==="binance_crypto"?"block":"none";
 }
+
 function getStartParams(){
   const mode=document.getElementById("c-mode").value;
   const conf=parseFloat(document.getElementById("c-conf").value);
@@ -2423,16 +2357,17 @@ function getStartParams(){
   if(mode==="binance_gold")return{mode:"forex",symbol:document.getElementById("c-sy-gold").value,strategy:"binance_gold",lot:parseFloat(document.getElementById("c-lot-gold").value),tf:document.getElementById("c-tf-gold").value,min_conf:conf,profit_target:target,loss_limit:loss};
   return{mode:"forex",symbol:document.getElementById("c-sy-crypto").value,strategy:"binance_crypto",lot:parseFloat(document.getElementById("c-lot-crypto").value),tf:document.getElementById("c-tf-crypto").value,min_conf:conf,profit_target:target,loss_limit:loss};
 }
+
 async function doConn(){
   const br=document.getElementById("d-br").value;
-  const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
+  const btn=event.target; btn.textContent="AP KONEKTE..."; btn.disabled=true;
   const body={broker:br};
   if(br==="deriv"){
     const rawToken=document.getElementById("d-tk").value.trim();
     if(!rawToken){msg("cm","✗ Kole token ou anvan!",false);btn.textContent="⚡ KONEKTE";btn.disabled=false;return}
     const appId=document.getElementById("d-ai").value.trim()||"1089";
     const isPat=rawToken.toLowerCase().startsWith("pat_");
-    body.token=rawToken;body.app_id=appId;
+    body.token=rawToken; body.app_id=appId;
     msg("cm",`⏳ ${isPat?"PAT → REST API Bearer":"Klasik → WebSocket app_id="+appId} | Ap konekte...`,"ok");
   }
   if(br==="binance"||br==="binance_us"){
@@ -2448,19 +2383,20 @@ async function doConn(){
       msg("cm",`✅ KONEKTE! $${d.balance.toFixed(2)} | ${d.note||""}`, "ok");
       document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>${d.broker||br}</b> | ${d.note||""} | $${d.balance.toFixed(2)}</div>`;
       if(d.token_type){
-        const hb=document.getElementById("h-tok-type");hb.style.display="inline";
+        const hb=document.getElementById("h-tok-type"); hb.style.display="inline";
         hb.className=d.token_type==="PAT"?"badge-p":"badge-k";
         hb.textContent=d.token_type==="PAT"?"⚡ PAT-REST":"✅ Klasik-WS";
       }
     }else msg("cm",d.error||"✗ Echèk koneksyon",false);
   }catch(e){msg("cm","✗ Erè rezo: "+e.message,false)}
-  btn.textContent="⚡ KONEKTE";btn.disabled=false;
+  btn.textContent="⚡ KONEKTE"; btn.disabled=false;
 }
+
 async function doStart(){
   const body=getStartParams();
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
-  if(d.ok){msg("ctm","✅ BonheurBot ELITE v6.1 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
+  if(d.ok){msg("ctm","✅ BonheurBot ELITE v6 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
   else msg("ctm","✗ "+d.error,false);
 }
 async function doStop(){
@@ -2469,8 +2405,9 @@ async function doStop(){
   document.getElementById("bs").style.display="inline-block";
   document.getElementById("bx").style.display="none";
 }
+
 async function doBt(){
-  const btn=event.target;btn.textContent="⏳ AP KALKILE...";btn.disabled=true;
+  const btn=event.target; btn.textContent="⏳ AP KALKILE..."; btn.disabled=true;
   document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest — tann...</div>`;
   const body={symbol:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,
     balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),
@@ -2480,7 +2417,7 @@ async function doBt(){
     const d=await r.json();
     document.getElementById("btm").innerHTML="";
     if(d.ok){
-      const v=d.result;const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";
+      const v=d.result; const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";
       document.getElementById("btr").innerHTML=`<div class="stats">
         <div class="stat"><div class="sl">NET P&L</div><div class="sv" style="color:${c}">$${v.net_pnl}</div></div>
         <div class="stat"><div class="sl">RETOU</div><div class="sv" style="color:${c}">${v.return_pct}%</div></div>
@@ -2492,8 +2429,9 @@ async function doBt(){
       </div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
     }else document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
   }catch(e){document.getElementById("btm").innerHTML=`<div class="al er">✗ ${e.message}</div>`}
-  btn.textContent="▶ KÒMANSE BACKTEST";btn.disabled=false;
+  btn.textContent="▶ KÒMANSE BACKTEST"; btn.disabled=false;
 }
+
 function drawC(vals){
   const W=500,H=110,p=8;
   const mn=Math.min(...vals),mx=Math.max(...vals),rng=mx-mn||1;
@@ -2501,31 +2439,25 @@ function drawC(vals){
   const col=vals[vals.length-1]>=vals[0]?"#00FF88":"#FF3B6B";
   return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${p},${H} ${pts} ${W-p},${H}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
 }
+
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+11 strategies klasik. ADX≥12, 3 strat minimòm. VWAP bonus.",tags:["SuperTrend","HeikinAshi","Chandelier","VWAP","ADX≥12","3+ strat"]},
-  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5.0/15 + ADX≥12 + SuperTrend bonus. Meye pou Deriv Synthetic.",tags:["score 5/15","ADX≥12","ST bonus"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+10 strategies klasik. ADX≥12, 3 strat minimòm.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3+ strat"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5.0/15 + ADX≥12 + SuperTrend bonus.",tags:["score 5/15","ADX≥12","ST bonus"]},
   supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0. Siyal klè BUY/SELL.",tags:["ATR×3","75-92%"]},
   heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon.",tags:["5 bouji","72-83%"]},
   chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 / Lowest Low + ATR×3.",tags:["HH-ATR×3","75-90%"]},
   ai:{l:"🤖 AI Score",d:"8 faktè: EMA+RSI+MACD+BB+momentum+vol+position+trend.",tags:["8 faktè","68-92%"]},
   smc:{l:"🏛 SMC",d:"Break of Structure + swing + EMA50.",tags:["BOS","swing","EMA50"]},
   scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9"]},
-  ema:{l:"📊 EMA Classic",d:"Crossover EMA 9/21/50 + RSI filter.",tags:["EMA 9/21","RSI","76%"]},
-  rsi:{l:"📉 RSI Classic",d:"RSI <30/>70 + EMA50.",tags:["RSI 14","OB 70","OS 30"]},
-  macd_bollinger:{l:"📈 MACD+Bollinger",d:"MACD + Bollinger Bands confluence.",tags:["MACD","BB 20","72-78%"]},
-  breakout:{l:"💥 Breakout",d:"20-period high/low breakout + RSI confirm.",tags:["HH/LL 20","RSI","80%"]},
-  order_block:{l:"🧱 Order Block",d:"Institutional candle + retest + EMA21.",tags:["OB body 65%","EMA21","82%"]},
-  stoch_ema:{l:"🔄 Stoch+EMA",d:"Stochastic K crossover + EMA50.",tags:["Stoch 14","EMA50","80%"]},
-  fibonacci:{l:"🌀 Fibonacci",d:"618/500/382 retracement + RSI.",tags:["61.8%","50%","38.2%"]},
-  fvg:{l:"📐 FVG",d:"Fair Value Gap — imbalance detection + EMA21.",tags:["FVG","EMA21","80%"]},
-  binance_gold:{l:"🥇 Gold",d:"XAU/USD: EMA 20/50/200 + RSI+MACD+BB+Stoch+Volume. ADX≥20.",tags:["EMA 20/50/200","ADX≥20"]},
-  binance_crypto:{l:"🪙 Crypto",d:"Binance: Trend+Volume+RSI+MACD+Breakout. ADX≥18.",tags:["EMA 9/21/50","Volume","ADX≥18"]},
+  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50.",tags:["RSI 14","OB 70","OS 30"]},
+  binance_gold:{l:"🥇 Gold",d:"XAU/USD: EMA+RSI+MACD+BB+Stoch+Volume.",tags:["EMA 20/50/200"]},
+  binance_crypto:{l:"🪙 Crypto",d:"Binance: Trend+Volume+RSI+MACD+Breakout.",tags:["EMA 9/21/50","Volume"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
 Object.keys(SI).forEach(k=>{
   const b=document.createElement("button");
-  b.className="btn"+(k===sel?" b":"");b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
+  b.className="btn"+(k===sel?" b":""); b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
   b.textContent=SI[k].l;
   b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88"};
   sb.appendChild(b);
@@ -2539,14 +2471,15 @@ renderS();
 function sw(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
-  document.getElementById("pg-"+id).classList.add("on");el.classList.add("on");
+  document.getElementById("pg-"+id).classList.add("on"); el.classList.add("on");
 }
 function msg(id,txt,ok){
   const cls=ok===true?"ok":(ok===false?"er":"in");
   document.getElementById(id).innerHTML=`<div class="al ${cls}">${txt}</div>`;
 }
+
 function upd(d){
-  const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
+  const col=d.pnl>=0?"#00FF88":"#FF3B6B"; const sign=d.pnl>=0?"+":"";
   const blab={"deriv":"DERIV","binance":"BINANCE","binance_us":"BINANCE US"}[d.broker]||(d.broker?d.broker.toUpperCase():"DISCONNECTED");
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("hbal").style.color=d.connected?"#00D4FF":"#3A6070";
@@ -2568,10 +2501,10 @@ function upd(d){
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
   else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none"}
   if(d.trades.length>1){
-    let cum=0;const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum});
+    let cum=0; const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum});
     const svg=document.getElementById("chart");
-    const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;
-    const ns=tmp.firstChild;while(svg.firstChild)svg.removeChild(svg.firstChild);while(ns&&ns.firstChild)svg.appendChild(ns.firstChild);
+    const ch=drawC(eq); const tmp=document.createElement("div"); tmp.innerHTML=ch;
+    const ns=tmp.firstChild; while(svg.firstChild)svg.removeChild(svg.firstChild); while(ns&&ns.firstChild)svg.appendChild(ns.firstChild);
   }
   if(d.trades.length){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
@@ -2579,10 +2512,12 @@ function upd(d){
   }
   if(d.log.length){document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("")}
 }
+
 async function poll(){try{const r=await fetch("/api/status");const d=await r.json();upd(d)}catch(e){}setTimeout(poll,3000)}
 
+// ADMIN
 async function admRefresh(){
-  const token=getStoredToken();if(!token)return;
+  const token=getStoredToken(); if(!token)return;
   try{
     const r=await fetch("/api/admin/codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
     const d=await r.json();
@@ -2600,17 +2535,31 @@ async function admRefresh(){
     const d2=await r2.json();
     if(d2.ok){
       document.getElementById("adm-users-count").textContent=d2.total;
-      document.getElementById("adm-users-list").innerHTML=d2.total===0?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>':`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr><td style="color:#4A7080;font-size:10px">${u.uid}</td><td>${u.broker||"—"}</td><td style="font-weight:700">${u.symbol||"—"}</td><td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td><td style="color:#00D4FF">$${u.balance}</td><td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td><td>${u.trades}</td><td style="display:flex;gap:4px">${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}<button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button></td></tr>`).join("")}</table>`;
+      document.getElementById("adm-users-list").innerHTML=d2.total===0
+        ?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>'
+        :`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr>
+          <td style="color:#4A7080;font-size:10px">${u.uid}</td><td>${u.broker||"—"}</td>
+          <td style="font-weight:700">${u.symbol||"—"}</td>
+          <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
+          <td style="color:#00D4FF">$${u.balance}</td>
+          <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
+          <td>${u.trades}</td>
+          <td style="display:flex;gap:4px">
+            ${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
+            <button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
+          </td></tr>`).join("")}</table>`;
     }
   }catch(e){}
   try{
     const r3=await fetch("/api/admin/sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
     const d3=await r3.json();
-    if(d3.ok){document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>':d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between"><span style="color:#4A7080">${s.token}</span><span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span><span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span></div>`).join("")}
+    if(d3.ok){document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0
+      ?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>'
+      :d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between"><span style="color:#4A7080">${s.token}</span><span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span><span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span></div>`).join("")}
   }catch(e){}
 }
 async function admAddCode(){
-  const token=getStoredToken();const code=document.getElementById("new-code").value.trim().toUpperCase();
+  const token=getStoredToken(); const code=document.getElementById("new-code").value.trim().toUpperCase();
   if(!code){document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>';return}
   const isAdm=document.getElementById("new-code-type").value==="adm";
   const r=await fetch("/api/admin/add_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code,is_adm:isAdm})});
@@ -2625,6 +2574,7 @@ async function admCleanSessions(){const token=getStoredToken();const r=await fet
 async function admClearUser(uid){if(!confirm(`Efase TOUT istorik ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh()}
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let r="";for(let i=0;i<len;i++){if(i>0&&i%4===0)r+="-";r+=chars[Math.floor(Math.random()*chars.length)]}document.getElementById("gen-result").textContent=r;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=r}
 function admCopyGen(){admAddCode()}
+
 checkLogin();
 </script>
 </body>
@@ -2632,5 +2582,5 @@ checkLogin();
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"BonheurBot ELITE v6.1 — Strategies + PAT Fix — port {port}")
+    logger.info(f"BonheurBot ELITE v6 — VRÈ PAT FIX (REST Bearer) — port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

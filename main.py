@@ -1,7 +1,13 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║        BONHEURBOT PRO v6 ELITE — PAT OTP FIX FINAL         ║
-║         Multi-User Trading Bot — Deriv + Binance            ║
+║      BONHEURBOT PRO v6 ELITE — PAT OTP FIX FINAL v2        ║
+║       Multi-User Trading Bot — Deriv + Binance              ║
+║                                                             ║
+║  KOREKSYON PRENSIPAL v2:                                    ║
+║   • connect_deriv_token() retounen objè konplè ak           ║
+║     account_id — pa kreye 2yèm objè nan api_connect()      ║
+║   • DerivRESTClient.connect() konsève account_id FIABLEMAN  ║
+║   • _fresh_ws_url() — log amelyore pou debbug              ║
 ║                                                             ║
 ║  DERIV REST API (developers.deriv.com konfime):            ║
 ║   BASE:    https://api.derivws.com/trading/v1/             ║
@@ -30,7 +36,7 @@ PROFIT_WALLET   = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
 PROFIT_PCT      = 0.05
 DERIV_REST_BASE = "https://api.derivws.com/trading/v1"
 DERIV_WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
-DERIV_WS_LEGACY = "wss://ws.derivws.com/websockets/v3"   # token klasik
+DERIV_WS_LEGACY = "wss://ws.derivws.com/websockets/v3"
 DERIV_WS_APP_IDS = ["1089", "36544", "16929"]
 
 ACCESS_CODES = {
@@ -128,16 +134,7 @@ def is_pat_token(token: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════
-# ██  DERIV PAT REST CLIENT — OTP FIX FINAL  ██
-#
-#  DOKIMANTASYON OFISYÈL (developers.deriv.com/docs/options/websocket):
-#
-#  POST /trading/v1/options/accounts/{accountId}/otp
-#  Response: { "data": { "url": "wss://api.derivws.com/...?otp=abc" } }
-#
-#  ⚠ OTP SHORT-LIVED: dwe itilize IMEDYATMAN — pa cache
-#  ⚠ Kreye FRESH OTP chak fwa anvan chak trade / chak WS koneksyon
-#
+# ██  DERIV PAT REST CLIENT — OTP FIX FINAL v2  ██
 # ═══════════════════════════════════════════════════════════
 class DerivRESTClient:
     """
@@ -147,16 +144,20 @@ class DerivRESTClient:
       connect()        → GET /options/accounts → jwenn accountId + balance
       _fresh_ws_url()  → POST /options/accounts/{id}/otp → fresh WS URL
       Chak trade/balance/ticks kreye WS FRESH via _fresh_ws_url()
+
+    KOREKSYON v2:
+      connect() retounen self TOUJOU (pa sèlman float)
+      connect_deriv_token() ka jwenn account_id dirèkteman
     """
 
     def __init__(self, pat_token: str, app_id: str = "1089", timeout: int = 25):
-        self.token      = pat_token
-        self.app_id     = app_id
-        self.timeout    = timeout
-        self._bal       = 0.0
-        self._loginid   = "PAT_USER"
-        self._account_id = None
-        self._headers   = {
+        self.token       = pat_token
+        self.app_id      = app_id
+        self.timeout     = timeout
+        self._bal        = 0.0
+        self._loginid    = "PAT_USER"
+        self._account_id = None          # ← KLE: dwe konsève sa
+        self._headers    = {
             "Authorization": f"Bearer {pat_token}",
             "Deriv-App-ID":  app_id,
             "Content-Type":  "application/json",
@@ -179,6 +180,24 @@ class DerivRESTClient:
         r.raise_for_status()
         return r.json()
 
+    # ── KOREKSYON: _extract_account_id ────────────────────
+    def _extract_account_id(self, accounts: list) -> str:
+        """Jwenn account_id nan plizyè fòma posib."""
+        if not accounts:
+            return ""
+        real = next(
+            (a for a in accounts if str(a.get("account_type","")).lower() == "real"),
+            accounts[0]
+        )
+        aid = (
+            real.get("account_id") or
+            real.get("id") or
+            real.get("loginid") or
+            real.get("account") or
+            ""
+        )
+        return str(aid)
+
     # ── OTP: FRESH chak fwa (short-lived!) ────────────────
     def _fresh_ws_url(self) -> str:
         """
@@ -189,33 +208,42 @@ class DerivRESTClient:
           { "data": { "url": "wss://api.derivws.com/...?otp=xxx" } }
         """
         if not self._account_id:
-            logger.warning("PAT: pa gen account_id pou jwenn OTP")
+            logger.error(
+                f"PAT OTP ECHWE: account_id = '{self._account_id}' (vide!). "
+                f"loginid={self._loginid}. "
+                f"SOLISYON: verifye token PAT ou a gen pèmisyon 'account_manage'."
+            )
             return ""
         try:
+            logger.info(f"PAT OTP: ap mande URL pou account_id='{self._account_id}'")
             resp = self._post_rest(f"/options/accounts/{self._account_id}/otp")
-            logger.info(f"OTP raw response: {str(resp)[:300]}")
+            logger.info(f"PAT OTP raw response: {str(resp)[:400]}")
 
-            # Parse { "data": { "url": "wss://..." } }
             ws_url = ""
             if isinstance(resp, dict):
+                # Fòma ofisyèl: { "data": { "url": "wss://..." } }
                 data = resp.get("data") or {}
                 if isinstance(data, dict):
-                    ws_url = data.get("url") or data.get("ws_url") or data.get("websocket_url") or ""
+                    ws_url = (data.get("url") or data.get("ws_url") or
+                              data.get("websocket_url") or "")
                 # Fallback: url dirèkteman nan root
                 if not ws_url:
-                    ws_url = resp.get("url") or resp.get("ws_url") or resp.get("websocket_url") or ""
+                    ws_url = (resp.get("url") or resp.get("ws_url") or
+                              resp.get("websocket_url") or "")
                 # Fallback 2: data ka se yon string dirèkteman
                 if not ws_url and isinstance(resp.get("data"), str):
                     ws_url = resp["data"]
 
             if ws_url:
-                logger.info(f"PAT OTP WS URL: {ws_url[:100]}")
+                logger.info(f"PAT OTP ✓ WS URL: {ws_url[:120]}")
                 return ws_url
             else:
                 logger.error(f"PAT OTP: pa jwenn URL nan response: {resp}")
                 return ""
         except requests.HTTPError as e:
-            logger.error(f"PAT OTP HTTP error: {e.response.status_code} → {e.response.text[:200]}")
+            logger.error(
+                f"PAT OTP HTTP error {e.response.status_code}: {e.response.text[:300]}"
+            )
             return ""
         except Exception as e:
             logger.error(f"PAT OTP error: {e}")
@@ -223,13 +251,6 @@ class DerivRESTClient:
 
     # ── WS helper: konekte ak fresh OTP URL ───────────────
     def _ws_call(self, build_msg_fn, check_done_fn, timeout=30):
-        """
-        Kreye FRESH OTP URL, konekte WS, voye message, tann response.
-
-        build_msg_fn(ws) → voye initial message
-        check_done_fn(d, ws, res, err, done) → trete response
-        Retounen: (result, error_string)
-        """
         ws_url = self._fresh_ws_url()
         if not ws_url:
             return None, "Pa ka kreye OTP WS URL — verifye account_id ak App ID"
@@ -276,14 +297,17 @@ class DerivRESTClient:
     def connect(self) -> float:
         """
         1. GET /options/accounts → jwenn accountId + balance
-        2. Eseye POST OTP pou valide koneksyon WS
+        2. Konsève account_id nan self._account_id
+        3. Teste OTP pou valide
+
+        KOREKSYON v2: account_id TOUJOU konsève nan self anvan retounen.
         """
         errors = []
 
-        # Etap 1: Jwenn accounts
+        # ── Etap 1: Jwenn accounts ──
         try:
             data = self._get("/options/accounts")
-            logger.info(f"PAT /options/accounts: {str(data)[:400]}")
+            logger.info(f"PAT /options/accounts: {str(data)[:500]}")
 
             accounts = []
             if isinstance(data, list):
@@ -296,46 +320,75 @@ class DerivRESTClient:
                     accounts = d2.get("accounts") or []
                 if not accounts:
                     accounts = data.get("accounts") or []
-                # Pafwa balance dirèkteman
+                # Pafwa balance dirèkteman nan root (pa gen accounts list)
                 if not accounts and "balance" in data:
-                    self._bal     = float(data["balance"] or 0)
+                    self._bal     = float(data.get("balance") or 0)
                     self._loginid = data.get("loginid") or "PAT_USER"
+                    # Eseye jwenn account_id nan root tou
+                    self._account_id = (
+                        data.get("account_id") or
+                        data.get("id") or
+                        data.get("loginid") or
+                        ""
+                    )
+                    logger.info(
+                        f"PAT balance dirèk: ${self._bal:.2f} "
+                        f"account_id='{self._account_id}'"
+                    )
                     return self._bal
 
             if accounts:
-                real = next((a for a in accounts if a.get("account_type") == "real"), accounts[0])
-                self._account_id = (real.get("account_id") or real.get("id") or
-                                    real.get("loginid") or "")
-                self._loginid    = real.get("loginid") or self._account_id or "PAT_USER"
-                self._bal        = float(real.get("balance", 0) or 0)
-                logger.info(f"PAT account OK | id={self._account_id} | {self._loginid} | ${self._bal:.2f}")
+                self._account_id = self._extract_account_id(accounts)
+                real = next(
+                    (a for a in accounts if str(a.get("account_type","")).lower() == "real"),
+                    accounts[0]
+                )
+                self._loginid = real.get("loginid") or self._account_id or "PAT_USER"
+                self._bal     = float(real.get("balance", 0) or 0)
 
-                # Valide OTP
+                logger.info(
+                    f"PAT ✓ account_id='{self._account_id}' "
+                    f"loginid='{self._loginid}' balance=${self._bal:.2f}"
+                )
+
+                # Valide OTP imedyatman
                 test_url = self._fresh_ws_url()
                 if test_url:
-                    logger.info("PAT OTP WS URL obtenu — trading pral fonksyone ✓")
+                    logger.info("PAT OTP WS URL ✓ — trading pral fonksyone")
                 else:
-                    logger.warning("PAT OTP pa mache — trading pral gen pwoblèm")
+                    logger.warning(
+                        "PAT OTP echwe nan test. "
+                        "Trading pral gen erè. "
+                        "Verifye: pèmisyon PAT + App ID kòrèk"
+                    )
                 return self._bal
 
         except requests.HTTPError as e:
-            errors.append(f"GET /options/accounts: HTTP {e.response.status_code} → {e.response.text[:150]}")
+            errors.append(
+                f"GET /options/accounts: HTTP {e.response.status_code} → {e.response.text[:200]}"
+            )
         except Exception as e:
-            errors.append(f"GET /options/accounts: {str(e)[:150]}")
+            errors.append(f"GET /options/accounts: {str(e)[:200]}")
 
-        # Etap 2: Eseye kreye compte demo
+        # ── Etap 2: Eseye kreye account demo ──
         try:
-            data = self._post_rest("/options/accounts", {"currency": "USD", "group": "row", "account_type": "demo"})
-            logger.info(f"PAT create account: {str(data)[:200]}")
+            data = self._post_rest(
+                "/options/accounts",
+                {"currency": "USD", "group": "row", "account_type": "demo"}
+            )
+            logger.info(f"PAT create account: {str(data)[:300]}")
             inner = data.get("data") or data
-            self._account_id = inner.get("account_id") or inner.get("id") or ""
-            self._bal        = float(inner.get("balance", 0) or 0)
+            self._account_id = (
+                inner.get("account_id") or inner.get("id") or ""
+            )
+            self._bal = float(inner.get("balance", 0) or 0)
             if self._account_id:
+                logger.info(f"PAT demo account kreye: account_id='{self._account_id}'")
                 return self._bal
         except Exception as e:
             errors.append(f"POST /options/accounts: {str(e)[:100]}")
 
-        # Etap 3: Health check
+        # ── Etap 3: Health check ──
         try:
             self._get("/health")
             logger.warning("PAT health OK men pa jwenn accounts")
@@ -346,7 +399,7 @@ class DerivRESTClient:
         raise Exception(
             "Token PAT echwe ak tout endpoints.\n\nDETAY ERÈ:\n" +
             "\n".join(errors) +
-            "\n\n─" * 40 + "\n"
+            "\n\n" + "─" * 40 + "\n"
             "SOLISYON REKÒMANDE — TOKEN KLASIK:\n"
             "  app.deriv.com → foto ou → API Token\n"
             "  Create new token → ✓ Read ✓ Trade ✓ Payments\n"
@@ -361,18 +414,25 @@ class DerivRESTClient:
     def get_balance_sync(self) -> float:
         try:
             data = self._get("/options/accounts")
-            accs = (data if isinstance(data, list) else
-                    (data.get("data") or data).get("accounts", []) if isinstance(data, dict) else [])
+            accs = (
+                data if isinstance(data, list) else
+                (data.get("data") or data).get("accounts", [])
+                if isinstance(data, dict) else []
+            )
             if accs:
-                real = next((a for a in accs if a.get("account_type") == "real"), accs[0])
-                b    = float(real.get("balance", 0) or 0)
-                if b > 0: self._bal = b; return b
+                real = next(
+                    (a for a in accs if a.get("account_type") == "real"),
+                    accs[0]
+                )
+                b = float(real.get("balance", 0) or 0)
+                if b > 0:
+                    self._bal = b
+                    return b
         except: pass
         return self._bal
 
     # ── Candles via WS OTP ────────────────────────────────
     def get_candles(self, symbol="R_100", count=200, gran=60):
-        # Eseye OTP WS dabò
         if self._account_id:
             def send(ws):
                 ws.send(json.dumps({"ticks_history": symbol, "count": count,
@@ -392,7 +452,6 @@ class DerivRESTClient:
                          "volume": 1000, "time": c["epoch"]} for c in result]
             if e: logger.warning(f"PAT candles OTP WS: {e}")
 
-        # Fallback: public WS (pa bezwen auth pou ticks_history)
         return self._public_candles(symbol, count, gran)
 
     def _public_candles(self, symbol, count, gran):
@@ -435,7 +494,6 @@ class DerivRESTClient:
 
     # ── Place trade ───────────────────────────────────────
     def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
-        """Fresh OTP WS URL chak fwa."""
         ct = "CALL" if direction == "BUY" else "PUT"
         if   duration_secs <= 60:    dv, du = 1,  "m"
         elif duration_secs <= 300:   dv, du = 5,  "m"
@@ -559,7 +617,7 @@ def connect_ws_authorize(token: str, app_id: str, timeout: int = 20):
                 result[0] = True
                 result[1]  = float(d["authorize"].get("balance", 0))
                 result[2]  = d["authorize"].get("loginid")
-            done.set(); 
+            done.set()
             try: ws.close()
             except: pass
         elif "error" in d and not done.is_set():
@@ -603,23 +661,35 @@ def connect_classic_token(token: str, app_id: str = "1089"):
     )
 
 
+# ═══════════════════════════════════════════════════════════
+# KOREKSYON KLE: connect_deriv_token retounen objè konplè
+# ═══════════════════════════════════════════════════════════
 def connect_deriv_token(token: str, app_id: str = "1089"):
+    """
+    KOREKSYON v2:
+    - PAT: retounen (ok, bal, loginid, client_obj, note)
+      kote client_obj = DerivRESTClient ak account_id DEJA konsève
+    - Klasik: client_obj = None (koneksyon via WS authorize)
+    """
     if is_pat_token(token):
         logger.info(f"PAT → REST api.derivws.com app_id={app_id}")
         try:
             c   = DerivRESTClient(token, app_id)
-            bal = c.connect()
-            logger.info(f"PAT OK | {c.loginid} | ${bal:.2f}")
-            return True, bal, c.loginid, None, f"PAT (REST+OTP) | {c.loginid}"
+            bal = c.connect()    # account_id konsève nan c._account_id
+            logger.info(
+                f"PAT OK | loginid={c.loginid} | account_id={c._account_id} | ${bal:.2f}"
+            )
+            return True, bal, c.loginid, c, f"PAT (REST+OTP) | {c.loginid} | account={c._account_id}"
         except Exception as e:
             return False, 0.0, None, None, str(e)
     else:
         logger.info(f"Klasik → WebSocket app_id={app_id}")
-        return connect_classic_token(token, app_id)
+        ok, bal, lid, used_aid, note = connect_classic_token(token, app_id)
+        return ok, bal, lid, used_aid, note   # used_aid = app_id string (pa objè)
 
 
 # ═══════════════════════════════════════════════════════════
-# INDIKATÈ TEKNIK
+# INDIKATÈ TEKNIK (enkanje — pa chanje)
 # ═══════════════════════════════════════════════════════════
 def ema(prices, p):
     if len(prices) < p: return []
@@ -755,7 +825,7 @@ def vwap_signal(candles, lookback=20):
     vwap=tpv/tv; price=candles[-1]["close"]; at=atr(candles,14)
     if at==0: return "NONE", 0.0
     dist=(price-vwap)/max(at,0.0001)
-    if dist>0.3:   return "BUY",  min(0.88,0.72+min(dist*0.03,0.16))
+    if dist>0.3:    return "BUY",  min(0.88,0.72+min(dist*0.03,0.16))
     elif dist<-0.3: return "SELL", min(0.88,0.72+min(abs(dist)*0.03,0.16))
     return "NONE", 0.0
 
@@ -1218,7 +1288,7 @@ class DerivClient:
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         ct="CALL" if direction=="BUY" else "PUT"
-        if duration_secs<=60:   dv,du=1,"m"
+        if duration_secs<=60:    dv,du=1,"m"
         elif duration_secs<=300: dv,du=5,"m"
         elif duration_secs<=900: dv,du=15,"m"
         elif duration_secs<=3600:dv,du=1,"h"
@@ -1295,8 +1365,11 @@ class DerivDigitsClient:
         ok,bal,_,used,note=connect_deriv_token(self.token,self.app_id)
         if not ok: raise Exception(note)
         self._bal=bal
-        if used: self.app_id=used
-        if self._rest: self._rest._bal=bal
+        if self._is_pat and isinstance(used, DerivRESTClient):
+            self._rest=used  # itilize menm objè ak account_id
+            self._rest._bal=bal
+        elif not self._is_pat and used:
+            self.app_id=used
         return self._bal
 
     def _auth(self,ws): ws.send(json.dumps({"authorize":self.token}))
@@ -1543,7 +1616,7 @@ def _refresh_balance(api,st):
 
 
 # ═══════════════════════════════════════════════════════════
-# TRADING LOOPS
+# TRADING LOOPS (enkanje — pa chanje)
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st,bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1772,268 +1845,332 @@ def trading_loop(st,bot_id=None):
 
 
 # ═══════════════════════════════════════════════════════════
-# FLASK ROUTES
+# ██  FLASK ROUTES — KOREKSYON KLE ICI  ██
 # ═══════════════════════════════════════════════════════════
-@app.route("/api/connect",methods=["POST"])
+@app.route("/api/connect", methods=["POST"])
 def api_connect():
-    st=get_state()
+    st = get_state()
     try:
-        d=freq.json; broker=d.get("broker")
-        if broker=="deriv":
-            raw_token=d.get("token","").strip(); app_id=d.get("app_id","1089").strip() or "1089"
-            if not raw_token: return jsonify({"ok":False,"error":"Kole token ou anvan!"})
-            tok_type="PAT" if is_pat_token(raw_token) else "Klasik"
-            add_log(st,f"🔑 {tok_type} token → {'REST api.derivws.com + OTP WS' if tok_type=='PAT' else f'WebSocket app_id={app_id}'}","INFO")
-            ok,balance,loginid,used_app_id,note=connect_deriv_token(raw_token,app_id)
+        d = freq.json
+        broker = d.get("broker")
+
+        if broker == "deriv":
+            raw_token = d.get("token", "").strip()
+            app_id    = d.get("app_id", "1089").strip() or "1089"
+            if not raw_token:
+                return jsonify({"ok": False, "error": "Kole token ou anvan!"})
+
+            tok_type = "PAT" if is_pat_token(raw_token) else "Klasik"
+            add_log(st, f"🔑 {tok_type} → ap konekte... app_id={app_id}", "INFO")
+
+            # ── KOREKSYON v2: connect_deriv_token retounen objè konplè ──
+            ok, balance, loginid, client_obj, note = connect_deriv_token(raw_token, app_id)
+
             if not ok:
-                err=(f"❌ Token PAT echwe\n\n{note}\n\n"
-                     f"SOLISYON:\n1. app.deriv.com → foto ou → API Token\n"
-                     f"2. Create token → Read+Trade+Payments\n"
-                     f"3. Kole (PA pat_xxx) — App ID: 1089") if tok_type=="PAT" else \
-                    (f"❌ Koneksyon echwe\n\n{note}\n\n"
-                     f"✓ Token valid?\n✓ Pèmisyon: Read+Trade+Payments?")
-                return jsonify({"ok":False,"error":err})
+                err = (
+                    f"❌ Token PAT echwe\n\n{note}\n\n"
+                    "SOLISYON:\n1. app.deriv.com → foto ou → API Token\n"
+                    "2. Create token → Read+Trade+Payments\n"
+                    "3. Kole (PA pat_xxx) — App ID: 1089"
+                ) if tok_type == "PAT" else (
+                    f"❌ Koneksyon echwe\n\n{note}\n\n"
+                    "✓ Token valid?\n✓ Pèmisyon: Read+Trade+Payments?"
+                )
+                return jsonify({"ok": False, "error": err})
+
             if is_pat_token(raw_token):
-                api_main=DerivRESTClient(raw_token,app_id); api_main._bal=balance; api_main._loginid=loginid
-                # Kopye account_id ki te gen pandan connect()
-                tmp=DerivRESTClient(raw_token,app_id); tmp._bal=balance; tmp._loginid=loginid
-                # Re-fetch account_id
-                try:
-                    data2=tmp._get("/options/accounts")
-                    accs=data2 if isinstance(data2,list) else (data2.get("data") or data2).get("accounts",[]) if isinstance(data2,dict) else []
-                    if accs:
-                        real=next((a for a in accs if a.get("account_type")=="real"),accs[0])
-                        api_main._account_id=real.get("account_id") or real.get("id") or real.get("loginid") or ""
-                except: pass
-                api_digits=DerivDigitsClient(raw_token,app_id); api_digits._bal=balance; api_digits._rest=api_main
+                # client_obj = DerivRESTClient ak account_id DEJA konsève
+                api_main = client_obj  # ← pa kreye nouvo objè!
+                api_main._bal     = balance
+                api_main._loginid = loginid or api_main._loginid
+
+                # Kreye digits client ki pataje menm REST objè
+                api_digits              = DerivDigitsClient(raw_token, app_id)
+                api_digits._bal         = balance
+                api_digits._rest        = api_main  # ← menm objè, menm account_id
+                api_digits._is_pat      = True
+
+                add_log(
+                    st,
+                    f"PAT ✓ account_id='{api_main._account_id}' "
+                    f"loginid='{api_main._loginid}' ${balance:.2f}",
+                    "SUCCESS"
+                )
             else:
-                api_main=DerivClient(raw_token,used_app_id or app_id); api_main._bal=balance; api_main._loginid=loginid
-                api_digits=DerivDigitsClient(raw_token,used_app_id or app_id); api_digits._bal=balance
-            st["deriv_api"]=api_main; st["deriv_digits_api"]=api_digits
-            st["broker"]="deriv"; st["balance"]=balance; st["connected"]=True
-            note_msg=f"✓ {tok_type} | {loginid or 'OK'} | ${balance:.2f}"
-            add_log(st,note_msg,"SUCCESS")
-            return jsonify({"ok":True,"balance":balance,"broker":"deriv","note":note_msg,"token_type":tok_type})
-        elif broker=="binance":
-            api=BinanceClient(d["api_key"],d["api_secret"]); bal=api.connect()
-            st["binance_api"]=api; st["broker"]="binance"; st["balance"]=bal; st["connected"]=True
-            return jsonify({"ok":True,"balance":bal,"broker":"binance"})
-        elif broker=="binance_us":
-            api=BinanceUSClient(d["api_key"],d["api_secret"]); bal=api.connect()
-            st["binance_api"]=api; st["broker"]="binance_us"; st["balance"]=bal; st["connected"]=True
-            return jsonify({"ok":True,"balance":bal,"broker":"binance_us"})
-        return jsonify({"ok":False,"error":"Broker enkoni"})
+                # client_obj = string app_id ki te fonksyone
+                used_app_id = client_obj or app_id
+                api_main               = DerivClient(raw_token, used_app_id)
+                api_main._bal          = balance
+                api_main._loginid      = loginid
+                api_digits             = DerivDigitsClient(raw_token, used_app_id)
+                api_digits._bal        = balance
+
+            st["deriv_api"]        = api_main
+            st["deriv_digits_api"] = api_digits
+            st["broker"]           = "deriv"
+            st["balance"]          = balance
+            st["connected"]        = True
+
+            note_msg = f"✓ {tok_type} | {loginid or 'OK'} | ${balance:.2f}"
+            add_log(st, note_msg, "SUCCESS")
+            return jsonify({
+                "ok": True, "balance": balance, "broker": "deriv",
+                "note": note_msg, "token_type": tok_type
+            })
+
+        elif broker == "binance":
+            api = BinanceClient(d["api_key"], d["api_secret"])
+            bal = api.connect()
+            st["binance_api"] = api; st["broker"] = "binance"
+            st["balance"] = bal; st["connected"] = True
+            return jsonify({"ok": True, "balance": bal, "broker": "binance"})
+
+        elif broker == "binance_us":
+            api = BinanceUSClient(d["api_key"], d["api_secret"])
+            bal = api.connect()
+            st["binance_api"] = api; st["broker"] = "binance_us"
+            st["balance"] = bal; st["connected"] = True
+            return jsonify({"ok": True, "balance": bal, "broker": "binance_us"})
+
+        return jsonify({"ok": False, "error": "Broker enkoni"})
+
     except Exception as e:
-        logger.error(f"Connect: {e}",exc_info=True)
-        return jsonify({"ok":False,"error":str(e)})
+        logger.error(f"Connect: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)})
 
 
-@app.route("/api/start",methods=["POST"])
+@app.route("/api/start", methods=["POST"])
 def api_start():
-    st=get_state()
-    if not st.get("access"): return jsonify({"ok":False,"error":"⚠ Ou bezwen yon kòd aksè valid!"})
-    if not st["connected"]: return jsonify({"ok":False,"error":"Konekte broker anvan!"})
-    if st["running"]: return jsonify({"ok":False,"error":"Bot déjà ap kouri"})
-    d=freq.json or {}
-    tf_map={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}
-    st["config"]={"broker":st["broker"],"symbol":d.get("symbol","R_100"),"strategy":d.get("strategy","confluence"),
-        "lot":d.get("lot",0.5),"tf_secs":tf_map.get(d.get("tf","15m"),900),
-        "min_conf":d.get("min_conf",0.65),"profit_target":float(d.get("profit_target",0)),
-        "loss_limit":float(d.get("loss_limit",0)),"mode":d.get("mode","forex"),
-        "digit_type":d.get("digit_type","over_under")}
-    import random,string
-    bot_id=''.join(random.choices(string.ascii_uppercase+string.digits,k=8))
-    st["running"]=True; st["bot_id"]=bot_id
-    mode=d.get("mode","forex"); broker=st["broker"]
-    if mode=="digits":
-        threading.Thread(target=digits_trading_loop,args=(st,bot_id),daemon=True).start()
-        add_log(st,"🎲 Digits mode démarre","INFO")
-    elif broker in("binance","binance_us"):
-        threading.Thread(target=binance_trading_loop,args=(st,bot_id),daemon=True).start()
+    st = get_state()
+    if not st.get("access"): return jsonify({"ok": False, "error": "⚠ Ou bezwen yon kòd aksè valid!"})
+    if not st["connected"]: return jsonify({"ok": False, "error": "Konekte broker anvan!"})
+    if st["running"]: return jsonify({"ok": False, "error": "Bot déjà ap kouri"})
+    d = freq.json or {}
+    tf_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
+    st["config"] = {
+        "broker": st["broker"], "symbol": d.get("symbol", "R_100"),
+        "strategy": d.get("strategy", "confluence"),
+        "lot": d.get("lot", 0.5), "tf_secs": tf_map.get(d.get("tf", "15m"), 900),
+        "min_conf": d.get("min_conf", 0.65),
+        "profit_target": float(d.get("profit_target", 0)),
+        "loss_limit": float(d.get("loss_limit", 0)),
+        "mode": d.get("mode", "forex"), "digit_type": d.get("digit_type", "over_under")
+    }
+    import random, string
+    bot_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    st["running"] = True; st["bot_id"] = bot_id
+    mode = d.get("mode", "forex"); broker = st["broker"]
+    if mode == "digits":
+        threading.Thread(target=digits_trading_loop, args=(st, bot_id), daemon=True).start()
+        add_log(st, "🎲 Digits mode démarre", "INFO")
+    elif broker in ("binance", "binance_us"):
+        threading.Thread(target=binance_trading_loop, args=(st, bot_id), daemon=True).start()
     else:
-        threading.Thread(target=trading_loop,args=(st,bot_id),daemon=True).start()
-    return jsonify({"ok":True})
+        threading.Thread(target=trading_loop, args=(st, bot_id), daemon=True).start()
+    return jsonify({"ok": True})
 
-@app.route("/api/stop",methods=["POST"])
+@app.route("/api/stop", methods=["POST"])
 def api_stop():
-    st=get_state(); st["running"]=False; st["bot_id"]=None
-    return jsonify({"ok":True})
+    st = get_state(); st["running"] = False; st["bot_id"] = None
+    return jsonify({"ok": True})
 
 @app.route("/api/status")
 def api_status():
-    st=get_state()
-    return jsonify({"connected":st["connected"],"broker":st["broker"],"running":st["running"],
-                    "balance":round(st["balance"],2),"pnl":round(st["total_pnl"],2),
-                    "profit_sent":round(st["profit_sent"],4),"trades":st["trades"][:20],
-                    "log":st["log"][:30],"config":st["config"]})
+    st = get_state()
+    return jsonify({
+        "connected": st["connected"], "broker": st["broker"], "running": st["running"],
+        "balance": round(st["balance"], 2), "pnl": round(st["total_pnl"], 2),
+        "profit_sent": round(st["profit_sent"], 4), "trades": st["trades"][:20],
+        "log": st["log"][:30], "config": st["config"]
+    })
 
-@app.route("/api/backtest",methods=["POST"])
+@app.route("/api/backtest", methods=["POST"])
 def api_backtest():
-    st=get_state()
+    st = get_state()
     try:
-        d=freq.json or {}; symbol=d.get("symbol","R_100"); strat=d.get("strategy","confluence")
-        candles=[]; api=st.get("deriv_api") or st.get("binance_api")
+        d = freq.json or {}; symbol = d.get("symbol", "R_100"); strat = d.get("strategy", "confluence")
+        candles = []; api = st.get("deriv_api") or st.get("binance_api")
         if api:
-            try: candles=api.get_candles(symbol,500,3600)
+            try: candles = api.get_candles(symbol, 500, 3600)
             except: pass
-        if len(candles)<100: return jsonify({"ok":False,"error":f"Pa ase done ({len(candles)}) — konekte broker anvan"})
-        r=run_backtest(candles,strat,float(d.get("balance",10000)),float(d.get("lot",0.01)),
-                       float(d.get("sl",20)),float(d.get("tp",40)))
-        return jsonify({"ok":True,"result":r})
-    except Exception as e: return jsonify({"ok":False,"error":str(e)})
+        if len(candles) < 100:
+            return jsonify({"ok": False, "error": f"Pa ase done ({len(candles)}) — konekte broker anvan"})
+        r = run_backtest(candles, strat, float(d.get("balance", 10000)),
+                         float(d.get("lot", 0.01)), float(d.get("sl", 20)), float(d.get("tp", 40)))
+        return jsonify({"ok": True, "result": r})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/login",methods=["POST"])
+@app.route("/api/login", methods=["POST"])
 def api_login():
-    st=get_state(); d=freq.json or {}
-    token=d.get("session_token","").strip(); code=d.get("code","").strip().upper()
+    st = get_state(); d = freq.json or {}
+    token = d.get("session_token", "").strip(); code = d.get("code", "").strip().upper()
     if token:
-        ok,msg_text=validate_session(token)
+        ok, msg_text = validate_session(token)
         if ok:
-            with _sess_lock: is_adm=_sessions.get(token,{}).get("is_admin",False)
-            st["access"]=True; st["session_token"]=token; st["is_admin"]=is_adm
-            return jsonify({"ok":True,"msg":msg_text,"session_token":token,"is_admin":is_adm})
-        st["access"]=False; return jsonify({"ok":False,"msg":msg_text,"need_code":True})
-    if not code: return jsonify({"ok":False,"msg":"Mete kòd aksè ou a","need_code":True})
-    ok,msg_text=check_access(code)
+            with _sess_lock: is_adm = _sessions.get(token, {}).get("is_admin", False)
+            st["access"] = True; st["session_token"] = token; st["is_admin"] = is_adm
+            return jsonify({"ok": True, "msg": msg_text, "session_token": token, "is_admin": is_adm})
+        st["access"] = False
+        return jsonify({"ok": False, "msg": msg_text, "need_code": True})
+    if not code:
+        return jsonify({"ok": False, "msg": "Mete kòd aksè ou a", "need_code": True})
+    ok, msg_text = check_access(code)
     if ok:
-        use_code(code); new_token,expire=create_session()
-        is_adm=ACCESS_CODES.get(code,{}).get("is_adm",False) or ACCESS_CODES.get(code,{}).get("created_at") is None
-        with _sess_lock: _sessions[new_token]["is_admin"]=is_adm; _save_sessions()
-        st["access"]=True; st["session_token"]=new_token; st["is_admin"]=is_adm
-        return jsonify({"ok":True,"msg":"✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete",
-                        "session_token":new_token,"expire":expire,"is_admin":is_adm})
-    return jsonify({"ok":False,"msg":msg_text,"need_code":True})
+        use_code(code); new_token, expire = create_session()
+        is_adm = ACCESS_CODES.get(code, {}).get("is_adm", False) or ACCESS_CODES.get(code, {}).get("created_at") is None
+        with _sess_lock: _sessions[new_token]["is_admin"] = is_adm; _save_sessions()
+        st["access"] = True; st["session_token"] = new_token; st["is_admin"] = is_adm
+        return jsonify({
+            "ok": True,
+            "msg": "✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete",
+            "session_token": new_token, "expire": expire, "is_admin": is_adm
+        })
+    return jsonify({"ok": False, "msg": msg_text, "need_code": True})
 
 def require_admin(d):
-    token=d.get("admin_token","").strip()
+    token = d.get("admin_token", "").strip()
     if not token: return False
-    with _sess_lock: sess=_sessions.get(token)
-    return sess.get("is_admin",False) if sess else False
+    with _sess_lock: sess = _sessions.get(token)
+    return sess.get("is_admin", False) if sess else False
 
-@app.route("/api/admin/codes",methods=["POST"])
+@app.route("/api/admin/codes", methods=["POST"])
 def admin_get_codes():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    now=time.time(); codes=[]
-    for c,entry in ACCESS_CODES.items():
-        if entry["created_at"] is None or entry.get("is_adm"): status="ADM"; remaining="∞"
-        elif entry["used"]: status="ITILIZE"; remaining="0"
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    now = time.time(); codes = []
+    for c, entry in ACCESS_CODES.items():
+        if entry["created_at"] is None or entry.get("is_adm"):
+            status = "ADM"; remaining = "∞"
+        elif entry["used"]:
+            status = "ITILIZE"; remaining = "0"
         else:
-            age=now-entry["created_at"]
-            if age>CODE_TTL_SECONDS: status="EKSPIRE"; remaining="0"
-            else: status="AKTIF"; remaining=str(int((CODE_TTL_SECONDS-age)/86400))+" jou"
-        codes.append({"code":c,"status":status,"remaining":remaining,"used":entry["used"],
-                      "is_adm":entry.get("is_adm",False) or entry["created_at"] is None})
-    today=date.today()
-    active_sess=sum(1 for s in _sessions.values() if date.fromisoformat(s["expire"])>today)
-    return jsonify({"ok":True,"codes":codes,"total_sessions":active_sess})
+            age = now - entry["created_at"]
+            if age > CODE_TTL_SECONDS: status = "EKSPIRE"; remaining = "0"
+            else: status = "AKTIF"; remaining = str(int((CODE_TTL_SECONDS - age) / 86400)) + " jou"
+        codes.append({
+            "code": c, "status": status, "remaining": remaining,
+            "used": entry["used"],
+            "is_adm": entry.get("is_adm", False) or entry["created_at"] is None
+        })
+    today = date.today()
+    active_sess = sum(1 for s in _sessions.values() if date.fromisoformat(s["expire"]) > today)
+    return jsonify({"ok": True, "codes": codes, "total_sessions": active_sess})
 
-@app.route("/api/admin/add_code",methods=["POST"])
+@app.route("/api/admin/add_code", methods=["POST"])
 def admin_add_code():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    code=d.get("code","").strip().upper()
-    if not code or len(code)<3: return jsonify({"ok":False,"error":"Kòd dwe gen 3+ karaktè"})
-    if code in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
-    is_adm=d.get("is_adm",False)
-    ACCESS_CODES[code]={"created_at":None if is_adm else time.time(),"used":False,"is_adm":is_adm}
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye"})
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    code = d.get("code", "").strip().upper()
+    if not code or len(code) < 3: return jsonify({"ok": False, "error": "Kòd dwe gen 3+ karaktè"})
+    if code in ACCESS_CODES: return jsonify({"ok": False, "error": "Kòd sa deja egziste"})
+    is_adm = d.get("is_adm", False)
+    ACCESS_CODES[code] = {"created_at": None if is_adm else time.time(), "used": False, "is_adm": is_adm}
+    return jsonify({"ok": True, "msg": f"✓ Kòd {code} kreye"})
 
-@app.route("/api/admin/revoke_code",methods=["POST"])
+@app.route("/api/admin/revoke_code", methods=["POST"])
 def admin_revoke_code():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    code=d.get("code","").strip().upper()
-    if not code or code not in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd pa jwenn"})
-    if code=="BONHEURWIIN": return jsonify({"ok":False,"error":"Pa ka revoke kòd ADM prensipal"})
-    del ACCESS_CODES[code]; return jsonify({"ok":True,"msg":f"✓ Kòd {code} revoke"})
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    code = d.get("code", "").strip().upper()
+    if not code or code not in ACCESS_CODES: return jsonify({"ok": False, "error": "Kòd pa jwenn"})
+    if code == "BONHEURWIIN": return jsonify({"ok": False, "error": "Pa ka revoke kòd ADM prensipal"})
+    del ACCESS_CODES[code]
+    return jsonify({"ok": True, "msg": f"✓ Kòd {code} revoke"})
 
-@app.route("/api/admin/reset_code",methods=["POST"])
+@app.route("/api/admin/reset_code", methods=["POST"])
 def admin_reset_code():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    code=d.get("code","").strip().upper()
-    if code not in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd pa jwenn"})
-    ACCESS_CODES[code]["used"]=False
-    if not(ACCESS_CODES[code].get("is_adm") or ACCESS_CODES[code]["created_at"] is None):
-        ACCESS_CODES[code]["created_at"]=time.time()
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} reset"})
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    code = d.get("code", "").strip().upper()
+    if code not in ACCESS_CODES: return jsonify({"ok": False, "error": "Kòd pa jwenn"})
+    ACCESS_CODES[code]["used"] = False
+    if not (ACCESS_CODES[code].get("is_adm") or ACCESS_CODES[code]["created_at"] is None):
+        ACCESS_CODES[code]["created_at"] = time.time()
+    return jsonify({"ok": True, "msg": f"✓ Kòd {code} reset"})
 
-@app.route("/api/admin/users",methods=["POST"])
+@app.route("/api/admin/users", methods=["POST"])
 def admin_get_users():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    users=[]
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    users = []
     with _user_lock:
-        for uid,ust in _user_states.items():
-            users.append({"uid":uid[:8]+"...","connected":ust.get("connected",False),
-                          "broker":ust.get("broker","—"),"running":ust.get("running",False),
-                          "balance":round(ust.get("balance",0),2),"pnl":round(ust.get("total_pnl",0),2),
-                          "trades":len(ust.get("trades",[])),"symbol":ust.get("config",{}).get("symbol","—"),
-                          "strategy":ust.get("config",{}).get("strategy","—")})
-    return jsonify({"ok":True,"users":users,"total":len(users)})
+        for uid, ust in _user_states.items():
+            users.append({
+                "uid": uid[:8] + "...", "connected": ust.get("connected", False),
+                "broker": ust.get("broker", "—"), "running": ust.get("running", False),
+                "balance": round(ust.get("balance", 0), 2), "pnl": round(ust.get("total_pnl", 0), 2),
+                "trades": len(ust.get("trades", [])),
+                "symbol": ust.get("config", {}).get("symbol", "—"),
+                "strategy": ust.get("config", {}).get("strategy", "—")
+            })
+    return jsonify({"ok": True, "users": users, "total": len(users)})
 
-@app.route("/api/admin/stop_user",methods=["POST"])
+@app.route("/api/admin/stop_user", methods=["POST"])
 def admin_stop_user():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    uid_prefix=d.get("uid","").replace("...",""); stopped=0
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    uid_prefix = d.get("uid", "").replace("...", ""); stopped = 0
     with _user_lock:
-        for uid,ust in _user_states.items():
-            if uid.startswith(uid_prefix): ust["running"]=False; ust["bot_id"]=None; stopped+=1
-    return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
+        for uid, ust in _user_states.items():
+            if uid.startswith(uid_prefix): ust["running"] = False; ust["bot_id"] = None; stopped += 1
+    return jsonify({"ok": True, "msg": f"✓ {stopped} bot(s) kanpe"})
 
-@app.route("/api/admin/sessions",methods=["POST"])
+@app.route("/api/admin/sessions", methods=["POST"])
 def admin_sessions():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    today=date.today(); sessions=[]
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    today = date.today(); sessions = []
     with _sess_lock:
-        for token,sess in _sessions.items():
-            exp=date.fromisoformat(sess["expire"])
-            sessions.append({"token":token[:8]+"...","expire":sess["expire"],
-                             "days_left":(exp-today).days,"is_admin":sess.get("is_admin",False),
-                             "active":(exp-today).days>0})
-    return jsonify({"ok":True,"sessions":sessions,"total":len(sessions)})
+        for token, sess in _sessions.items():
+            exp = date.fromisoformat(sess["expire"])
+            sessions.append({
+                "token": token[:8] + "...", "expire": sess["expire"],
+                "days_left": (exp - today).days, "is_admin": sess.get("is_admin", False),
+                "active": (exp - today).days > 0
+            })
+    return jsonify({"ok": True, "sessions": sessions, "total": len(sessions)})
 
-@app.route("/api/admin/clean_sessions",methods=["POST"])
+@app.route("/api/admin/clean_sessions", methods=["POST"])
 def admin_clean_sessions():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    today=date.today(); count=0
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    today = date.today(); count = 0
     with _sess_lock:
-        expired=[t for t,s in _sessions.items() if date.fromisoformat(s["expire"])<=today]
-        for t in expired: del _sessions[t]; count+=1
+        expired = [t for t, s in _sessions.items() if date.fromisoformat(s["expire"]) <= today]
+        for t in expired: del _sessions[t]; count += 1
         if count: _save_sessions()
-    return jsonify({"ok":True,"msg":f"✓ {count} sesyon efase"})
+    return jsonify({"ok": True, "msg": f"✓ {count} sesyon efase"})
 
-@app.route("/api/admin/clear_user",methods=["POST"])
+@app.route("/api/admin/clear_user", methods=["POST"])
 def admin_clear_user():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    uid_prefix=d.get("uid","").replace("...",""); cleared=0
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    uid_prefix = d.get("uid", "").replace("...", ""); cleared = 0
     with _user_lock:
-        for uid,ust in _user_states.items():
+        for uid, ust in _user_states.items():
             if uid.startswith(uid_prefix):
-                ust["trades"]=[]; ust["total_pnl"]=0.0; ust["profit_sent"]=0.0; ust["log"]=[]; cleared+=1
-    return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè efase"})
+                ust["trades"] = []; ust["total_pnl"] = 0.0
+                ust["profit_sent"] = 0.0; ust["log"] = []; cleared += 1
+    return jsonify({"ok": True, "msg": f"✓ {cleared} itilizatè efase"})
 
-@app.route("/api/admin/clear_trades",methods=["POST"])
+@app.route("/api/admin/clear_trades", methods=["POST"])
 def admin_clear_trades():
-    d=freq.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize"})
-    uid_prefix=d.get("uid","").replace("...",""); cleared=0
+    d = freq.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize"})
+    uid_prefix = d.get("uid", "").replace("...", ""); cleared = 0
     with _user_lock:
-        for uid,ust in _user_states.items():
-            if uid.startswith(uid_prefix): ust["trades"]=[]; cleared+=1
-    return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè: trades efase"})
+        for uid, ust in _user_states.items():
+            if uid.startswith(uid_prefix): ust["trades"] = []; cleared += 1
+    return jsonify({"ok": True, "msg": f"✓ {cleared} itilizatè: trades efase"})
 
 @app.route("/")
-def index(): return render_template_string(HTML)
+def index():
+    return render_template_string(HTML)
 
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — v6 ELITE
+# HTML INTERFACE — v6 ELITE (enkanje — pa chanje)
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
@@ -2092,7 +2229,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v6 ELITE — OTP FIX FINAL</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v6 ELITE — OTP FIX v2</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
       <input id="login-code" type="text" placeholder="BB-XXXX-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
@@ -2157,7 +2294,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
       <div id="fd">
         <div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:12px;margin-bottom:12px">
-          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ DUAL CLIENT — OTP FIX FINAL</div>
+          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ DUAL CLIENT — OTP FIX v2</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px">
               <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:4px">✅ TOKEN KLASIK (REKÒMANDE)</div>
@@ -2672,5 +2809,5 @@ checkLogin();
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"BonheurBot ELITE v6 — PAT OTP FIX FINAL — port {port}")
+    logger.info(f"BonheurBot ELITE v6 — PAT OTP FIX v2 — port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

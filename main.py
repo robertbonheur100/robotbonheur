@@ -185,31 +185,43 @@ class DerivRESTClient:
 
     def _fresh_ws_url(self) -> str:
         if not self._account_id:
-            logger.warning("PAT: pa gen account_id pou jwenn OTP")
+            logger.warning("PAT OTP: _account_id vide — pa ka jwenn OTP")
             return ""
         try:
-            resp = self._post_rest(f"/options/accounts/{self._account_id}/otp")
-            logger.info(f"OTP raw response: {str(resp)[:300]}")
+            endpoint = f"/options/accounts/{self._account_id}/otp"
+            logger.info(f"PAT OTP POST: {DERIV_REST_BASE}{endpoint}")
+            resp = self._post_rest(endpoint)
+            logger.info(f"PAT OTP response: {str(resp)[:400]}")
+
             ws_url = ""
             if isinstance(resp, dict):
+                # { "data": { "url": "wss://..." } }
                 data = resp.get("data") or {}
                 if isinstance(data, dict):
-                    ws_url = data.get("url") or data.get("ws_url") or data.get("websocket_url") or ""
+                    ws_url = (data.get("url") or data.get("ws_url") or
+                              data.get("websocket_url") or data.get("wss_url") or "")
+                # { "url": "wss://..." } dirèkteman
                 if not ws_url:
-                    ws_url = resp.get("url") or resp.get("ws_url") or resp.get("websocket_url") or ""
+                    ws_url = (resp.get("url") or resp.get("ws_url") or
+                              resp.get("websocket_url") or resp.get("wss_url") or "")
+                # data ka se yon string dirèkteman
                 if not ws_url and isinstance(resp.get("data"), str):
                     ws_url = resp["data"]
+
             if ws_url:
-                logger.info(f"PAT OTP WS URL: {ws_url[:100]}")
+                logger.info(f"PAT OTP URL jwenn: {ws_url[:120]}")
                 return ws_url
             else:
-                logger.error(f"PAT OTP: pa jwenn URL nan response: {resp}")
+                logger.error(f"PAT OTP: pa jwenn URL. Response konplè: {resp}")
                 return ""
         except requests.HTTPError as e:
-            logger.error(f"PAT OTP HTTP error: {e.response.status_code} → {e.response.text[:200]}")
+            logger.error(f"PAT OTP HTTP {e.response.status_code}: {e.response.text[:300]}")
+            # Si 404 oswa 400 — account_id ka mal fòme
+            if e.response.status_code in (404, 400):
+                logger.error(f"⚠ account_id '{self._account_id}' ka pa bon — verifye fòma (ex: CR123456)")
             return ""
         except Exception as e:
-            logger.error(f"PAT OTP error: {e}")
+            logger.error(f"PAT OTP exception: {e}")
             return ""
 
     def _ws_call(self, build_msg_fn, check_done_fn, timeout=30):
@@ -252,38 +264,82 @@ class DerivRESTClient:
         except Exception as e:
             return None, f"WS koneksyon echwe: {e}"
 
+    def _extract_accounts(self, data) -> list:
+        """Ekstrè lis accounts nan nenpòt fòm response."""
+        if isinstance(data, list):
+            return data
+        if not isinstance(data, dict):
+            return []
+        # { "data": [...] }  oswa  { "data": { "accounts": [...] } }
+        d2 = data.get("data") or {}
+        if isinstance(d2, list) and d2:
+            return d2
+        if isinstance(d2, dict):
+            accs = d2.get("accounts") or d2.get("account_list") or []
+            if accs: return accs
+        # { "accounts": [...] }
+        accs = data.get("accounts") or data.get("account_list") or []
+        if accs: return accs
+        # Yon sèl account nan root
+        if "account_id" in data or "id" in data or "loginid" in data:
+            return [data]
+        return []
+
     def connect(self) -> float:
         errors = []
         try:
             data = self._get("/options/accounts")
-            logger.info(f"PAT /options/accounts: {str(data)[:400]}")
-            accounts = []
-            if isinstance(data, list):
-                accounts = data
-            elif isinstance(data, dict):
-                d2 = data.get("data") or {}
-                if isinstance(d2, list): accounts = d2
-                elif isinstance(d2, dict): accounts = d2.get("accounts") or []
-                if not accounts: accounts = data.get("accounts") or []
-                if not accounts and "balance" in data:
-                    self._bal     = float(data["balance"] or 0)
-                    self._loginid = data.get("loginid") or "PAT_USER"
+            logger.info(f"PAT /options/accounts RAW: {str(data)[:600]}")
+
+            accounts = self._extract_accounts(data)
+            logger.info(f"PAT accounts jwenn: {len(accounts)} | {str(accounts)[:300]}")
+
+            # Cas espesyal: balance dirèkteman nan root
+            if not accounts and isinstance(data, dict) and "balance" in data:
+                self._bal     = float(data["balance"] or 0)
+                self._loginid = data.get("loginid") or data.get("account_id") or "PAT_USER"
+                # account_id ka nan root tou
+                self._account_id = (data.get("account_id") or data.get("id") or
+                                    data.get("loginid") or "")
+                logger.info(f"PAT root balance | id={self._account_id} | ${self._bal:.2f}")
+                if self._account_id:
+                    test_url = self._fresh_ws_url()
+                    if test_url: logger.info("PAT OTP WS URL obtenu ✓")
                     return self._bal
+
             if accounts:
-                real = next((a for a in accounts if a.get("account_type") == "real"), accounts[0])
+                # Pran kont real dabò, sinon premye kont
+                real = next((a for a in accounts
+                             if str(a.get("account_type","")).lower() in ("real","financial","gaming")),
+                            accounts[0])
+                logger.info(f"PAT kont chwazi: {real}")
+
+                # Eseye tout kle posib pou account_id
                 self._account_id = (real.get("account_id") or real.get("id") or
-                                    real.get("loginid") or "")
-                self._loginid    = real.get("loginid") or self._account_id or "PAT_USER"
-                self._bal        = float(real.get("balance", 0) or 0)
-                logger.info(f"PAT account OK | id={self._account_id} | {self._loginid} | ${self._bal:.2f}")
-                test_url = self._fresh_ws_url()
-                if test_url: logger.info("PAT OTP WS URL obtenu — trading pral fonksyone ✓")
-                else: logger.warning("PAT OTP pa mache — trading pral gen pwoblèm")
-                return self._bal
+                                    real.get("accountId") or real.get("loginid") or
+                                    real.get("login") or "")
+                self._loginid    = (real.get("loginid") or real.get("login") or
+                                    self._account_id or "PAT_USER")
+                self._bal        = float(real.get("balance", 0) or
+                                         real.get("available_balance", 0) or 0)
+
+                logger.info(f"PAT account_id='{self._account_id}' | loginid='{self._loginid}' | ${self._bal:.2f}")
+
+                if not self._account_id:
+                    logger.error(f"PAT: pa ka jwenn account_id nan: {real}")
+                    errors.append("account_id introuvable nan response accounts")
+                else:
+                    test_url = self._fresh_ws_url()
+                    if test_url: logger.info("PAT OTP WS URL obtenu — trading ✓")
+                    else: logger.warning("PAT OTP echwe — verifye account_id ak App ID")
+                    return self._bal
+
         except requests.HTTPError as e:
-            errors.append(f"GET /options/accounts: HTTP {e.response.status_code} → {e.response.text[:150]}")
+            errors.append(f"GET /options/accounts: HTTP {e.response.status_code} → {e.response.text[:200]}")
+            logger.error(f"PAT /options/accounts HTTP erè: {e.response.status_code} | {e.response.text[:300]}")
         except Exception as e:
-            errors.append(f"GET /options/accounts: {str(e)[:150]}")
+            errors.append(f"GET /options/accounts: {str(e)[:200]}")
+            logger.error(f"PAT /options/accounts exception: {e}")
         try:
             data = self._post_rest("/options/accounts", {"currency": "USD", "group": "row", "account_type": "demo"})
             logger.info(f"PAT create account: {str(data)[:200]}")
@@ -1774,16 +1830,31 @@ def api_connect():
                      f"✓ Token valid?\n✓ Pèmisyon: Read+Trade+Payments?")
                 return jsonify({"ok":False,"error":err})
             if is_pat_token(raw_token):
-                api_main=DerivRESTClient(raw_token,app_id); api_main._bal=balance; api_main._loginid=loginid
-                tmp=DerivRESTClient(raw_token,app_id); tmp._bal=balance; tmp._loginid=loginid
+                # ✅ FIX: itilize menm instance ki deja fè connect() epi gen _account_id
+                api_main = DerivRESTClient(raw_token, app_id)
                 try:
-                    data2=tmp._get("/options/accounts")
-                    accs=data2 if isinstance(data2,list) else (data2.get("data") or data2).get("accounts",[]) if isinstance(data2,dict) else []
-                    if accs:
-                        real=next((a for a in accs if a.get("account_type")=="real"),accs[0])
-                        api_main._account_id=real.get("account_id") or real.get("id") or real.get("loginid") or ""
-                except: pass
-                api_digits=DerivDigitsClient(raw_token,app_id); api_digits._bal=balance; api_digits._rest=api_main
+                    bal2 = api_main.connect()  # sa pran _account_id dirèkteman
+                    if bal2 > 0: balance = bal2
+                except Exception as ce:
+                    # Si connect() echwe ankò, kenbe valè yo te jwenn anvan
+                    logger.warning(f"api_main.connect() re-fetch: {ce}")
+                    api_main._bal      = balance
+                    api_main._loginid  = loginid
+                    # Dènye chans: eseye jwenn account_id via loginid
+                    if loginid and loginid != "PAT_USER":
+                        api_main._account_id = loginid
+                        logger.info(f"Fallback account_id = loginid: {loginid}")
+
+                if not api_main._account_id:
+                    # Dènye dènye chans: loginid souvan se account_id
+                    api_main._account_id = loginid or ""
+                    logger.warning(f"account_id toujou vide — sèvi ak loginid: {loginid}")
+
+                add_log(st, f"PAT account_id: '{api_main._account_id}' | loginid: '{api_main._loginid}'", "INFO")
+
+                api_digits = DerivDigitsClient(raw_token, app_id)
+                api_digits._bal  = api_main._bal
+                api_digits._rest = api_main
             else:
                 api_main=DerivClient(raw_token,used_app_id or app_id); api_main._bal=balance; api_main._loginid=loginid
                 api_digits=DerivDigitsClient(raw_token,used_app_id or app_id); api_digits._bal=balance

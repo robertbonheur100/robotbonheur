@@ -30,7 +30,7 @@ PROFIT_PCT      = 0.05
 DERIV_REST_BASE = "https://api.derivws.com/trading/v1"
 DERIV_WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
 DERIV_WS_LEGACY = "wss://ws.derivws.com/websockets/v3"
-DERIV_WS_APP_IDS = ["1089", "33ifAjI7cFab3IsUV8u9q", "16929"]
+DERIV_WS_APP_IDS = ["1089", "34564", "16929"]
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None,        "used": False, "is_adm": True},
@@ -127,7 +127,7 @@ def is_pat_token(token: str) -> bool:
 # ██  DERIV PAT REST CLIENT — underlying_symbol FIX  ██
 # ═══════════════════════════════════════════════════════════
 class DerivRESTClient:
-    def __init__(self, pat_token: str, app_id: str = "33ifAjI7cFab3IsUV8u9q", timeout: int = 25):
+    def __init__(self, pat_token: str, app_id: str = "1089", timeout: int = 25):
         self.token       = pat_token
         self.app_id      = app_id
         self.timeout     = timeout
@@ -3100,7 +3100,7 @@ async function doConn(){
   if(br=="deriv"){
     const rawToken=document.getElementById("d-tk").value.trim();
     if(!rawToken){msg("cm","✗ Kole token ou anvan!",false);btn.textContent="⚡ KONEKTE";btn.disabled=false;return;}
-    const appId=document.getElementById("d-ai").value.trim()||"33ifAjI7cFab3IsUV8u9q";
+    const appId=document.getElementById("d-ai").value.trim()||"1089";
     const isPat=rawToken.toLowerCase().startsWith("pat_");
     body.token=rawToken;body.app_id=appId;
     msg("cm",`⏳ ${isPat?"PAT → OTP WS — underlying_symbol ✅":"Klasik → WS — symbol ✅"} | Ap konekte...`,"ok");

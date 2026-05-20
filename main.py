@@ -311,15 +311,52 @@ class DerivRESTClient:
         )
 
     def get_balance_sync(self) -> float:
+        # ═══════════════════════════════════════════════════
+        # KOREKSYON PNL: PAT dwe itilize OTP WS pou balans
+        # reyèl apre chak trade — REST API pa toujou aktyèl
+        # ═══════════════════════════════════════════════════
+        # Eseye 1: OTP WS (pi presiz — reflète trade imedyatman)
+        if self._account_id:
+            try:
+                def send(ws):
+                    ws.send(json.dumps({"balance": 1, "account": "current"}))
+
+                def recv(d, ws, res, err, done):
+                    mt = d.get("msg_type", "")
+                    if mt == "balance":
+                        b = d.get("balance", {}).get("balance")
+                        if b is not None:
+                            res[0] = float(b); done.set()
+                            try: ws.close()
+                            except: pass
+                    elif "error" in d:
+                        err[0] = str(d["error"]); done.set()
+
+                result, e = self._ws_call(send, recv, timeout=15)
+                if result is not None and result > 0:
+                    self._bal = result
+                    logger.debug(f"PAT balance OTP WS: ${result:.2f}")
+                    return result
+            except Exception as e:
+                logger.warning(f"PAT balance OTP WS echwe: {e}")
+
+        # Eseye 2: REST API (backup)
         try:
             data = self._get("/options/accounts")
             accs = (data if isinstance(data, list) else
                     (data.get("data") or data).get("accounts", []) if isinstance(data, dict) else [])
+            if not accs and isinstance(data, dict):
+                accs = self._extract_accounts(data)
             if accs:
                 real = next((a for a in accs if a.get("account_type") == "real"), accs[0])
                 b    = float(real.get("balance", 0) or 0)
-                if b > 0: self._bal = b; return b
-        except: pass
+                if b > 0:
+                    self._bal = b
+                    logger.debug(f"PAT balance REST: ${b:.2f}")
+                    return b
+        except Exception as e:
+            logger.warning(f"PAT balance REST echwe: {e}")
+
         return self._bal
 
     def get_candles(self, symbol="R_100", count=200, gran=60):
@@ -1738,10 +1775,13 @@ def add_log(st,msg,level="INFO"):
 
 def _check_limits(st,cfg):
     target=float(cfg.get("profit_target",0)); loss=float(cfg.get("loss_limit",0))
-    if target>0 and st["total_pnl"]>=target:
-        add_log(st,f"🎯 OBJEKTIF ${target:.2f} RIVE! Bot kanpe!","SUCCESS"); st["running"]=False; return True
-    if loss>0 and st["total_pnl"]<=-abs(loss):
-        add_log(st,f"🛑 LIMIT PÈT ${loss:.2f} RIVE! Bot kanpe!","ERROR"); st["running"]=False; return True
+    pnl = st["total_pnl"]
+    if target>0 and pnl>=target:
+        add_log(st,f"🎯 OBJEKTIF ${target:.2f} RIVE! PNL kounye: ${pnl:.4f} | Bot kanpe!","SUCCESS")
+        st["running"]=False; return True
+    if loss>0 and pnl<=-abs(loss):
+        add_log(st,f"🛑 LIMIT PÈT ${loss:.2f} RIVE! PNL kounye: ${pnl:.4f} | Bot kanpe!","ERROR")
+        st["running"]=False; return True
     return False
 
 def _refresh_balance(api,st):
@@ -2040,50 +2080,83 @@ def trading_loop(st,bot_id=None):
             try:
                 r=api.place_trade(symbol,sig,max(0.5,current_lot),duration_secs=tf)
                 if r.get("contract_id"):
-                    cid=r["contract_id"]; bal_open=float(r.get("balance_after",bal_before-current_lot))
+                    cid=r["contract_id"]
+                    # Balans imedyatman apre trade ouvri
+                    bal_open_raw = r.get("balance_after")
+                    if bal_open_raw is not None:
+                        bal_open = float(bal_open_raw)
+                    else:
+                        bal_open = bal_before - current_lot
                     st["balance"]=bal_open; ok=True
-                    add_log(st,f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
+                    add_log(st,f"⏳ #{cid} | Bal avant:${bal_before:.2f} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
                     time.sleep(wait_after)
+
+                    # ══════════════════════════════════════════
+                    # KOREKSYON PNL: Eseye jwenn balans reyèl
+                    # Fè plizyè eseye avèk yon ti delè
+                    # ══════════════════════════════════════════
                     bal_close=None
-                    for attempt in range(5):
+                    for attempt in range(6):
                         try:
                             nb=api.get_balance_sync()
-                            if nb and nb>0 and abs(nb-bal_open)>0.01:
-                                bal_close=nb; break
-                            time.sleep(max(30,tf//4))
-                        except: time.sleep(30)
-                    if bal_close:
-                        st["balance"]=bal_close; pnl=bal_close-bal_before
-                        if pnl>0.10: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
-                        else: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
+                            if nb and nb>0:
+                                # Verifye si balans chanje (trade fini)
+                                if abs(nb - bal_open) > 0.005:
+                                    bal_close=nb
+                                    logger.info(f"PNL detekte apre {attempt+1} eseye: bal_open={bal_open:.4f} → bal_close={nb:.4f}")
+                                    break
+                                elif attempt >= 3:
+                                    # Apre 3 eseye san chanjman — aksepte valè a
+                                    bal_close=nb
+                                    logger.info(f"PNL: balans estab ${nb:.4f} apre {attempt+1} eseye")
+                                    break
+                            time.sleep(max(20, tf//5))
+                        except Exception as be:
+                            logger.warning(f"Balance check #{attempt+1} echwe: {be}")
+                            time.sleep(20)
+
+                    if bal_close is not None and bal_close > 0:
+                        st["balance"]=bal_close
+                        pnl=bal_close - bal_before
+                        if pnl > 0.005:
+                            add_log(st,f"✅ GENYEN! +${pnl:.4f} | Bal:{bal_before:.2f}→{bal_close:.2f}","SUCCESS")
+                        elif pnl < -0.005:
+                            add_log(st,f"❌ PÈDI ${abs(pnl):.4f} | Bal:{bal_before:.2f}→{bal_close:.2f}","WARN")
+                        else:
+                            add_log(st,f"⚪ PNL $0 (bal estab ${bal_close:.2f})","WARN")
                     else:
-                        pnl=-(bal_before-bal_open)
-                        add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
+                        # Pa jwenn balans — esttime pèt
+                        pnl = bal_open - bal_before  # negatif = montant mise
+                        add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.4f} | Dernyè bal:${bal_open:.2f}","WARN")
             except Exception as e: add_log(st,f"Trade echwe: {e}","ERROR")
             if ok:
-                if pnl>0:
+                if pnl > 0.005:
                     prev_losses=consec_losses
                     current_lot=base_lot; consec_losses=0; total_lost=0.0
                     if prev_losses>0:
                         add_log(st,f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}","SUCCESS")
                     else:
-                        add_log(st,f"✅ Genyen +${pnl:.2f}","SUCCESS")
-                else:
-                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot
+                        add_log(st,f"✅ Genyen +${pnl:.4f}","SUCCESS")
+                elif pnl < -0.005:
+                    loss=abs(pnl)
                     total_lost+=loss; consec_losses+=1
                     if consec_losses<MAX_LOSSES_BEFORE_PAUSE:
                         next_lot=round((total_lost+base_lot)/0.95,2)
                         current_lot=max(0.5,min(next_lot,100.0))
                         add_log(st,
                             f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
-                            f"Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
+                            f"Total:${total_lost:.4f} | Prochèn:${current_lot:.2f}","WARN")
                     else:
                         next_lot=round((total_lost+base_lot)/0.95,2)
                         current_lot=max(0.5,min(next_lot,100.0))
                         add_log(st,
                             f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | "
-                            f"Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f} | "
+                            f"Total:${total_lost:.4f} | Mise rekipere:${current_lot:.2f} | "
                             f"Ap tann mache...","WARN")
+                else:
+                    # PNL prèske zewo — pa konte kòm pèt ni genyen
+                    add_log(st,f"⚪ Rezilta anbigi (PNL≈0) — pa konte","WARN")
+
                 trade={
                     "id":len(st["trades"])+1,
                     "time":datetime.now().strftime("%H:%M:%S"),
@@ -2093,13 +2166,21 @@ def trading_loop(st,bot_id=None):
                     "strategy":strategy,
                     "tf":f"{tf//60}min",
                     "stake":round(current_lot,2),
-                    "pnl":round(pnl,2),
-                    "status":"won" if pnl>0 else "lost",
+                    "pnl":round(pnl,4),
+                    "status":"won" if pnl>0.005 else ("lost" if pnl<-0.005 else "neutral"),
                     "regime":regime,
                 }
-                st["trades"].insert(0,trade); st["total_pnl"]+=pnl
-                if pnl>0:
-                    ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
+                st["trades"].insert(0,trade)
+                # ══════════════════════════════════════════
+                # KOREKSYON KRITIK: mete ajou total_pnl
+                # sèlman si pnl pa zewo
+                # ══════════════════════════════════════════
+                if abs(pnl) > 0.005:
+                    st["total_pnl"] += pnl
+                    add_log(st,f"📊 PNL kimilatif: ${st['total_pnl']:.4f}","INFO")
+
+                if pnl > 0.005:
+                    ps=round(pnl*PROFIT_PCT,4); st["profit_sent"]+=ps
                     if ps>=0.5:
                         try:
                             api.transfer_to_account("CR9560099",ps)

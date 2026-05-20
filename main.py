@@ -8,6 +8,10 @@
 ║   ✅ digits PAT     → "underlying_symbol"                   ║
 ║   ✅ klasik WS      → "symbol" (pa chanje)                  ║
 ║                                                             ║
+║  KOREKSYON v6.1 (2 FIX SÈLMAN):                            ║
+║   ✅ FIX 1: PNL reyèl — wait_contract_result avan balans   ║
+║   ✅ FIX 2: Minimum $0.50 garanti pou PAT + Klasik         ║
+║                                                             ║
 ║  STRATEGIES ELITE v6 (Robo 1 KONPLÈ):                       ║
 ║   ✅ SuperTrend, Heikin Ashi, Chandelier Exit               ║
 ║   ✅ VWAP, Fibonacci, FVG, Order Block, SMC                 ║
@@ -311,11 +315,7 @@ class DerivRESTClient:
         )
 
     def get_balance_sync(self) -> float:
-        # ═══════════════════════════════════════════════════
-        # KOREKSYON PNL: PAT dwe itilize OTP WS pou balans
-        # reyèl apre chak trade — REST API pa toujou aktyèl
-        # ═══════════════════════════════════════════════════
-        # Eseye 1: OTP WS (pi presiz — reflète trade imedyatman)
+        # Eseye 1: OTP WS (pi presiz)
         if self._account_id:
             try:
                 def send(ws):
@@ -418,6 +418,10 @@ class DerivRESTClient:
                 for p, t in zip(res[0].get("prices", []), res[0].get("times", []))]
 
     def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
+        # ══════════════════════════════════════════════════
+        # FIX 2: Garanti minimum $0.50 nan PAT place_trade
+        # ══════════════════════════════════════════════════
+        actual_amount = max(0.50, round(float(amount), 2))
         ct = "CALL" if direction == "BUY" else "PUT"
         if   duration_secs <= 60:    dv, du = 1,  "m"
         elif duration_secs <= 300:   dv, du = 5,  "m"
@@ -428,7 +432,7 @@ class DerivRESTClient:
         def send(ws):
             proposal_msg = {
                 "proposal":          1,
-                "amount":            max(0.5, float(amount)),
+                "amount":            actual_amount,
                 "basis":             "stake",
                 "contract_type":     ct,
                 "currency":          "USD",
@@ -1447,6 +1451,10 @@ class DerivClient:
                  "close":float(c["close"]),"volume":1000,"time":c["epoch"]} for c in res[0]]
 
     def place_trade(self,symbol,direction,amount=1.0,duration_secs=60):
+        # ══════════════════════════════════════════════════
+        # FIX 2: Garanti minimum $0.50 nan Klasik aussi
+        # ══════════════════════════════════════════════════
+        actual_amount = max(0.50, round(float(amount), 2))
         import websocket as wsl
         res=[None]; err=[None]; done=threading.Event()
         ct="CALL" if direction=="BUY" else "PUT"
@@ -1458,7 +1466,7 @@ class DerivClient:
         def on_msg(ws,msg):
             d=json.loads(msg); mt=d.get("msg_type","")
             if mt=="authorize" and "error" not in d:
-                ws.send(json.dumps({"proposal":1,"amount":max(0.5,float(amount)),"basis":"stake",
+                ws.send(json.dumps({"proposal":1,"amount":actual_amount,"basis":"stake",
                                     "contract_type":ct,"currency":"USD","symbol":symbol,
                                     "duration":dv,"duration_unit":du}))
             elif mt=="proposal":
@@ -1473,6 +1481,29 @@ class DerivClient:
         done.wait(timeout=30)
         if err[0]: raise Exception(err[0])
         return res[0] or {}
+
+    def wait_contract_result(self,contract_id,timeout=35):
+        """Tann rezilta reyèl kontrak — won/lost/sold"""
+        import websocket as wsl
+        res=[None]; done=threading.Event()
+        def on_msg(ws,msg):
+            d=json.loads(msg); mt=d.get("msg_type","")
+            if mt=="authorize" and "error" not in d:
+                ws.send(json.dumps({"proposal_open_contract":1,
+                                    "contract_id":contract_id,"subscribe":1}))
+            elif mt=="proposal_open_contract":
+                poc=d.get("proposal_open_contract",{})
+                if poc.get("status","") in("won","lost","sold"):
+                    res[0]=poc; done.set()
+                    try: ws.close()
+                    except: pass
+            elif "error" in d:
+                done.set()
+        w=wsl.WebSocketApp(f"{DERIV_WS_LEGACY}?app_id={self.app_id}",
+                           on_message=on_msg,on_open=lambda ws:self._auth(ws))
+        threading.Thread(target=w.run_forever,daemon=True).start()
+        done.wait(timeout=timeout)
+        return res[0]
 
     def get_balance_sync(self):
         import websocket as wsl
@@ -1993,16 +2024,23 @@ def binance_trading_loop(st,bot_id=None):
     add_log(st,"⏹ Binance Bot arrêté")
 
 
+# ═══════════════════════════════════════════════════════════
+# ██  TRADING LOOP DERIV — FIX 1 (PNL) + FIX 2 (MIN $0.50)
+# ═══════════════════════════════════════════════════════════
 def trading_loop(st,bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
     cfg=st["config"]; symbol=cfg.get("symbol","R_100"); strategy=cfg.get("strategy","confluence")
     lot=float(cfg.get("lot",0.5)); tf=int(cfg.get("tf_secs",900)); min_conf=float(cfg.get("min_conf",0.65))
     fn=STRATEGIES.get(strategy,strat_confluence_elite)
-    wait_after=tf+90; base_lot=round(max(0.5,lot),2); current_lot=base_lot
+    # ══════════════════════════════════════════════════════
+    # FIX 2: base_lot garanti $0.50 minimum
+    # ══════════════════════════════════════════════════════
+    base_lot=round(max(0.50, lot), 2)
+    current_lot=base_lot
     consec_losses=0; total_lost=0.0
     MAX_LOSSES_BEFORE_PAUSE=3; PAUSE_WAIT_SECS=45
     add_log(st,f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st,f"📌 SuperTrend+HA+Chandelier | ADX>12 | 3 strategies minimum")
+    add_log(st,f"📌 SuperTrend+HA+Chandelier | ADX>12 | 3 strategies minimum | Min mise: ${base_lot:.2f}")
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Bot anile","WARN"); return
         if _check_limits(st,cfg): break
@@ -2073,62 +2111,95 @@ def trading_loop(st,bot_id=None):
                 add_log(st,f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
                 current_lot=base_lot; consec_losses=0; total_lost=0.0
             entry=candles[-1]["close"]
+
+            # ══════════════════════════════════════════════
+            # FIX 2: Garanti $0.50 minimum ABSOLIMAN
+            # ══════════════════════════════════════════════
+            actual_lot = max(0.50, round(current_lot, 2))
+
             add_log(st,
                 f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | "
-                f"ST:{st_sig} | HA:{ha_sig} | Mise:${current_lot:.2f}{pivot_info}")
+                f"ST:{st_sig} | HA:{ha_sig} | Mise:${actual_lot:.2f}{pivot_info}")
+
             bal_before=st["balance"]; pnl=0.0; ok=False
             try:
-                r=api.place_trade(symbol,sig,max(0.5,current_lot),duration_secs=tf)
+                r=api.place_trade(symbol, sig, actual_lot, duration_secs=tf)
                 if r.get("contract_id"):
-                    cid=r["contract_id"]
-                    # Balans imedyatman apre trade ouvri
+                    cid = r["contract_id"]
+                    buy_price_open = float(r.get("buy_price", actual_lot))
                     bal_open_raw = r.get("balance_after")
-                    if bal_open_raw is not None:
-                        bal_open = float(bal_open_raw)
-                    else:
-                        bal_open = bal_before - current_lot
-                    st["balance"]=bal_open; ok=True
-                    add_log(st,f"⏳ #{cid} | Bal avant:${bal_before:.2f} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
-                    time.sleep(wait_after)
+                    bal_open = float(bal_open_raw) if bal_open_raw is not None else bal_before - actual_lot
+                    st["balance"] = bal_open; ok = True
 
-                    # ══════════════════════════════════════════
-                    # KOREKSYON PNL: Eseye jwenn balans reyèl
-                    # Fè plizyè eseye avèk yon ti delè
-                    # ══════════════════════════════════════════
-                    bal_close=None
-                    for attempt in range(6):
-                        try:
-                            nb=api.get_balance_sync()
-                            if nb and nb>0:
-                                # Verifye si balans chanje (trade fini)
-                                if abs(nb - bal_open) > 0.005:
-                                    bal_close=nb
-                                    logger.info(f"PNL detekte apre {attempt+1} eseye: bal_open={bal_open:.4f} → bal_close={nb:.4f}")
-                                    break
-                                elif attempt >= 3:
-                                    # Apre 3 eseye san chanjman — aksepte valè a
-                                    bal_close=nb
-                                    logger.info(f"PNL: balans estab ${nb:.4f} apre {attempt+1} eseye")
-                                    break
-                            time.sleep(max(20, tf//5))
-                        except Exception as be:
-                            logger.warning(f"Balance check #{attempt+1} echwe: {be}")
-                            time.sleep(20)
+                    add_log(st,
+                        f"⏳ #{cid} | buy_price=${buy_price_open:.4f} | "
+                        f"Bal:{bal_before:.2f}→{bal_open:.2f} | "
+                        f"Ap tann rezilta reyèl kontrak...","SUCCESS")
 
-                    if bal_close is not None and bal_close > 0:
-                        st["balance"]=bal_close
-                        pnl=bal_close - bal_before
-                        if pnl > 0.005:
-                            add_log(st,f"✅ GENYEN! +${pnl:.4f} | Bal:{bal_before:.2f}→{bal_close:.2f}","SUCCESS")
-                        elif pnl < -0.005:
-                            add_log(st,f"❌ PÈDI ${abs(pnl):.4f} | Bal:{bal_before:.2f}→{bal_close:.2f}","WARN")
+                    # ══════════════════════════════════════
+                    # FIX 1: wait_contract_result pou PNL reyèl
+                    # Kalkile pnl soti nan buy_price/sell_price
+                    # ══════════════════════════════════════
+                    result = None
+                    if hasattr(api, 'wait_contract_result'):
+                        contract_timeout = tf + 60
+                        add_log(st, f"⌛ Tann kontrak #{cid} (max {contract_timeout}s)...")
+                        result = api.wait_contract_result(cid, timeout=contract_timeout)
+
+                    if result:
+                        status = result.get("status", "")
+                        buy_p  = float(result.get("buy_price",  buy_price_open))
+                        sell_p = float(result.get("sell_price", 0))
+                        if status == "won":
+                            pnl = sell_p - buy_p
+                            st["balance"] = bal_open + sell_p
+                            add_log(st,
+                                f"✅ WON! +${pnl:.4f} | sell=${sell_p:.4f} buy=${buy_p:.4f} | "
+                                f"Bal:{st['balance']:.4f}", "SUCCESS")
+                        elif status == "lost":
+                            pnl = -buy_p
+                            st["balance"] = bal_open
+                            add_log(st,
+                                f"❌ LOST -${buy_p:.4f} | Bal:{st['balance']:.4f}", "WARN")
                         else:
-                            add_log(st,f"⚪ PNL $0 (bal estab ${bal_close:.2f})","WARN")
+                            # Status enkoni (sold etc) — backup ak balans
+                            add_log(st, f"⚠ Status enkoni: {status} — ap verifye balans...", "WARN")
+                            time.sleep(8)
+                            nb = api.get_balance_sync()
+                            if nb and nb > 0:
+                                st["balance"] = nb
+                                pnl = nb - bal_before
+                                add_log(st, f"📊 Balans verifye: ${nb:.4f} | PNL=${pnl:.4f}", "INFO")
+                            else:
+                                pnl = -actual_lot
                     else:
-                        # Pa jwenn balans — esttime pèt
-                        pnl = bal_open - bal_before  # negatif = montant mise
-                        add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.4f} | Dernyè bal:${bal_open:.2f}","WARN")
-            except Exception as e: add_log(st,f"Trade echwe: {e}","ERROR")
+                        # wait_contract_result echwe oswa timeout — backup ak balans
+                        add_log(st, f"⚠ Timeout wait_contract — ap verifye balans (3 eseye)...", "WARN")
+                        bal_close = None
+                        for attempt in range(3):
+                            try:
+                                time.sleep(15)
+                                nb = api.get_balance_sync()
+                                if nb and nb > 0:
+                                    if abs(nb - bal_open) > 0.005 or attempt >= 2:
+                                        bal_close = nb
+                                        logger.info(f"PNL backup apre {attempt+1} eseye: ${nb:.4f}")
+                                        break
+                            except Exception as be:
+                                logger.warning(f"Balance check #{attempt+1}: {be}")
+
+                        if bal_close and bal_close > 0:
+                            st["balance"] = bal_close
+                            pnl = bal_close - bal_before
+                            won_str = "✅ WON" if pnl > 0.005 else ("❌ LOST" if pnl < -0.005 else "⚪ NEUT")
+                            add_log(st, f"{won_str} (backup) pnl=${pnl:.4f} | Bal:${bal_close:.4f}", "INFO")
+                        else:
+                            pnl = bal_open - bal_before  # negatif = mise
+                            add_log(st, f"❌ LOST (timeout) ${abs(pnl):.4f}", "WARN")
+
+            except Exception as e:
+                add_log(st,f"Trade echwe: {e}","ERROR")
+
             if ok:
                 if pnl > 0.005:
                     prev_losses=consec_losses
@@ -2142,19 +2213,18 @@ def trading_loop(st,bot_id=None):
                     total_lost+=loss; consec_losses+=1
                     if consec_losses<MAX_LOSSES_BEFORE_PAUSE:
                         next_lot=round((total_lost+base_lot)/0.95,2)
-                        current_lot=max(0.5,min(next_lot,100.0))
+                        current_lot=max(0.50, min(next_lot, 100.0))
                         add_log(st,
                             f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
                             f"Total:${total_lost:.4f} | Prochèn:${current_lot:.2f}","WARN")
                     else:
                         next_lot=round((total_lost+base_lot)/0.95,2)
-                        current_lot=max(0.5,min(next_lot,100.0))
+                        current_lot=max(0.50, min(next_lot, 100.0))
                         add_log(st,
                             f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | "
                             f"Total:${total_lost:.4f} | Mise rekipere:${current_lot:.2f} | "
                             f"Ap tann mache...","WARN")
                 else:
-                    # PNL prèske zewo — pa konte kòm pèt ni genyen
                     add_log(st,f"⚪ Rezilta anbigi (PNL≈0) — pa konte","WARN")
 
                 trade={
@@ -2165,16 +2235,13 @@ def trading_loop(st,bot_id=None):
                     "conf":f"{conf:.0%}",
                     "strategy":strategy,
                     "tf":f"{tf//60}min",
-                    "stake":round(current_lot,2),
+                    "stake":round(actual_lot,2),
                     "pnl":round(pnl,4),
                     "status":"won" if pnl>0.005 else ("lost" if pnl<-0.005 else "neutral"),
                     "regime":regime,
                 }
                 st["trades"].insert(0,trade)
-                # ══════════════════════════════════════════
-                # KOREKSYON KRITIK: mete ajou total_pnl
-                # sèlman si pnl pa zewo
-                # ══════════════════════════════════════════
+
                 if abs(pnl) > 0.005:
                     st["total_pnl"] += pnl
                     add_log(st,f"📊 PNL kimilatif: ${st['total_pnl']:.4f}","INFO")
@@ -2188,7 +2255,7 @@ def trading_loop(st,bot_id=None):
                         except Exception as e:
                             add_log(st,f"Transfer echwe: {e}","ERROR")
         except Exception as e: add_log(st,f"Erè: {e}","ERROR")
-        time.sleep(tf)
+        time.sleep(5)  # ti pòz anvan pwochen sikl (pa tf, kontrak deja tann)
     add_log(st,"⏹ BonheurBot ELITE v6 arrêté")
 
 
@@ -2545,7 +2612,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
-    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6</span></div>
+    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6.1</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
     <span id="h-tok-type" style="display:none"></span>
@@ -2590,15 +2657,15 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
       <div id="fd">
         <div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:12px;margin-bottom:12px">
-          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ DUAL CLIENT — underlying_symbol FIX</div>
+          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ v6.1 — PNL FIX + MIN $0.50</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px">
               <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:4px">✅ TOKEN KLASIK (REKÒMANDE)</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">PA kòmanse ak <code>pat_</code><br>→ WebSocket ws.derivws.com<br>proposal: "symbol" ✅<br>App ID: <b>1089</b></div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">PA kòmanse ak <code>pat_</code><br>→ WebSocket ws.derivws.com<br>proposal: "symbol" ✅<br>wait_contract_result ✅<br>Min: $0.50 garanti ✅</div>
             </div>
             <div style="background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px">
               <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:4px">⚡ TOKEN PAT (pat_xxx)</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">→ REST Bearer + OTP WS<br>proposal: "underlying_symbol" ✅<br>FIX KÒRÈK aktif</div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">→ REST Bearer + OTP WS<br>proposal: "underlying_symbol" ✅<br>wait_contract_result ✅<br>PNL reyèl ✅<br>Min: $0.50 garanti ✅</div>
             </div>
           </div>
         </div>
@@ -2636,28 +2703,28 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
   </div>
   <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-    <div class="bt" style="color:#00FF88">🚀 SISTÈM ELITE v6 — STRATEGIES KONPLÈ</div>
+    <div class="bt" style="color:#00FF88">🚀 v6.1 — FIX PNL + MIN $0.50 GARANTI</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
       <div>
-        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 SuperTrend</div>
+        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">✅ FIX 1 — PNL Reyèl</div>
+        wait_contract_result()<br>buy_price / sell_price<br>
+        <span style="color:#00FF88">won → sell-buy = +PNL</span><br>
+        lost → -buy_price<br>
+        <span style="color:#00FF88">→ Afiche PNL egzak</span>
+      </div>
+      <div>
+        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">✅ FIX 2 — Min $0.50</div>
+        max(0.50, lot) garanti<br>PAT + Klasik toulède<br>
+        <span style="color:#FFD600">base_lot = max(0.50, cfg)</span><br>
+        actual_lot avan trade<br>
+        <span style="color:#FFD600">→ Janm anba $0.50</span>
+      </div>
+      <div>
+        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">📈 SuperTrend v6</div>
         ATR x3.0 multiplier<br>Siyal klè BUY/SELL<br>
-        <span style="color:#00FF88">Pwa: 2.5x (pi wo)</span><br>
-        Travèse = siyal solid<br>
-        <span style="color:#00FF88">→ Pi reliable pou synthetic</span>
-      </div>
-      <div>
-        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">🕯 Heikin Ashi</div>
-        5 bouji konsekitif<br>Filtre bwi mache<br>
-        <span style="color:#FFD600">Pwa: 2.5x (pi wo)</span><br>
-        Grandi = plis konfidans<br>
-        <span style="color:#FFD600">→ Trend pi klè</span>
-      </div>
-      <div>
-        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🔔 Chandelier Exit</div>
-        Highest high/lowest low<br>Chanjman trend detekte<br>
         <span style="color:#00D4FF">Pwa: 2.5x (pi wo)</span><br>
-        ATR x3.0 distans<br>
-        <span style="color:#00D4FF">→ Siyal konfimasyon</span>
+        Travèse = siyal solid<br>
+        <span style="color:#00D4FF">→ Pi reliable</span>
       </div>
       <div>
         <div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛡 ADX 12 + 3 strat</div>
@@ -2671,7 +2738,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
-      <div class="bt">PARAMÈT BOT ELITE v6</div>
+      <div class="bt">PARAMÈT BOT ELITE v6.1</div>
       <div class="iw"><div class="il">MOD TRADING</div>
         <select id="c-mode" onchange="toggleMode()">
           <option value="forex">📈 Rise/Fall — Deriv Synthetic</option>
@@ -2702,7 +2769,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </div>
         </div>
         <div class="g2">
-          <div class="iw"><div class="il">MISE ($) — Min $0.50</div><input id="c-lot-forex" type="number" value="0.50" step="0.50" min="0.50"></div>
+          <div class="iw"><div class="il">MISE ($) — Min $0.50 GARANTI</div><input id="c-lot-forex" type="number" value="0.50" step="0.50" min="0.50"></div>
           <div class="iw"><div class="il">STRATEGY</div>
             <select id="c-st-forex">
               <option value="confluence">🔥 Confluence ELITE (ST+HA+CE)</option>
@@ -2719,9 +2786,9 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </div>
         </div>
         <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:10px;font-size:10px;color:#4A7080;line-height:1.8">
-          ★★★ <span style="color:#00FF88">Confluence ELITE</span> = SuperTrend + HA + Chandelier + 10 strat<br>
-          ★★★ <span style="color:#FFD600">15min/1h</span> = pi bon timeframe pou synthetic<br>
-          💡 ADX≥12 + 3 strat dakò → siyal souvan e presiz
+          ✅ <span style="color:#00FF88">PNL REYÈL</span> = wait_contract_result → buy/sell price<br>
+          ✅ <span style="color:#FFD600">Min $0.50</span> = garanti nan tout trades<br>
+          💡 15min/1h + Confluence ELITE = pi bon rezilta
         </div>
       </div>
       <div id="opts-digits" style="display:none">
@@ -2826,14 +2893,14 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
       </div>
       <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">🧠 ELITE v6 — LOJIK SIYAL</div>
+        <div class="bt" style="color:#00FF88">🧠 v6.1 — LOJIK PNL REYÈL</div>
         <div style="color:#4A7080;font-size:10px;line-height:2.1">
-          <span style="color:#00FF88">✓ SuperTrend:</span> ATR×3 — BUY/SELL klè<br>
-          <span style="color:#00FF88">✓ Heikin Ashi:</span> 5 bouji — trend konfime<br>
-          <span style="color:#00FF88">✓ Chandelier:</span> HH/LL — chanjman detekte<br>
-          <span style="color:#FFD600">⚠ 1-2 pèt:</span> Conf+2-4%, mise monte<br>
-          <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann siyal bon<br>
-          <span style="color:#00D4FF">✓ RANGING:</span> Trade si ST+HA dakò
+          <span style="color:#00FF88">✓ place_trade → contract_id</span><br>
+          <span style="color:#00FF88">✓ wait_contract_result(cid)</span><br>
+          <span style="color:#00FF88">✓ won: pnl = sell - buy</span><br>
+          <span style="color:#FFD600">✓ lost: pnl = -buy_price</span><br>
+          <span style="color:#00D4FF">✓ backup: get_balance_sync</span><br>
+          <span style="color:#FF3B6B">✓ Min mise: $0.50 garanti</span>
         </div>
       </div>
     </div>
@@ -3008,10 +3075,10 @@ function autoDetectToken(){
   const hint=document.getElementById("tok-hint");
   if(val.startsWith("pat_")){
     badge.style.display="inline";badge.className="bp";badge.textContent="⚡ PAT→underlying_symbol";
-    hint.innerHTML='<span style="color:#FFD600">⚡ PAT → OTP WS → "underlying_symbol" ✅ FIX AKTIF</span>';
+    hint.innerHTML='<span style="color:#FFD600">⚡ PAT → OTP WS → "underlying_symbol" ✅ + PNL reyèl ✅</span>';
   }else if(val.length>10){
     badge.style.display="inline";badge.className="bk";badge.textContent="✅ KLASIK→symbol";
-    hint.innerHTML='<span style="color:#00FF88">✅ Token Klasik → WS → "symbol" ✅ kòrèk</span>';
+    hint.innerHTML='<span style="color:#00FF88">✅ Token Klasik → WS → "symbol" ✅ + PNL reyèl ✅</span>';
   }else{
     badge.style.display="none";
     hint.innerHTML='Token Klasik PA kòmanse ak <code>pat_</code>';
@@ -3057,17 +3124,17 @@ function getStartParams(){
 }
 
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"v6 NOUVO: SuperTrend(pwa 2.5x) + HeikinAshi(pwa 2.5x) + Chandelier(pwa 2.5x) + 10 strategies klasik. ADX≥12, 3 strat minimòm, RANGING oke si ST+HA dakò.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
-  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"v6: Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. EMA 1 bouji sèlman. Plis siyal, menm presizyon.",tags:["score 5/15","ADX≥12","ST bonus","1 bouji EMA"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0 multiplier. Siyal klè BUY/SELL. Travèse bann = siyal solid. Pi reliable pou Deriv synthetic.",tags:["ATR×3","bann sup/res","travèse=BUY","conf 75-92%"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid. Filtre bwi mache. Bouji grandi = plis konfidans.",tags:["5 bouji","filtre bwi","bouji grandi","conf 72-83%"]},
-  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short). Chanjman trend detekte an tan reyèl.",tags:["HH-ATR×3","LL+ATR×3","chanjman trend","conf 75-90%"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend. Score nòmalize.",tags:["8 faktè","pwa","score nòm","conf 68-92%"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre. Siyal presiz.",tags:["BOS","swing","EMA50","conf 84%"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"v6.1: SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+10 klasik. ADX≥12, 3 strat min. PNL reyèl via wait_contract_result.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","PNL reyèl"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5/15 + ADX≥12 + ST bonus. PNL reyèl via contract result.",tags:["score 5/15","ADX≥12","ST bonus","PNL reyèl"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0. Travèse bann = siyal solid. Min $0.50 garanti.",tags:["ATR×3","bann","travèse=BUY","min $0.50"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon. Filtre bwi.",tags:["5 bouji","filtre bwi","conf 72-83%","min $0.50"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"HH-ATR×3 / LL+ATR×3. Chanjman trend detekte.",tags:["HH-ATR×3","LL+ATR×3","chanjman","min $0.50"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè: EMA+RSI+MACD+BB+mom+vol+pos+trend.",tags:["8 faktè","pwa","score","conf 68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50.",tags:["BOS","swing","EMA50","conf 84%"]},
   scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
-  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
-  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA200+ADX>20+Volume+RSI+MACD+BB+Stoch+SuperTrend. 7+ pts.",tags:["EMA 20/50/200","ADX>20","Volume","SuperTrend","7+ pts"]},
-  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: EMA200+ADX>18+Volume surge+RSI+MACD+BB+Breakout+SuperTrend. 8+ pts.",tags:["EMA 9/21/50/200","ADX>18","Volume surge","Breakout","8+ pts"]},
+  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
+  binance_gold:{l:"🥇 Gold Strategy",d:"XAU/USD: EMA200+ADX>20+Volume+SuperTrend. 7+ pts.",tags:["EMA 20/50/200","ADX>20","Volume","7+ pts"]},
+  binance_crypto:{l:"🪙 Crypto Strategy",d:"Binance: EMA200+ADX>18+Volume+Breakout+SuperTrend. 8+ pts.",tags:["EMA 9/21/50/200","ADX>18","Volume","8+ pts"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
@@ -3103,7 +3170,7 @@ async function doConn(){
     const appId=document.getElementById("d-ai").value.trim()||"1089";
     const isPat=rawToken.toLowerCase().startsWith("pat_");
     body.token=rawToken;body.app_id=appId;
-    msg("cm",`⏳ ${isPat?"PAT → OTP WS — underlying_symbol ✅":"Klasik → WS — symbol ✅"} | Ap konekte...`,"ok");
+    msg("cm",`⏳ ${isPat?"PAT → OTP WS — underlying_symbol ✅ + PNL reyèl ✅":"Klasik → WS — symbol ✅ + PNL reyèl ✅"} | Ap konekte...`,"ok");
   }
   if(br=="binance"||br=="binance_us"){
     body.api_key=document.getElementById("b-k").value.trim();
@@ -3126,7 +3193,7 @@ async function doStart(){
   const body=getStartParams();
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
-  if(d.ok){msg("ctm","✓ BonheurBot ELITE v6 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
+  if(d.ok){msg("ctm","✓ BonheurBot ELITE v6.1 démarre! PNL reyèl aktif.","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else msg("ctm","✗ "+d.error,false);
 }
 async function doStop(){
@@ -3139,162 +3206,4 @@ async function doStop(){
 async function doBt(){
   const btn=event.target;btn.textContent="⏳ AP KALKILE...";btn.disabled=true;
   document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest — tann 30 segonn...</div>`;
-  const body={symbol:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,
-    balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),
-    sl:parseFloat(document.getElementById("bt-sl").value),tp:parseFloat(document.getElementById("bt-tp").value)};
-  try{
-    const r=await fetch("/api/backtest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    const d=await r.json();
-    document.getElementById("btm").innerHTML="";
-    if(d.ok){
-      const v=d.result;const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";
-      document.getElementById("btr").innerHTML=`<div class="stats">
-        <div class="stat"><div class="sl">NET P&L</div><div class="sv" style="color:${c}">$${v.net_pnl}</div></div>
-        <div class="stat"><div class="sl">RETOU</div><div class="sv" style="color:${c}">${v.return_pct}%</div></div>
-        <div class="stat"><div class="sl">WIN RATE</div><div class="sv" style="color:#00FF88">${v.win_rate}%</div></div>
-        <div class="stat"><div class="sl">TRADES</div><div class="sv" style="color:#FFD600">${v.trades}</div></div>
-        <div class="stat"><div class="sl">MAX DD</div><div class="sv" style="color:#FF3B6B">${v.max_dd}%</div></div>
-        <div class="stat"><div class="sl">SHARPE</div><div class="sv" style="color:#00D4FF">${v.sharpe}</div></div>
-        <div class="stat"><div class="sl">PROFIT FACTOR</div><div class="sv" style="color:#FFD600">${v.pf}</div></div>
-      </div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
-    }else document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
-  }catch(e){document.getElementById("btm").innerHTML=`<div class="al er">✗ ${e.message}</div>`;}
-  btn.textContent="▶ KÒMANSE BACKTEST";btn.disabled=false;
-}
-
-function drawC(vals){
-  const W=500,H=110,p=8;
-  const mn=Math.min(...vals),mx=Math.max(...vals),rng=mx-mn||1;
-  const pts=vals.map((v,i)=>`${p+(i/(vals.length-1))*(W-p*2)},${H-p-((v-mn)/rng)*(H-p*2)}`).join(" ");
-  const area=`${p},${H} ${pts} ${W-p},${H}`;
-  const col=vals[vals.length-1]>=vals[0]?"#00FF88":"#FF3B6B";
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${area}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
-}
-
-function upd(d){
-  const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
-  const brokerLabel={"deriv":"DERIV","binance":"BINANCE","binance_us":"BINANCE US"}[d.broker]||(d.broker?d.broker.toUpperCase():"DISCONNECTED");
-  document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
-  document.getElementById("hbal").style.color=d.connected?"#00D4FF":"#3A6070";
-  document.getElementById("hb").textContent=brokerLabel;
-  document.getElementById("hb").style.color=d.connected?"#00FF88":"#3A6070";
-  document.getElementById("dot").className="dot "+(d.running?"dl":"di");
-  document.getElementById("hs").textContent=d.running?"LIVE":"IDLE";
-  document.getElementById("hs").style.color=d.running?"#00FF88":"#3A6070";
-  document.getElementById("s-bal").textContent="$"+d.balance.toFixed(2);
-  document.getElementById("s-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
-  document.getElementById("s-pnl").style.color=col;
-  document.getElementById("s-pnl2").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
-  document.getElementById("s-pnl2").style.color=col;
-  document.getElementById("s-sent").textContent="$"+d.profit_sent.toFixed(4);
-  document.getElementById("s-tr").textContent=d.trades.length;
-  document.getElementById("s-bot").textContent=d.running?"LIVE 🟢":"IDLE";
-  document.getElementById("s-bot").style.color=d.running?"#00FF88":"#3A6070";
-  document.getElementById("s-strat").textContent=d.config.strategy||"—";
-  document.getElementById("s-sym").textContent=d.config.symbol||"—";
-  document.getElementById("s-br2").textContent=brokerLabel;
-  document.getElementById("s-br2").style.color=d.connected?"#00FF88":"#3A6070";
-  document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"IDLE";
-  document.getElementById("c-st2").style.color=d.running?"#00FF88":"#3A6070";
-  document.getElementById("c-bal").textContent="$"+d.balance.toFixed(2);
-  document.getElementById("c-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
-  document.getElementById("c-pnl").style.color=col;
-  document.getElementById("c-sent").textContent="$"+d.profit_sent.toFixed(4);
-  if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
-  else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
-  if(d.trades.length>1){
-    let cum=0;
-    const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});
-    const svg=document.getElementById("chart");
-    const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;
-    const ns=tmp.firstChild;while(svg.firstChild)svg.removeChild(svg.firstChild);while(ns.firstChild)svg.appendChild(ns.firstChild);
-  }
-  if(d.trades.length){
-    document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
-    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side=="BUY"||t.side.includes("OVER")||t.side=="EVEN"?"tb":"ts"}">${t.side}</span></td><td>${t.entry}</td><td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
-  }
-  if(d.log.length){document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("");}
-}
-
-async function poll(){try{const r=await fetch("/api/status");const d=await r.json();upd(d);}catch(e){}setTimeout(poll,3000);}
-
-async function admRefresh(){
-  const token=getStoredToken();if(!token){alert("Pa konekte!");return;}
-  try{
-    const r=await fetch("/api/admin/codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
-    const d=await r.json();
-    if(d.ok){
-      const sc={"ADM":"#00D4FF","AKTIF":"#00FF88","ITILIZE":"#FF3B6B","EKSPIRE":"#4A7080"};
-      document.getElementById("adm-total").textContent=d.codes.length;
-      document.getElementById("adm-aktif").textContent=d.codes.filter(c=>c.status==="AKTIF").length;
-      document.getElementById("adm-used").textContent=d.codes.filter(c=>c.status==="ITILIZE").length;
-      document.getElementById("adm-sess").textContent=d.total_sessions;
-      document.getElementById("adm-codes-list").innerHTML=`<table><tr><th>KÒD</th><th>STATUS</th><th>RETE</th><th>TIP</th><th>AKSYON</th></tr>${d.codes.map(c=>`<tr><td style="font-weight:700">${c.code}</td><td><span class="tag" style="color:${sc[c.status]||"#4A7080"};border-color:${sc[c.status]||"#4A7080"}44">${c.status}</span></td><td style="color:#4A7080">${c.remaining}</td><td>${c.is_adm?"👑":"👤"}</td><td style="display:flex;gap:4px">${c.status!=="ADM"?`<button onclick="admReset('${c.code}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">↺</button>`:""} ${c.code!=="BONHEURWIIN"?`<button onclick="admRevoke('${c.code}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕</button>`:""}</td></tr>`).join("")}</table>`;
-    }
-  }catch(e){console.error(e);}
-  try{
-    const r2=await fetch("/api/admin/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
-    const d2=await r2.json();
-    if(d2.ok){
-      document.getElementById("adm-users-count").textContent=d2.total;
-      document.getElementById("adm-users-list").innerHTML=d2.total===0
-        ?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>'
-        :`<table><tr><th>UID</th><th>BROKER</th><th>SENBOL</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr>
-          <td style="color:#4A7080;font-size:10px">${u.uid}</td>
-          <td>${u.broker||"—"}</td>
-          <td style="font-weight:700">${u.symbol||"—"}</td>
-          <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
-          <td style="color:#00D4FF">$${u.balance}</td>
-          <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
-          <td>${u.trades}</td>
-          <td style="display:flex;gap:4px;align-items:center">
-            ${u.running?`<button onclick="admStopUser('${u.uid}')" title="Kanpe bot" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
-            <button onclick="admClearTrades('${u.uid}')" title="Efase trades sèlman" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button>
-            <button onclick="admClearUser('${u.uid}')" title="Efase tout (trades+log+pnl)" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
-          </td>
-        </tr>`).join("")}</table>`;
-    }
-  }catch(e){}
-  try{
-    const r3=await fetch("/api/admin/sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
-    const d3=await r3.json();
-    if(d3.ok){document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>':d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between"><span style="color:#4A7080">${s.token}</span><span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span><span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span></div>`).join("");}
-  }catch(e){}
-}
-
-async function admAddCode(){
-  const token=getStoredToken();const code=document.getElementById("new-code").value.trim().toUpperCase();
-  if(!code){document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>';return;}
-  const isAdm=document.getElementById("new-code-type").value==="adm";
-  const r=await fetch("/api/admin/add_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code,is_adm:isAdm})});
-  const d=await r.json();
-  document.getElementById("add-code-msg").innerHTML=`<div class="al ${d.ok?"ok":"er"}">${d.ok?d.msg:d.error}</div>`;
-  if(d.ok){document.getElementById("new-code").value="";admRefresh();}
-}
-async function admRevoke(code){if(!confirm(`Revoke ${code}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/revoke_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-async function admReset(code){const token=getStoredToken();const r=await fetch("/api/admin/reset_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-async function admClearUser(uid){
-  if(!confirm(`Efase TOUT istorik ${uid}?\n(trades + log + pnl reset)`))return;
-  const token=getStoredToken();
-  const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();
-}
-async function admClearTrades(uid){
-  if(!confirm(`Efase trades sèlman pou ${uid}?\n(log + pnl ap konsève)`))return;
-  const token=getStoredToken();
-  const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();
-}
-function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
-function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}
-checkLogin();
-</script>
-</body>
-</html>"""
-
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
-    logger.info(f"BonheurBot ELITE v6 — KONPLÈ (Robo1+Robo2) — port {port}")
-    app.run(host="0.0.0.0",port=port,debug=False,threaded=True)
+  const body={symbol:document.getElementById("bt-sy").value,strategy:

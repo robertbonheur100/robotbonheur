@@ -3,18 +3,11 @@
 ║     BONHEURBOT PRO v6 ELITE — underlying_symbol FIX         ║
 ║      Multi-User Trading Bot — Deriv + Binance               ║
 ║                                                             ║
-║  DERIV REST API PAT — KOREKSYON FINAL:                      ║
-║   ✅ proposal PAT   → "underlying_symbol" (pa "symbol")     ║
-║   ✅ digits PAT     → "underlying_symbol"                   ║
-║   ✅ klasik WS      → "symbol" (pa chanje)                  ║
-║                                                             ║
-║  STRATEGIES ELITE v6 (Robo 1 KONPLÈ):                       ║
-║   ✅ SuperTrend, Heikin Ashi, Chandelier Exit               ║
-║   ✅ VWAP, Fibonacci, FVG, Order Block, SMC                 ║
-║   ✅ Confluence Elite, Deriv Pro Elite                      ║
-║   ✅ Binance Gold ELITE, Binance Crypto ELITE               ║
-║   ✅ AI Score, EMA, RSI, MACD, Breakout, Stoch              ║
-║   ✅ Scalping Pro, Pivot Points                             ║
+║  KOREKSYON v6.1:                                            ║
+║   ✅ PNL kalkile ak contract result reyèl (won/lost)        ║
+║   ✅ Trade status "won"/"lost" kòrèk nan tableau            ║
+║   ✅ Balans mete ajou apre chak trade avèk bal reyèl        ║
+║   ✅ underlying_symbol FIX PAT toujou aktif                 ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -139,7 +132,7 @@ class DerivRESTClient:
             "Deriv-App-ID":  app_id,
             "Content-Type":  "application/json",
             "Accept":        "application/json",
-            "User-Agent":    "BonheurBot/6.0",
+            "User-Agent":    "BonheurBot/6.1",
         }
 
     def _get(self, path, params=None):
@@ -629,9 +622,6 @@ def calc_adx_full(candles, p=14):
     return round(adx, 2), round(pdi, 2), round(mdi, 2)
 
 
-# ═══════════════════════════════════════════════════════════
-# ██  SUPERTREND INDIKATÈ  ██
-# ═══════════════════════════════════════════════════════════
 def supertrend(candles, p=10, mult=3.0):
     if len(candles) < p + 5: return "NONE", 0.0
     highs  = [c["high"]  for c in candles]
@@ -664,9 +654,6 @@ def supertrend(candles, p=10, mult=3.0):
         return "SELL", conf
 
 
-# ═══════════════════════════════════════════════════════════
-# ██  CHANDELIER EXIT  ██
-# ═══════════════════════════════════════════════════════════
 def chandelier_exit(candles, p=22, mult=3.0):
     if len(candles) < p + 2: return "NONE", 0.0
     closes = [c["close"] for c in candles]
@@ -686,9 +673,6 @@ def chandelier_exit(candles, p=22, mult=3.0):
     return "NONE", 0.0
 
 
-# ═══════════════════════════════════════════════════════════
-# ██  HEIKIN ASHI TREND  ██
-# ═══════════════════════════════════════════════════════════
 def heikin_ashi_trend(candles, lookback=5):
     if len(candles) < lookback + 3: return "NONE", 0.0
     ha = []; prev_o = (candles[0]["open"]+candles[0]["close"])/2
@@ -715,9 +699,6 @@ def heikin_ashi_trend(candles, lookback=5):
     return "NONE", 0.0
 
 
-# ═══════════════════════════════════════════════════════════
-# ██  VWAP SIGNAL  ██
-# ═══════════════════════════════════════════════════════════
 def vwap_signal(candles, lookback=20):
     if len(candles) < lookback: return "NONE", 0.0
     recent=candles[-lookback:]; tpv=0.0; tv=0.0
@@ -733,9 +714,6 @@ def vwap_signal(candles, lookback=20):
     return "NONE", 0.0
 
 
-# ═══════════════════════════════════════════════════════════
-# STRATEGIES KLASIK
-# ═══════════════════════════════════════════════════════════
 def strat_ema(c):
     cl=[x["close"] for x in c]
     if len(cl)<25: return "NONE",0
@@ -902,9 +880,6 @@ def strat_scalping(c):
     return "NONE",0
 
 
-# ═══════════════════════════════════════════════════════════
-# ██████  CONFLUENCE ELITE v6  ██████
-# ═══════════════════════════════════════════════════════════
 def calc_pivot_points(candles):
     if len(candles) < 20: return None
     recent = candles[-20:]
@@ -1049,9 +1024,6 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     return "NONE", 0
 
 
-# ═══════════════════════════════════════════════════════════
-# ██████  DERIV PRO ELITE v6  ██████
-# ═══════════════════════════════════════════════════════════
 def strat_deriv_pro_elite(c):
     if len(c)<50: return "NONE",0
     cl=[x["close"] for x in c]
@@ -1174,11 +1146,7 @@ def strat_deriv_pro_elite(c):
     return "NONE", 0
 
 
-# ═══════════════════════════════════════════════════════════
-# STRATEGY ESPESYAL BINANCE
-# ═══════════════════════════════════════════════════════════
 def strat_binance_gold(c):
-    """Gold/Metals — EMA200 + ADX>20 + Volume + Pullback + SuperTrend"""
     if len(c)<60: return "NONE",0
     cl=[x["close"] for x in c]; vol=[x.get("volume",0) for x in c]
     e20=ema(cl,20); e50=ema(cl,50); e200=ema(cl,200) if len(cl)>=200 else ema(cl,100)
@@ -1226,7 +1194,6 @@ def strat_binance_gold(c):
     return "NONE",0
 
 def strat_binance_crypto(c):
-    """Crypto — EMA200 + ADX>18 + Volume surge + Pullback + SuperTrend"""
     if len(c)<50: return "NONE",0
     cl=[x["close"] for x in c]
     hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
@@ -1752,7 +1719,7 @@ def _refresh_balance(api,st):
 
 
 # ═══════════════════════════════════════════════════════════
-# TRADING LOOPS
+# ██████  FIX #1 — DIGITS TRADING LOOP — PNL KÒRÈK  ██████
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st,bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
@@ -1785,42 +1752,63 @@ def digits_trading_loop(st,bot_id=None):
             if sig=="NONE": add_log(st,"⏭ Pa gen siyal klè — tann 15sek..."); time.sleep(15); continue
             if conf<min_conf: add_log(st,f"⏭ Conf {conf:.0%} < {min_conf:.0%}"); time.sleep(15); continue
             add_log(st,f"✅ Siyal | {sig} | Conf:{conf:.0%} | Mise:${current_lot:.2f}")
-            bal_before=st["balance"]
+            # ══ SNAPSHOT BALANS ANVAN TRADE ══
+            bal_snapshot = st["balance"]
             try:
                 r=api.place_digits_trade(symbol,contract_type,current_lot,barrier)
                 cid=r.get("contract_id")
                 if not cid: add_log(st,"Trade echwe — pa gen contract_id","ERROR"); time.sleep(10); continue
-                bal_open=float(r.get("balance_after",bal_before-current_lot)); st["balance"]=bal_open
-                add_log(st,f"⏳ #{cid} | {sig} | Ap tann rezilta reyèl...","SUCCESS")
+                # balans imedyatman apre achat (deduksyon mise)
+                bal_open=float(r.get("balance_after", bal_snapshot - current_lot))
+                st["balance"]=bal_open
+                add_log(st,f"⏳ #{cid} | {sig} | Ap tann rezilta...","SUCCESS")
+
+                # ══ TANN REZILTA REYÈL ══
                 result=api.wait_contract_result(cid,timeout=35)
                 pnl=0.0; won=False
+
                 if result:
                     status=result.get("status","")
-                    buy_price=float(result.get("buy_price",current_lot))
-                    sell_price=float(result.get("sell_price",0))
+                    buy_price=float(result.get("buy_price", current_lot))
+                    sell_price=float(result.get("sell_price", 0))
+
                     if status=="won":
-                        pnl=sell_price-buy_price; won=True
-                        add_log(st,f"✅ WON! +${pnl:.2f} | Bal:${bal_open+pnl:.2f}","SUCCESS")
+                        # ✅ FIX: pnl = gain net (payout - mise)
+                        pnl = sell_price - buy_price
+                        won = True
+                        new_bal = bal_open + sell_price  # remboursè mise + pwofi
+                        st["balance"] = new_bal
+                        add_log(st,f"✅ WON! +${pnl:.2f} | Bal:${new_bal:.2f}","SUCCESS")
+
                     elif status=="lost":
-                        pnl=-buy_price; won=False
+                        # ✅ FIX: pnl = -mise (vre pèt)
+                        pnl = -buy_price
+                        won = False
+                        # balans deja dedwi lè nou achte
+                        st["balance"] = bal_open
                         add_log(st,f"❌ LOST -${buy_price:.2f} | Bal:${bal_open:.2f}","WARN")
+
                     else:
+                        # statut enkoni — verifye balans reyèl
                         time.sleep(5)
                         nb=api.get_balance_sync()
                         if nb and nb>0:
-                            pnl=nb-bal_before; st["balance"]=nb; won=pnl>0
+                            pnl=nb-bal_snapshot; st["balance"]=nb; won=pnl>0.01
                         else:
-                            pnl=-current_lot
+                            pnl=-current_lot; won=False
                 else:
+                    # timeout — kalkile pnl ak balans reyèl
                     time.sleep(5)
                     nb=api.get_balance_sync()
                     if nb and nb>0:
-                        st["balance"]=nb; pnl=nb-bal_before; won=pnl>0.01
+                        st["balance"]=nb; pnl=nb-bal_snapshot; won=pnl>0.01
                     else:
                         pnl=-current_lot; won=False
-                if result and result.get("status")=="won":
-                    st["balance"]=bal_open+pnl
-                if won: current_lot=base_lot; consec_losses=0; total_lost=0.0
+                        add_log(st,"⚠ Timeout rezilta — pran kòm pèt","WARN")
+
+                # ══ MARTINGALE / RESET ══
+                if won:
+                    current_lot=base_lot; consec_losses=0; total_lost=0.0
                 else:
                     loss=abs(pnl) if abs(pnl)>0.01 else current_lot
                     total_lost+=loss; consec_losses+=1
@@ -1832,21 +1820,39 @@ def digits_trading_loop(st,bot_id=None):
                         add_log(st,f"🔄 Reset apre 4 pèt | Total pèdi:${total_lost:.2f} | Tann 90sek...","WARN")
                         current_lot=base_lot; consec_losses=0; total_lost=0.0
                         time.sleep(90)
-                trade={"id":len(st["trades"])+1,"time":datetime.now().strftime("%H:%M:%S"),
-                    "symbol":symbol,"side":sig,"entry":round(ticks[-1]["price"],5),
-                    "conf":f"{conf:.0%}","strategy":f"Digits-{digit_type}","tf":"ticks",
-                    "stake":round(current_lot,2),"pnl":round(pnl,2),
-                    "status":"won" if won else "lost","regime":"—"}
-                st["trades"].insert(0,trade); st["total_pnl"]+=pnl
+
+                # ══ ANREJISTRE TRADE AK PNL KÒRÈK ══
+                trade={
+                    "id":len(st["trades"])+1,
+                    "time":datetime.now().strftime("%H:%M:%S"),
+                    "symbol":symbol,
+                    "side":sig,
+                    "entry":round(ticks[-1]["price"],5),
+                    "conf":f"{conf:.0%}",
+                    "strategy":f"Digits-{digit_type}",
+                    "tf":"ticks",
+                    "stake":round(current_lot,2),
+                    "pnl":round(pnl,2),           # ✅ PNL REYÈL
+                    "status":"won" if won else "lost",  # ✅ STATUS KÒRÈK
+                    "regime":"—"
+                }
+                st["trades"].insert(0,trade)
+                st["total_pnl"]+=pnl   # ✅ AKIMILE PNL KÒRÈK
+
+                # ══ PROFIT 5% ══
                 if won and pnl>0:
                     ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
                     if ps>=0.50:
                         try: api.transfer_to_account("CR9560099",ps); add_log(st,f"💸 5%:${ps}","PROFIT")
                         except: pass
+
                 add_log(st,"⏸ Tann 10sek...")
                 time.sleep(10)
-            except Exception as e: add_log(st,f"Digits trade echwe: {e}","ERROR"); time.sleep(15)
-        except Exception as e: add_log(st,f"Erè digits loop: {e}","ERROR"); time.sleep(15)
+
+            except Exception as e:
+                add_log(st,f"Digits trade echwe: {e}","ERROR"); time.sleep(15)
+        except Exception as e:
+            add_log(st,f"Erè digits loop: {e}","ERROR"); time.sleep(15)
     add_log(st,"⏹ Digits Bot arrêté")
 
 
@@ -1953,6 +1959,9 @@ def binance_trading_loop(st,bot_id=None):
     add_log(st,"⏹ Binance Bot arrêté")
 
 
+# ═══════════════════════════════════════════════════════════
+# ██████  FIX #2 — MAIN TRADING LOOP — PNL + STATUS KÒRÈK ██
+# ═══════════════════════════════════════════════════════════
 def trading_loop(st,bot_id=None):
     if bot_id and st.get("bot_id")!=bot_id: return
     cfg=st["config"]; symbol=cfg.get("symbol","R_100"); strategy=cfg.get("strategy","confluence")
@@ -1961,7 +1970,7 @@ def trading_loop(st,bot_id=None):
     wait_after=tf+90; base_lot=round(max(0.5,lot),2); current_lot=base_lot
     consec_losses=0; total_lost=0.0
     MAX_LOSSES_BEFORE_PAUSE=3; PAUSE_WAIT_SECS=45
-    add_log(st,f"🚀 BonheurBot ELITE v6 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
+    add_log(st,f"🚀 BonheurBot ELITE v6.1 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
     add_log(st,f"📌 SuperTrend+HA+Chandelier | ADX>12 | 3 strategies minimum")
     while st["running"]:
         if bot_id and st.get("bot_id")!=bot_id: add_log(st,"⏹ Bot anile","WARN"); return
@@ -2036,79 +2045,147 @@ def trading_loop(st,bot_id=None):
             add_log(st,
                 f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | "
                 f"ST:{st_sig} | HA:{ha_sig} | Mise:${current_lot:.2f}{pivot_info}")
-            bal_before=st["balance"]; pnl=0.0; ok=False
+
+            # ══ SNAPSHOT BALANS ANVAN TRADE ══
+            bal_snapshot = st["balance"]
+            pnl=0.0; won=False; trade_ok=False
+
             try:
                 r=api.place_trade(symbol,sig,max(0.5,current_lot),duration_secs=tf)
-                if r.get("contract_id"):
-                    cid=r["contract_id"]; bal_open=float(r.get("balance_after",bal_before-current_lot))
-                    st["balance"]=bal_open; ok=True
-                    add_log(st,f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...","SUCCESS")
-                    time.sleep(wait_after)
-                    bal_close=None
-                    for attempt in range(5):
-                        try:
-                            nb=api.get_balance_sync()
-                            if nb and nb>0 and abs(nb-bal_open)>0.01:
-                                bal_close=nb; break
-                            time.sleep(max(30,tf//4))
-                        except: time.sleep(30)
-                    if bal_close:
-                        st["balance"]=bal_close; pnl=bal_close-bal_before
-                        if pnl>0.10: add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}","SUCCESS")
-                        else: add_log(st,f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}","WARN")
+                cid=r.get("contract_id")
+                if not cid:
+                    add_log(st,"Trade echwe — pa gen contract_id","ERROR")
+                    time.sleep(30); continue
+
+                # balans imedyatman apre achat
+                bal_open=float(r.get("balance_after", bal_snapshot - current_lot))
+                st["balance"]=bal_open
+                trade_ok=True
+                add_log(st,f"⏳ #{cid} | Ap tann rezilta reyèl ({wait_after//60}min {wait_after%60}s)...","SUCCESS")
+
+                # ══ TANN KONTRA FINI ══
+                time.sleep(wait_after)
+
+                # ══ VERIFYE REZILTA PAR KONTRA (pi presiz) ══
+                result = None
+                try:
+                    result = api.wait_contract_result(cid, timeout=60)
+                except Exception as re:
+                    logger.warning(f"wait_contract_result: {re}")
+
+                if result:
+                    status = result.get("status","")
+                    buy_price = float(result.get("buy_price", current_lot))
+                    sell_price = float(result.get("sell_price", 0))
+
+                    if status == "won":
+                        # ✅ FIX: gain net reyèl
+                        pnl = sell_price - buy_price
+                        won = True
+                        new_bal = bal_open + sell_price
+                        st["balance"] = new_bal
+                        add_log(st,f"✅ GENYEN! +${pnl:.2f} | Bal:${new_bal:.2f}","SUCCESS")
+
+                    elif status == "lost":
+                        # ✅ FIX: pèt = -mise
+                        pnl = -buy_price
+                        won = False
+                        st["balance"] = bal_open  # balans deja dedwi
+                        add_log(st,f"❌ PÈDI ${buy_price:.2f} | Bal:${bal_open:.2f}","WARN")
+
                     else:
-                        pnl=-(bal_before-bal_open)
-                        add_log(st,f"❌ PÈDI (timeout) ${abs(pnl):.2f}","WARN")
-            except Exception as e: add_log(st,f"Trade echwe: {e}","ERROR")
-            if ok:
-                if pnl>0:
-                    prev_losses=consec_losses
-                    current_lot=base_lot; consec_losses=0; total_lost=0.0
-                    if prev_losses>0:
+                        # statut enkoni — fallback balans reyèl
+                        nb = api.get_balance_sync()
+                        if nb and nb > 0:
+                            pnl = nb - bal_snapshot
+                            st["balance"] = nb
+                            won = pnl > 0.01
+                        else:
+                            pnl = -(bal_snapshot - bal_open)
+                            won = pnl > 0
+                        add_log(st,f"{'✅' if won else '❌'} Statut:{status} | PNL:${pnl:.2f}","WARN")
+
+                else:
+                    # Kontra pa jwenn — verifye balans reyèl
+                    for attempt in range(3):
+                        time.sleep(15)
+                        try:
+                            nb = api.get_balance_sync()
+                            if nb and nb > 0 and abs(nb - bal_open) > 0.01:
+                                pnl = nb - bal_snapshot
+                                st["balance"] = nb
+                                won = pnl > 0.01
+                                add_log(st,f"{'✅' if won else '❌'} (balans) PNL:${pnl:.2f} | Bal:${nb:.2f}","INFO")
+                                break
+                        except: pass
+                    else:
+                        pnl = -(bal_snapshot - bal_open)
+                        won = False
+                        add_log(st,f"⚠ Pa jwenn rezilta — pran kòm pèt ${abs(pnl):.2f}","WARN")
+
+            except Exception as e:
+                add_log(st,f"Trade echwe: {e}","ERROR")
+                time.sleep(30); continue
+
+            if trade_ok:
+                # ══ MARTINGALE / RESET ══
+                if won and pnl > 0:
+                    prev_losses = consec_losses
+                    current_lot = base_lot; consec_losses = 0; total_lost = 0.0
+                    if prev_losses > 0:
                         add_log(st,f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}","SUCCESS")
                     else:
                         add_log(st,f"✅ Genyen +${pnl:.2f}","SUCCESS")
                 else:
-                    loss=abs(pnl) if abs(pnl)>0.01 else current_lot
-                    total_lost+=loss; consec_losses+=1
-                    if consec_losses<MAX_LOSSES_BEFORE_PAUSE:
-                        next_lot=round((total_lost+base_lot)/0.95,2)
-                        current_lot=max(0.5,min(next_lot,100.0))
+                    loss = abs(pnl) if abs(pnl) > 0.01 else current_lot
+                    total_lost += loss; consec_losses += 1
+                    if consec_losses < MAX_LOSSES_BEFORE_PAUSE:
+                        next_lot = round((total_lost + base_lot) / 0.95, 2)
+                        current_lot = max(0.5, min(next_lot, 100.0))
                         add_log(st,
                             f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
                             f"Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}","WARN")
                     else:
-                        next_lot=round((total_lost+base_lot)/0.95,2)
-                        current_lot=max(0.5,min(next_lot,100.0))
+                        next_lot = round((total_lost + base_lot) / 0.95, 2)
+                        current_lot = max(0.5, min(next_lot, 100.0))
                         add_log(st,
                             f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | "
                             f"Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f} | "
                             f"Ap tann mache...","WARN")
-                trade={
-                    "id":len(st["trades"])+1,
-                    "time":datetime.now().strftime("%H:%M:%S"),
-                    "symbol":symbol,"side":sig,
-                    "entry":round(entry,5),
-                    "conf":f"{conf:.0%}",
-                    "strategy":strategy,
-                    "tf":f"{tf//60}min",
-                    "stake":round(current_lot,2),
-                    "pnl":round(pnl,2),
-                    "status":"won" if pnl>0 else "lost",
-                    "regime":regime,
+
+                # ══ ANREJISTRE TRADE AK PNL + STATUS KÒRÈK ══
+                trade = {
+                    "id":       len(st["trades"]) + 1,
+                    "time":     datetime.now().strftime("%H:%M:%S"),
+                    "symbol":   symbol,
+                    "side":     sig,
+                    "entry":    round(entry, 5),
+                    "conf":     f"{conf:.0%}",
+                    "strategy": strategy,
+                    "tf":       f"{tf//60}min",
+                    "stake":    round(current_lot, 2),
+                    "pnl":      round(pnl, 2),           # ✅ PNL REYÈL
+                    "status":   "won" if won else "lost", # ✅ STATUS KÒRÈK
+                    "regime":   regime,
                 }
-                st["trades"].insert(0,trade); st["total_pnl"]+=pnl
-                if pnl>0:
-                    ps=round(pnl*PROFIT_PCT,2); st["profit_sent"]+=ps
-                    if ps>=0.5:
+                st["trades"].insert(0, trade)
+                st["total_pnl"] += pnl  # ✅ AKIMILE KÒRÈK
+
+                # ══ PROFIT 5% ══
+                if won and pnl > 0:
+                    ps = round(pnl * PROFIT_PCT, 2)
+                    st["profit_sent"] += ps
+                    if ps >= 0.5:
                         try:
-                            api.transfer_to_account("CR9560099",ps)
-                            add_log(st,f"💸 5%:${ps} → CR9560099","PROFIT")
+                            api.transfer_to_account("CR9560099", ps)
+                            add_log(st, f"💸 5%:${ps} → CR9560099", "PROFIT")
                         except Exception as e:
-                            add_log(st,f"Transfer echwe: {e}","ERROR")
-        except Exception as e: add_log(st,f"Erè: {e}","ERROR")
+                            add_log(st, f"Transfer echwe: {e}", "ERROR")
+
+        except Exception as e:
+            add_log(st, f"Erè: {e}", "ERROR")
         time.sleep(tf)
-    add_log(st,"⏹ BonheurBot ELITE v6 arrêté")
+    add_log(st, "⏹ BonheurBot ELITE v6.1 arrêté")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2143,10 +2220,8 @@ def api_connect():
                     api_main._bal=balance; api_main._loginid=loginid
                     if loginid and loginid!="PAT_USER":
                         api_main._account_id=loginid
-                        logger.info(f"Fallback account_id = loginid: {loginid}")
                 if not api_main._account_id:
                     api_main._account_id=loginid or ""
-                    logger.warning(f"account_id toujou vide — sèvi ak loginid: {loginid}")
                 add_log(st,f"PAT account_id: '{api_main._account_id}' | loginid: '{api_main._loginid}'","INFO")
                 api_digits=DerivDigitsClient(raw_token,app_id)
                 api_digits._bal=api_main._bal
@@ -2380,13 +2455,13 @@ def index(): return render_template_string(HTML)
 
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — v6 ELITE
+# HTML INTERFACE — v6.1 ELITE
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>💰 BonheurBot v6 ELITE</title>
+<title>💰 BonheurBot v6.1 ELITE</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;900&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2439,7 +2514,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl v6 ELITE</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl v6.1 ELITE</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
       <input id="login-code" type="text" placeholder="BB-XXXX-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
@@ -2464,7 +2539,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
-    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6</span></div>
+    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">ELITE v6.1</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
     <span id="h-tok-type" style="display:none"></span>
@@ -2495,6 +2570,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="stat"><div class="sl">NET P&L</div><div class="sv" id="s-pnl">+$0.00</div></div>
     <div class="stat"><div class="sl">PROFIT VOYE</div><div class="sv" id="s-sent" style="color:#FFD600">$0.00</div></div>
     <div class="stat"><div class="sl">TRADES</div><div class="sv" id="s-tr" style="color:#FFD600">0</div></div>
+    <div class="stat"><div class="sl">WIN RATE</div><div class="sv" id="s-wr" style="color:#00FF88">—</div></div>
     <div class="stat"><div class="sl">BOT</div><div class="sv" id="s-bot" style="color:#3A6070">IDLE</div></div>
   </div>
   <div class="g2">
@@ -2509,15 +2585,15 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
       <div id="fd">
         <div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:12px;margin-bottom:12px">
-          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ DUAL CLIENT — underlying_symbol FIX</div>
+          <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ DUAL CLIENT — underlying_symbol FIX v6.1</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:8px">
               <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:4px">✅ TOKEN KLASIK (REKÒMANDE)</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">PA kòmanse ak <code>pat_</code><br>→ WebSocket ws.derivws.com<br>proposal: "symbol" ✅<br>App ID: <b>1089</b></div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">PA kòmanse ak <code>pat_</code><br>→ WebSocket ws.derivws.com<br>proposal: "symbol" ✅<br>PNL: contract result reyèl ✅</div>
             </div>
             <div style="background:#FFD60010;border:1px solid #FFD60030;border-radius:6px;padding:8px">
               <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:4px">⚡ TOKEN PAT (pat_xxx)</div>
-              <div style="color:#4A7080;font-size:9px;line-height:1.8">→ REST Bearer + OTP WS<br>proposal: "underlying_symbol" ✅<br>FIX KÒRÈK aktif</div>
+              <div style="color:#4A7080;font-size:9px;line-height:1.8">→ REST Bearer + OTP WS<br>proposal: "underlying_symbol" ✅<br>PNL: buy_price/sell_price ✅</div>
             </div>
           </div>
         </div>
@@ -2555,33 +2631,35 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
   </div>
   <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-    <div class="bt" style="color:#00FF88">🚀 SISTÈM ELITE v6 — STRATEGIES KONPLÈ</div>
+    <div class="bt" style="color:#00FF88">🚀 v6.1 — FIX PNL + STATUS TRADES KÒRÈK</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
       <div>
-        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 SuperTrend</div>
-        ATR x3.0 multiplier<br>Siyal klè BUY/SELL<br>
-        <span style="color:#00FF88">Pwa: 2.5x (pi wo)</span><br>
-        Travèse = siyal solid<br>
-        <span style="color:#00FF88">→ Pi reliable pou synthetic</span>
+        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">✅ FIX #1 — PNL Reyèl</div>
+        Kalkile: sell_price - buy_price<br>
+        WON: pnl = pwofi net ✅<br>
+        LOST: pnl = -mise ✅<br>
+        <span style="color:#00FF88">→ Pa konte balans diferans</span>
       </div>
       <div>
-        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">🕯 Heikin Ashi</div>
-        5 bouji konsekitif<br>Filtre bwi mache<br>
-        <span style="color:#FFD600">Pwa: 2.5x (pi wo)</span><br>
-        Grandi = plis konfidans<br>
-        <span style="color:#FFD600">→ Trend pi klè</span>
+        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">✅ FIX #2 — Status Kòrèk</div>
+        "won"/"lost" soti nan<br>
+        contract result reyèl<br>
+        pa fè estimasyon<br>
+        <span style="color:#FFD600">→ Tableau trades egzak</span>
       </div>
       <div>
-        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🔔 Chandelier Exit</div>
-        Highest high/lowest low<br>Chanjman trend detekte<br>
-        <span style="color:#00D4FF">Pwa: 2.5x (pi wo)</span><br>
-        ATR x3.0 distans<br>
-        <span style="color:#00D4FF">→ Siyal konfimasyon</span>
+        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">✅ FIX #3 — Balans Ajou</div>
+        Apre WON: bal + sell_price<br>
+        Apre LOST: bal = bal_open<br>
+        Fallback: get_balance_sync<br>
+        <span style="color:#00D4FF">→ Balans toujou kòrèk</span>
       </div>
       <div>
-        <div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛡 ADX 12 + 3 strat</div>
-        ADX sèyil: 12<br>3 strategies dakò min<br>RANGING oke si ST+HA<br>Pause 3 pèt konsève<br>
-        <span style="color:#FF3B6B">→ Plis siyal, presizyon</span>
+        <div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">✅ FIX #4 — Win Rate</div>
+        Kalkile soti nan trades reyèl<br>
+        Afiche nan dashboard<br>
+        % genyen vs total<br>
+        <span style="color:#FF3B6B">→ Statistik kòrèk</span>
       </div>
     </div>
   </div>
@@ -2590,7 +2668,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
-      <div class="bt">PARAMÈT BOT ELITE v6</div>
+      <div class="bt">PARAMÈT BOT ELITE v6.1</div>
       <div class="iw"><div class="il">MOD TRADING</div>
         <select id="c-mode" onchange="toggleMode()">
           <option value="forex">📈 Rise/Fall — Deriv Synthetic</option>
@@ -2636,11 +2714,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               <option value="rsi">📉 RSI Classic</option>
             </select>
           </div>
-        </div>
-        <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:10px;font-size:10px;color:#4A7080;line-height:1.8">
-          ★★★ <span style="color:#00FF88">Confluence ELITE</span> = SuperTrend + HA + Chandelier + 10 strat<br>
-          ★★★ <span style="color:#FFD600">15min/1h</span> = pi bon timeframe pou synthetic<br>
-          💡 ADX≥12 + 3 strat dakò → siyal souvan e presiz
         </div>
       </div>
       <div id="opts-digits" style="display:none">
@@ -2741,18 +2814,18 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
         <div class="stats">
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
+          <div class="stat"><div class="sl">WIN RATE</div><div id="c-wr" class="sv" style="color:#00FF88">—</div></div>
           <div class="stat"><div class="sl">PROFIT 5%</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
         </div>
       </div>
       <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">🧠 ELITE v6 — LOJIK SIYAL</div>
+        <div class="bt" style="color:#00FF88">✅ v6.1 — KOREKSYON APLIKE</div>
         <div style="color:#4A7080;font-size:10px;line-height:2.1">
-          <span style="color:#00FF88">✓ SuperTrend:</span> ATR×3 — BUY/SELL klè<br>
-          <span style="color:#00FF88">✓ Heikin Ashi:</span> 5 bouji — trend konfime<br>
-          <span style="color:#00FF88">✓ Chandelier:</span> HH/LL — chanjman detekte<br>
-          <span style="color:#FFD600">⚠ 1-2 pèt:</span> Conf+2-4%, mise monte<br>
-          <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann siyal bon<br>
-          <span style="color:#00D4FF">✓ RANGING:</span> Trade si ST+HA dakò
+          <span style="color:#00FF88">✓ PNL WON:</span> sell_price - buy_price (net)<br>
+          <span style="color:#00FF88">✓ PNL LOST:</span> -buy_price (mise pèdi)<br>
+          <span style="color:#FFD600">✓ STATUS:</span> "won"/"lost" soti kontra reyèl<br>
+          <span style="color:#00D4FF">✓ BALANS:</span> ajou apre chak trade egzak<br>
+          <span style="color:#FF3B6B">✓ WIN RATE:</span> kalkile otomatik
         </div>
       </div>
     </div>
@@ -2864,21 +2937,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div id="adm-users-list"><div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH</div></div>
   </div>
-  <div class="box" style="background:#FFD60008;border-color:#FFD60022">
-    <div class="bt" style="color:#FFD600">📊 LEJANN BOUTON AKSYON ITILIZATÈ</div>
-    <div style="font-size:11px;color:#4A7080;line-height:2.0">
-      <span style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 8px">📊🗑</span> — Efase <b style="color:#FFD600">trades sèlman</b> (log + pnl konsève)<br>
-      <span style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 8px">🗑</span> — Efase <b style="color:#C8E8F0">TOUT</b> (trades + log + pnl reset)<br>
-      <span style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 8px">■ STOP</span> — Kanpe bot itilizatè a
-    </div>
-  </div>
 </div>
 
 </div>
 </div>
 
 <script>
-const SESSION_KEY="bb_session_v6";
+const SESSION_KEY="bb_session_v61";
 function saveToken(t){try{localStorage.setItem(SESSION_KEY,t);}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t);}catch(e){}try{const exp=new Date();exp.setDate(exp.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${exp.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
 function clearToken(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}try{sessionStorage.removeItem(SESSION_KEY);}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;}catch(e){}}
@@ -2927,10 +2992,10 @@ function autoDetectToken(){
   const hint=document.getElementById("tok-hint");
   if(val.startsWith("pat_")){
     badge.style.display="inline";badge.className="bp";badge.textContent="⚡ PAT→underlying_symbol";
-    hint.innerHTML='<span style="color:#FFD600">⚡ PAT → OTP WS → "underlying_symbol" ✅ FIX AKTIF</span>';
+    hint.innerHTML='<span style="color:#FFD600">⚡ PAT → OTP WS → "underlying_symbol" ✅ + PNL reyèl ✅</span>';
   }else if(val.length>10){
     badge.style.display="inline";badge.className="bk";badge.textContent="✅ KLASIK→symbol";
-    hint.innerHTML='<span style="color:#00FF88">✅ Token Klasik → WS → "symbol" ✅ kòrèk</span>';
+    hint.innerHTML='<span style="color:#00FF88">✅ Token Klasik → WS → "symbol" ✅ + PNL reyèl ✅</span>';
   }else{
     badge.style.display="none";
     hint.innerHTML='Token Klasik PA kòmanse ak <code>pat_</code>';
@@ -2976,17 +3041,17 @@ function getStartParams(){
 }
 
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"v6 NOUVO: SuperTrend(pwa 2.5x) + HeikinAshi(pwa 2.5x) + Chandelier(pwa 2.5x) + 10 strategies klasik. ADX≥12, 3 strat minimòm, RANGING oke si ST+HA dakò.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
-  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"v6: Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. EMA 1 bouji sèlman. Plis siyal, menm presizyon.",tags:["score 5/15","ADX≥12","ST bonus","1 bouji EMA"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0 multiplier. Siyal klè BUY/SELL. Travèse bann = siyal solid. Pi reliable pou Deriv synthetic.",tags:["ATR×3","bann sup/res","travèse=BUY","conf 75-92%"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid. Filtre bwi mache. Bouji grandi = plis konfidans.",tags:["5 bouji","filtre bwi","bouji grandi","conf 72-83%"]},
-  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short). Chanjman trend detekte an tan reyèl.",tags:["HH-ATR×3","LL+ATR×3","chanjman trend","conf 75-90%"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend. Score nòmalize.",tags:["8 faktè","pwa","score nòm","conf 68-92%"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre. Siyal presiz.",tags:["BOS","swing","EMA50","conf 84%"]},
-  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","1m/5m","rapid"]},
-  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
-  binance_gold:{l:"🥇 Gold Strategy",d:"Espesyal XAU/USD: EMA200+ADX>20+Volume+RSI+MACD+BB+Stoch+SuperTrend. 7+ pts.",tags:["EMA 20/50/200","ADX>20","Volume","SuperTrend","7+ pts"]},
-  binance_crypto:{l:"🪙 Crypto Strategy",d:"Espesyal Binance: EMA200+ADX>18+Volume surge+RSI+MACD+BB+Breakout+SuperTrend. 8+ pts.",tags:["EMA 9/21/50/200","ADX>18","Volume surge","Breakout","8+ pts"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"v6.1: SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+10 strategies. ADX≥12, 3 strat min. PNL kalkile ak contract result reyèl.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","PNL reyèl"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5/15 + ADX≥12 + SuperTrend bonus. PNL soti buy_price/sell_price.",tags:["score 5/15","ADX≥12","ST bonus","PNL reyèl"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0. Siyal BUY/SELL klè. Plis reliable pou Deriv synthetic.",tags:["ATR×3","BUY/SELL","conf 75-92%"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif. Filtre bwi. Bouji grandi = plis konfidans.",tags:["5 bouji","filtre","conf 72-83%"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"HH-ATR×3 long. LL+ATR×3 short. Chanjman trend an tan reyèl.",tags:["HH-ATR×3","LL+ATR×3","conf 75-90%"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["8 faktè","pwa","conf 68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50.",tags:["BOS","swing","EMA50","conf 84%"]},
+  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m/5m.",tags:["EMA 5/13","RSI 9","rapid"]},
+  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50.",tags:["RSI 14","OB 70","OS 30"]},
+  binance_gold:{l:"🥇 Gold Strategy",d:"EMA200+ADX>20+Volume+RSI+MACD+BB+Stoch+SuperTrend. 7+ pts.",tags:["EMA200","ADX>20","Volume","7+ pts"]},
+  binance_crypto:{l:"🪙 Crypto Strategy",d:"EMA200+ADX>18+Volume surge+Breakout+SuperTrend. 8+ pts.",tags:["EMA200","ADX>18","Volume","8+ pts"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
@@ -3045,7 +3110,7 @@ async function doStart(){
   const body=getStartParams();
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
-  if(d.ok){msg("ctm","✓ BonheurBot ELITE v6 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
+  if(d.ok){msg("ctm","✓ BonheurBot ELITE v6.1 démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else msg("ctm","✗ "+d.error,false);
 }
 async function doStop(){
@@ -3090,9 +3155,22 @@ function drawC(vals){
   return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${area}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
 }
 
+// ══════════════════════════════════════
+// FIX FRONTEND: kalkile win rate otomatik
+// ══════════════════════════════════════
+function calcWinRate(trades){
+  if(!trades||trades.length===0) return "—";
+  const closed=trades.filter(t=>t.status==="won"||t.status==="lost");
+  if(closed.length===0) return "—";
+  const wins=closed.filter(t=>t.status==="won").length;
+  return Math.round(wins/closed.length*100)+"%";
+}
+
 function upd(d){
   const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
   const brokerLabel={"deriv":"DERIV","binance":"BINANCE","binance_us":"BINANCE US"}[d.broker]||(d.broker?d.broker.toUpperCase():"DISCONNECTED");
+  const wr=calcWinRate(d.trades);
+
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("hbal").style.color=d.connected?"#00D4FF":"#3A6070";
   document.getElementById("hb").textContent=brokerLabel;
@@ -3100,6 +3178,7 @@ function upd(d){
   document.getElementById("dot").className="dot "+(d.running?"dl":"di");
   document.getElementById("hs").textContent=d.running?"LIVE":"IDLE";
   document.getElementById("hs").style.color=d.running?"#00FF88":"#3A6070";
+
   document.getElementById("s-bal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("s-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
   document.getElementById("s-pnl").style.color=col;
@@ -3107,20 +3186,28 @@ function upd(d){
   document.getElementById("s-pnl2").style.color=col;
   document.getElementById("s-sent").textContent="$"+d.profit_sent.toFixed(4);
   document.getElementById("s-tr").textContent=d.trades.length;
+  document.getElementById("s-wr").textContent=wr;   // ✅ WIN RATE
+  document.getElementById("s-wr").style.color=wr==="—"?"#3A6070":"#00FF88";
   document.getElementById("s-bot").textContent=d.running?"LIVE 🟢":"IDLE";
   document.getElementById("s-bot").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("s-strat").textContent=d.config.strategy||"—";
   document.getElementById("s-sym").textContent=d.config.symbol||"—";
   document.getElementById("s-br2").textContent=brokerLabel;
   document.getElementById("s-br2").style.color=d.connected?"#00FF88":"#3A6070";
+
   document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"IDLE";
   document.getElementById("c-st2").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("c-bal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("c-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
   document.getElementById("c-pnl").style.color=col;
+  document.getElementById("c-wr").textContent=wr;   // ✅ WIN RATE KONTWÒL
+  document.getElementById("c-wr").style.color=wr==="—"?"#3A6070":"#00FF88";
   document.getElementById("c-sent").textContent="$"+d.profit_sent.toFixed(4);
+
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
+
+  // COURBE P&L
   if(d.trades.length>1){
     let cum=0;
     const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});
@@ -3128,10 +3215,33 @@ function upd(d){
     const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;
     const ns=tmp.firstChild;while(svg.firstChild)svg.removeChild(svg.firstChild);while(ns.firstChild)svg.appendChild(ns.firstChild);
   }
+
+  // TABLEAU TRADES — afiche won/lost kòrèk
   if(d.trades.length){
-    document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
-    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side=="BUY"||t.side.includes("OVER")||t.side=="EVEN"?"tb":"ts"}">${t.side}</span></td><td>${t.entry}</td><td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
+    document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length}) — Win Rate: ${wr}`;
+    document.getElementById("trtbl").innerHTML=`<table>
+      <tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>
+      ${d.trades.map(t=>{
+        const isWon=t.status==="won";
+        const isLost=t.status==="lost";
+        const pnlColor=t.pnl>0?"#00FF88":(t.pnl<0?"#FF3B6B":"#4A7080");
+        const pnlSign=t.pnl>0?"+":"";
+        return `<tr>
+          <td style="color:#4A7080">${t.id}</td>
+          <td style="color:#4A7080">${t.time}</td>
+          <td style="font-weight:700">${t.symbol}</td>
+          <td><span class="tag ${t.side=="BUY"||t.side.includes("OVER")||t.side=="EVEN"?"tb":"ts"}">${t.side}</span></td>
+          <td>${t.entry}</td>
+          <td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td>
+          <td style="color:#FFD600">$${t.stake||"—"}</td>
+          <td style="color:#FFD600">${t.conf}</td>
+          <td style="color:${pnlColor};font-weight:700">${pnlSign}$${Math.abs(t.pnl||0).toFixed(2)}</td>
+          <td><span class="tag ${isWon?"tb":(isLost?"ts":"tg")}">${t.status||"—"}</span></td>
+        </tr>`;
+      }).join("")}
+    </table>`;
   }
+
   if(d.log.length){document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("");}
 }
 
@@ -3169,7 +3279,7 @@ async function admRefresh(){
           <td style="display:flex;gap:4px;align-items:center">
             ${u.running?`<button onclick="admStopUser('${u.uid}')" title="Kanpe bot" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
             <button onclick="admClearTrades('${u.uid}')" title="Efase trades sèlman" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button>
-            <button onclick="admClearUser('${u.uid}')" title="Efase tout (trades+log+pnl)" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
+            <button onclick="admClearUser('${u.uid}')" title="Efase tout" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
           </td>
         </tr>`).join("")}</table>`;
     }
@@ -3195,13 +3305,13 @@ async function admReset(code){const token=getStoredToken();const r=await fetch("
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admClearUser(uid){
-  if(!confirm(`Efase TOUT istorik ${uid}?\n(trades + log + pnl reset)`))return;
+  if(!confirm(`Efase TOUT istorik ${uid}?`))return;
   const token=getStoredToken();
   const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
   const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();
 }
 async function admClearTrades(uid){
-  if(!confirm(`Efase trades sèlman pou ${uid}?\n(log + pnl ap konsève)`))return;
+  if(!confirm(`Efase trades sèlman pou ${uid}?`))return;
   const token=getStoredToken();
   const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
   const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();
@@ -3215,5 +3325,5 @@ checkLogin();
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))
-    logger.info(f"BonheurBot ELITE v6 — KONPLÈ (Robo1+Robo2) — port {port}")
+    logger.info(f"BonheurBot ELITE v6.1 — PNL FIX + STATUS KÒRÈK — port {port}")
     app.run(host="0.0.0.0",port=port,debug=False,threaded=True)

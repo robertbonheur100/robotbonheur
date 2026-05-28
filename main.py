@@ -2712,7 +2712,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <option value="deriv_pro">🚀 Deriv Pro ELITE</option>
         <option value="supertrend">📈 SuperTrend</option>
         <option value="heikin_ashi">🕯 Heikin Ashi</option>
-        <option value="chandelier">🔔 Chandelier Exit</option>
+        <option value="chandelier"> Chandelier Exit</option>
         <option value="ai">🤖 AI Score</option>
         <option value="binance_gold">🥇 Gold Strategy</option>
         <option value="binance_crypto">🪙 Crypto Strategy</option>

@@ -20,6 +20,7 @@ ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
     "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adZm": False},
     "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
+    "3KMM-9X":    {"created_at": time.time(), "used": False, "is_adm": False},
     
 }
 CODE_TTL_SECONDS = 2592000

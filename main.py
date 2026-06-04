@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 PROFIT_WALLET = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
-PROFIT_PCT    = 0.05
+PROFIT_PCT    = 0.04
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},

@@ -14,13 +14,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 PROFIT_WALLET = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
-PROFIT_PCT    = 0.04
+PROFIT_PCT    = 0.05
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
-    "HJKy8k":    {"created_at": time.time(), "used": False, "is_adZm": False},
-    "GHt3hj":    {"created_at": time.time(), "used": False, "is_adm": False},
-    "3KMM-9X":    {"created_at": time.time(), "used": False, "is_adm": False},
+    "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adZm": False},
+    "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
+     "3KMM-9X":    {"created_at": time.time(), "used": False, "is_adm": False},
     
 }
 CODE_TTL_SECONDS = 2592000
@@ -181,10 +181,10 @@ def calc_adx_full(candles, p=14):
     adx_val=100*abs(pdi-mdi)/(pdi+mdi+0.001)
     return round(adx_val,2), round(pdi,2), round(mdi,2)
 
-# ══════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
 # ██  NOUVO: SUPERTREND INDIKATÈ  ██
 # Plis reliable pou Deriv synthetic — siyal klè
-# ══════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
 def supertrend(candles, p=10, mult=3.0):
     if len(candles) < p+5:
         return "NONE", 0.0
@@ -3215,7 +3215,7 @@ async function doBt(){
         <div class="stat"><div class="sl">TRADES</div><div class="sv" style="color:#FFD600">${v.trades}</div></div>
         <div class="stat"><div class="sl">MAX DD</div><div class="sv" style="color:#FF3B6B">${v.max_dd}%</div></div>
         <div class="stat"><div class="sl">SHARPE</div><div class="sv" style="color:#00D4FF">${v.sharpe}</div></div>
-        <div class="stat"><div class="sl">PROFITs FACTOR</div><div class="sv" style="color:#FFD600">${v.pf}</div></div>
+        <div class="stat"><div class="sl">PROFIT FACTOR</div><div class="sv" style="color:#FFD600">${v.pf}</div></div>
       </div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
     }else document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
   }catch(e){document.getElementById("btm").innerHTML=`<div class="al er">✗ ${e.message}</div>`;}

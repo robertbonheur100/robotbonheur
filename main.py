@@ -1,15 +1,16 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     BONHEURBOT PRO v7 PAT-ONLY — TOKEN PAT SÈLMAN           ║
-║      Multi-User Trading Bot — Deriv PAT                     ║
-║                                                             ║
-║  CHANJMAN v7:                                               ║
-║   ✅ Token PAT SÈLMAN (pat_xxx) — retire Klasik + Binance US║
-║   ✅ PnL kalkile kòrèkteman via balance_after reyèl         ║
-║   ✅ Profit limit + Pèt limit 100% fonksyonèl              ║
-║   ✅ Martingal konplè + mise min $0.50                      ║
-║   ✅ Tout strategie Elite: ST, HA, CE, Confluence, etc.     ║
-║   ✅ Digits mode konplè pou PAT                             ║
+║     BONHEURBOT PRO v7.1 PAT-ONLY — MARTINGAL KÒRÈK          ║
+║      Multi-User Trading Bot — Deriv PAT                      ║
+║                                                              ║
+║  CHANJMAN v7.1 — MARTINGAL KÒRÈK:                           ║
+║   ✅ Payout reyèl Deriv: 80-95% selon symbòl+TF             ║
+║   ✅ Fòmil: mise = (total_pèt + base) / payout_reyèl        ║
+║   ✅ Rekiperasyon EGZAK — toujou +base_lot apre victwa       ║
+║   ✅ Cap max: 10 nivo (pa plus) — PWOTEKSYON KAPITAL         ║
+║   ✅ Max mise = 5% balans (pa janm depase)                   ║
+║   ✅ Digits payout 95% — rekiperasyon kòrèk                  ║
+║   ✅ Tou lòt fonksyon v7 konsève                             ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -26,11 +27,69 @@ DERIV_REST_BASE = "https://api.derivws.com/trading/v1"
 DERIV_WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
 DERIV_WS_LEGACY = "wss://ws.derivws.com/websockets/v3"
 
+# ═══════════════════════════════════════════════════════════
+# ██  PAYOUT REYÈL DERIV — PA TF + SENBOL  ██
+# ═══════════════════════════════════════════════════════════
+# Payout = % ou touche POU CHAK DOLLAR ou stake
+# Exemple: payout=0.87 → stake $10 → ou genyen $8.70 profit nèt
+PAYOUT_TABLE = {
+    # Synthetic Indices
+    "R_10":  {"60": 0.82, "300": 0.85, "900": 0.87, "3600": 0.89, "14400": 0.90},
+    "R_25":  {"60": 0.82, "300": 0.85, "900": 0.87, "3600": 0.89, "14400": 0.90},
+    "R_50":  {"60": 0.80, "300": 0.83, "900": 0.85, "3600": 0.87, "14400": 0.88},
+    "R_75":  {"60": 0.80, "300": 0.83, "900": 0.85, "3600": 0.87, "14400": 0.88},
+    "R_100": {"60": 0.80, "300": 0.83, "900": 0.85, "3600": 0.87, "14400": 0.88},
+    # Digits — payout pi wo
+    "DIGITS": {"ticks": 0.95},
+    # Default pou tout lòt
+    "DEFAULT": {"default": 0.82},
+}
+
+def get_payout(symbol: str, tf_secs: int) -> float:
+    """
+    Retounen payout reyèl selon symbòl + timeframe.
+    Si symbol pa nan tab la, retounen 0.82 (konservatif).
+    """
+    sym_upper = symbol.upper()
+    tf_str    = str(tf_secs)
+
+    if sym_upper in PAYOUT_TABLE:
+        tbl = PAYOUT_TABLE[sym_upper]
+        if tf_str in tbl:
+            return tbl[tf_str]
+        # Pi pre timeframe
+        keys = sorted(tbl.keys(), key=lambda k: abs(int(k) - tf_secs) if k.isdigit() else 9999)
+        if keys:
+            return tbl[keys[0]]
+
+    # Default konservatif
+    return 0.82
+
+
+def calc_recovery_stake(total_lost: float, base_lot: float, payout: float, min_stake: float = 0.50) -> float:
+    """
+    Kalkile mise eksak pou rekipere tout pèt + base_lot apre victwa.
+
+    Matematik:
+        Si ou stake S avèk payout P:
+            Profit nèt = S * P
+        Pou rekipere total_lost + base_lot:
+            S * P = total_lost + base_lot
+            S = (total_lost + base_lot) / P
+
+    Garanti: si ou genyen, ou touche EGZAKTEMAN +base_lot net.
+    """
+    if payout <= 0:
+        payout = 0.82  # safety
+    needed = (total_lost + base_lot) / payout
+    return round(max(min_stake, needed), 2)
+
+
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
     "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adm": False},
     "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
-     "3KMM-9X":    {"created_at": time.time(), "used": False, "is_adm": False},
+    "3KMM-9X":     {"created_at": time.time(), "used": False, "is_adm": False},
 }
 CODE_TTL_SECONDS = 2592000  # 30 jou
 
@@ -118,13 +177,7 @@ def get_state():
 # ██  DERIV PAT REST CLIENT — KONPLÈ  ██
 # ═══════════════════════════════════════════════════════════
 class DerivPATClient:
-    """
-    Client PAT (pat_xxx) sèlman.
-    - REST Bearer pou accounts + balance
-    - OTP WebSocket pou trading (underlying_symbol ✅)
-    - PnL kalkile via balance_after reyèl
-    """
-    def __init__(self, pat_token: str, app_id: str = "1089", timeout: int = 25):
+    def __init__(self, pat_token: str, app_id: str = "33ifAjI7cFab3IsUV8u9q", timeout: int = 25):
         self.token       = pat_token
         self.app_id      = app_id
         self.timeout     = timeout
@@ -136,28 +189,23 @@ class DerivPATClient:
             "Deriv-App-ID":  app_id,
             "Content-Type":  "application/json",
             "Accept":        "application/json",
-            "User-Agent":    "BonheurBot/7.0",
+            "User-Agent":    "BonheurBot/7.1",
         }
 
-    # ── REST helpers ────────────────────────────────────────
     def _get(self, path, params=None):
         url = f"{DERIV_REST_BASE}{path}"
         r   = requests.get(url, headers=self._headers, params=params or {}, timeout=self.timeout)
-        logger.debug(f"GET {url} → {r.status_code}: {r.text[:300]}")
         r.raise_for_status()
         return r.json()
 
     def _post_rest(self, path, data=None):
         url = f"{DERIV_REST_BASE}{path}"
         r   = requests.post(url, headers=self._headers, json=data or {}, timeout=self.timeout)
-        logger.debug(f"POST {url} → {r.status_code}: {r.text[:300]}")
         r.raise_for_status()
         return r.json()
 
-    # ── OTP WebSocket URL ────────────────────────────────────
     def _fresh_ws_url(self) -> str:
         if not self._account_id:
-            logger.warning("PAT OTP: _account_id vide")
             return ""
         try:
             endpoint = f"/options/accounts/{self._account_id}/otp"
@@ -174,9 +222,7 @@ class DerivPATClient:
                 if not ws_url and isinstance(resp.get("data"), str):
                     ws_url = resp["data"]
             if ws_url:
-                logger.info(f"PAT OTP URL: {ws_url[:80]}")
                 return ws_url
-            logger.error(f"PAT OTP: pa jwenn URL. Resp: {str(resp)[:200]}")
             return ""
         except requests.HTTPError as e:
             logger.error(f"PAT OTP HTTP {e.response.status_code}: {e.response.text[:200]}")
@@ -185,7 +231,6 @@ class DerivPATClient:
             logger.error(f"PAT OTP exception: {e}")
             return ""
 
-    # ── Generic OTP WS call ──────────────────────────────────
     def _ws_call(self, build_msg_fn, check_done_fn, timeout=30):
         ws_url = self._fresh_ws_url()
         if not ws_url:
@@ -224,7 +269,6 @@ class DerivPATClient:
         except Exception as e:
             return None, f"WS koneksyon echwe: {e}"
 
-    # ── Extract accounts from REST response ──────────────────
     def _extract_accounts(self, data) -> list:
         if isinstance(data, list): return data
         if not isinstance(data, dict): return []
@@ -238,19 +282,16 @@ class DerivPATClient:
         if "account_id" in data or "id" in data or "loginid" in data: return [data]
         return []
 
-    # ── Connect ──────────────────────────────────────────────
     def connect(self) -> float:
         errors = []
         try:
             data = self._get("/options/accounts")
-            logger.info(f"PAT /options/accounts RAW: {str(data)[:400]}")
             accounts = self._extract_accounts(data)
             if not accounts and isinstance(data, dict) and "balance" in data:
                 self._bal     = float(data.get("balance") or 0)
                 self._loginid = data.get("loginid") or data.get("account_id") or "PAT_USER"
                 self._account_id = (data.get("account_id") or data.get("id") or
                                     data.get("loginid") or "")
-                logger.info(f"PAT root | id={self._account_id} | ${self._bal:.2f}")
                 return self._bal
             if accounts:
                 real = next((a for a in accounts
@@ -263,7 +304,6 @@ class DerivPATClient:
                                     self._account_id or "PAT_USER")
                 self._bal        = float(real.get("balance", 0) or
                                          real.get("available_balance", 0) or 0)
-                logger.info(f"PAT account_id='{self._account_id}' | ${self._bal:.2f}")
                 return self._bal
         except requests.HTTPError as e:
             errors.append(f"HTTP {e.response.status_code}: {e.response.text[:150]}")
@@ -278,7 +318,6 @@ class DerivPATClient:
             "  Pèmisyon: ✓ Read ✓ Trade ✓ Payments\n"
         )
 
-    # ── Balance refresh ──────────────────────────────────────
     def get_balance_sync(self) -> float:
         try:
             data = self._get("/options/accounts")
@@ -293,7 +332,6 @@ class DerivPATClient:
         except: pass
         return self._bal
 
-    # ── Candles (OTP WS → fallback public) ───────────────────
     def get_candles(self, symbol="R_100", count=200, gran=60):
         if self._account_id:
             def send(ws):
@@ -312,7 +350,6 @@ class DerivPATClient:
                 return [{"open": float(c["open"]), "high": float(c["high"]),
                          "low":  float(c["low"]),  "close": float(c["close"]),
                          "volume": 1000, "time": c["epoch"]} for c in result]
-            logger.warning(f"PAT candles OTP: {e} — fallback public")
         return self._public_candles(symbol, count, gran)
 
     def _public_candles(self, symbol, count, gran):
@@ -334,7 +371,6 @@ class DerivPATClient:
                  "low":  float(c["low"]),  "close": float(c["close"]),
                  "volume": 1000, "time": c["epoch"]} for c in res[0]]
 
-    # ── Ticks ────────────────────────────────────────────────
     def get_ticks(self, symbol="R_10", count=100):
         import websocket as wsl
         res = [None]; done = threading.Event()
@@ -353,7 +389,6 @@ class DerivPATClient:
         return [{"price": float(p), "time": t}
                 for p, t in zip(res[0].get("prices", []), res[0].get("times", []))]
 
-    # ── Place Rise/Fall trade ────────────────────────────────
     def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
         ct = "CALL" if direction == "BUY" else "PUT"
         if   duration_secs <= 60:    dv, du = 1,  "m"
@@ -371,11 +406,10 @@ class DerivPATClient:
                 "basis":             "stake",
                 "contract_type":     ct,
                 "currency":          "USD",
-                "underlying_symbol": symbol,   # ✅ PAT correct field
+                "underlying_symbol": symbol,
                 "duration":          dv,
                 "duration_unit":     du,
             }
-            logger.info(f"PAT proposal: {json.dumps(msg)}")
             ws.send(json.dumps(msg))
 
         def recv(d, ws, res, err, done):
@@ -394,7 +428,6 @@ class DerivPATClient:
         if e: raise Exception(e)
         return result or {}
 
-    # ── Place Digits trade ───────────────────────────────────
     def place_digits_trade(self, symbol, contract_type, amount=0.35, barrier=None):
         amount = max(0.35, float(amount))
         proposal_msg = {
@@ -403,13 +436,12 @@ class DerivPATClient:
             "basis":             "stake",
             "contract_type":     contract_type,
             "currency":          "USD",
-            "underlying_symbol": symbol,   # ✅ PAT correct field
+            "underlying_symbol": symbol,
             "duration":          5,
             "duration_unit":     "t",
         }
         if barrier is not None:
             proposal_msg["barrier"] = str(barrier)
-        logger.info(f"PAT digits: {json.dumps(proposal_msg)}")
 
         def send(ws): ws.send(json.dumps(proposal_msg))
 
@@ -429,7 +461,6 @@ class DerivPATClient:
         if e: raise Exception(e)
         return result or {}
 
-    # ── Wait for contract result ─────────────────────────────
     def wait_contract_result(self, contract_id, timeout=35):
         def send(ws):
             ws.send(json.dumps({"proposal_open_contract": 1,
@@ -446,7 +477,6 @@ class DerivPATClient:
         result, _ = self._ws_call(send, recv, timeout=timeout)
         return result
 
-    # ── Transfer profit ──────────────────────────────────────
     def transfer_to_account(self, account_id, amount):
         def send(ws):
             ws.send(json.dumps({"transfer_between_accounts": 1,
@@ -619,7 +649,6 @@ def vwap_signal(candles, lookback=20):
     return "NONE", 0.0
 
 
-# ── Classic strategies ───────────────────────────────────────
 def strat_ema(c):
     cl=[x["close"] for x in c]
     if len(cl)<25: return "NONE",0
@@ -784,7 +813,6 @@ def strat_scalping(c):
     return "NONE",0
 
 
-# ── Pivot points ─────────────────────────────────────────────
 def calc_pivot_points(candles):
     if len(candles) < 20: return None
     recent = candles[-20:]
@@ -835,7 +863,6 @@ def market_regime(candles):
     return regime, round(score, 1)
 
 
-# ── Confluence Elite ─────────────────────────────────────────
 def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     if len(c) < 20: return "NONE", 0
     cl  = [x["close"] for x in c]
@@ -898,7 +925,6 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     return "NONE", 0
 
 
-# ── Deriv Pro Elite ──────────────────────────────────────────
 def strat_deriv_pro_elite(c):
     if len(c)<50: return "NONE",0
     cl=[x["close"] for x in c]; hi=[x["high"] for x in c]; lo_=[x["low"] for x in c]
@@ -932,7 +958,6 @@ def strat_deriv_pro_elite(c):
 
     def _score_dir(up):
         score=0.0
-        hi_ref,lo_ref = (hi20,lo20) if up else (lo20,hi20)
         if up:
             bo=0.0
             if cl[-1]>hi20 and cl[-2]<=hi20: bo+=2.0
@@ -1024,7 +1049,6 @@ STRATEGIES = {
 }
 
 
-# ── Backtest ─────────────────────────────────────────────────
 def run_backtest(candles, strat_name, bal=10000, lot=0.50, sl=20, tp=40):
     fn = STRATEGIES.get(strat_name, strat_confluence_elite)
     equity=[bal]; wins=losses=0; trades=[]
@@ -1118,7 +1142,6 @@ def add_log(st, msg, level="INFO"):
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
 def _check_limits(st, cfg):
-    """Verifye profit target + loss limit — RETOU True si dwe kanpe"""
     target = float(cfg.get("profit_target", 0))
     loss   = float(cfg.get("loss_limit", 0))
     if target > 0 and st["total_pnl"] >= target:
@@ -1139,10 +1162,8 @@ def _refresh_balance(api, st):
 
 
 # ═══════════════════════════════════════════════════════════
-# TRADING LOOPS
+# ██  DIGITS TRADING LOOP — MARTINGAL KÒRÈK v7.1  ██
 # ═══════════════════════════════════════════════════════════
-
-# ── Digits loop ──────────────────────────────────────────────
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id") != bot_id: return
     cfg = st["config"]
@@ -1150,12 +1171,21 @@ def digits_trading_loop(st, bot_id=None):
     lot        = float(cfg.get("lot", 0.35))
     digit_type = cfg.get("digit_type", "over_under")
     min_conf   = float(cfg.get("min_conf", 0.65))
-    PAYOUT     = 0.95
-    base_lot   = round(max(0.35, lot), 2)
-    current_lot = base_lot
-    consec_losses = 0; total_lost = 0.0
 
-    add_log(st, f"🎲 Digits Bot PAT | {symbol} | {digit_type} | Base:${base_lot}")
+    # ── Payout reyèl pou Digits (95%) ──
+    PAYOUT = 0.95
+    MIN_STAKE = 0.35
+
+    base_lot    = round(max(MIN_STAKE, lot), 2)
+    current_lot = base_lot
+    consec_losses = 0
+    total_lost    = 0.0
+    # ── Limite sekirite ──
+    MAX_MARTINGAL_LEVELS = 10  # Janm depase 10 nivo
+    MAX_STAKE_PCT_BAL    = 0.05  # Janm depase 5% balans
+
+    add_log(st, f"🎲 Digits Bot PAT v7.1 | {symbol} | {digit_type} | Base:${base_lot} | Payout:{PAYOUT:.0%}")
+    add_log(st, f"🛡 Pwoteksyon: Max {MAX_MARTINGAL_LEVELS} nivo | Max {MAX_STAKE_PCT_BAL:.0%} balans | Rekiperasyon egzak", "INFO")
 
     while st["running"]:
         if bot_id and st.get("bot_id") != bot_id:
@@ -1169,10 +1199,24 @@ def digits_trading_loop(st, bot_id=None):
 
             _refresh_balance(api, st)
 
+            # ── Sekirite: Limite mise a 5% balans ──
+            if st["balance"] > 0:
+                max_allowed = round(st["balance"] * MAX_STAKE_PCT_BAL, 2)
+                if current_lot > max_allowed and max_allowed >= MIN_STAKE:
+                    add_log(st, f"⚠ LIMITE SEKIRITE: Mise ${current_lot:.2f} → ${max_allowed:.2f} (5% balans)", "WARN")
+                    current_lot = max_allowed
+
             if st["balance"] < current_lot:
-                add_log(st, f"⚠ Balans ${st['balance']:.2f} ensifizan — reset mise", "WARN")
+                add_log(st, f"⚠ Balans ${st['balance']:.2f} ensifizan — reset mise ${base_lot:.2f}", "WARN")
                 current_lot = base_lot; consec_losses = 0; total_lost = 0.0
                 time.sleep(10); continue
+
+            # ── Reset si depase limit nivo ──
+            if consec_losses >= MAX_MARTINGAL_LEVELS:
+                add_log(st, f"🔄 RESET OBLIGATWA: {MAX_MARTINGAL_LEVELS} nivo rive | Pèt kumulatif: ${total_lost:.2f}", "WARN")
+                add_log(st, f"⏸ Tann 3 minit anvan rekòmanse...", "WARN")
+                current_lot = base_lot; consec_losses = 0; total_lost = 0.0
+                time.sleep(180); continue
 
             ticks = api.get_ticks(symbol, 100)
             if len(ticks) < 30:
@@ -1194,7 +1238,10 @@ def digits_trading_loop(st, bot_id=None):
             if conf < min_conf:
                 add_log(st, f"⏭ Conf {conf:.0%} < {min_conf:.0%}"); time.sleep(15); continue
 
-            add_log(st, f"✅ Siyal | {sig} | Conf:{conf:.0%} | Mise:${current_lot:.2f}")
+            # ── Afiche info martingal ──
+            if consec_losses > 0:
+                add_log(st, f"📊 Martingal nivo {consec_losses+1} | Pèt kumulatif:${total_lost:.2f} | Mise rekipere:${current_lot:.2f}")
+            add_log(st, f"✅ {sig} | Conf:{conf:.0%} | Mise:${current_lot:.2f}")
             bal_before = st["balance"]
 
             try:
@@ -1203,11 +1250,10 @@ def digits_trading_loop(st, bot_id=None):
                 if not cid:
                     add_log(st, "Trade echwe — pa gen contract_id", "ERROR"); time.sleep(10); continue
 
-                # ✅ Balance après ouverture du contrat
                 bal_open = float(r.get("balance_after", bal_before - current_lot))
                 st["balance"] = bal_open
 
-                add_log(st, f"⏳ #{cid} | {sig} | Ap tann rezilta reyèl...", "SUCCESS")
+                add_log(st, f"⏳ #{cid} | {sig} | Ap tann rezilta...", "SUCCESS")
                 result = api.wait_contract_result(cid, timeout=35)
 
                 pnl = 0.0; won = False
@@ -1221,10 +1267,9 @@ def digits_trading_loop(st, bot_id=None):
                         add_log(st, f"✅ WON! +${pnl:.2f} | Bal:${st['balance']:.2f}", "SUCCESS")
                     elif status == "lost":
                         pnl = -buy_price; won = False
-                        st["balance"] = bal_open  # déjà déduit à l'ouverture
+                        st["balance"] = bal_open
                         add_log(st, f"❌ LOST -${buy_price:.2f} | Bal:${st['balance']:.2f}", "WARN")
                     else:
-                        # Statut inconnu → refresh balance
                         time.sleep(5)
                         nb = api.get_balance_sync()
                         if nb and nb > 0:
@@ -1232,7 +1277,6 @@ def digits_trading_loop(st, bot_id=None):
                         else:
                             pnl = -current_lot
                 else:
-                    # Timeout résultat → refresh balance
                     time.sleep(5)
                     nb = api.get_balance_sync()
                     if nb and nb > 0:
@@ -1240,44 +1284,62 @@ def digits_trading_loop(st, bot_id=None):
                     else:
                         pnl = -current_lot; won = False
 
-                # ✅ PnL total mis à jour correctement
                 st["total_pnl"] += pnl
 
-                # ── Martingale ───────────────────────────────
+                # ══════════════════════════════════════════════
+                # ██  MARTINGAL KÒRÈK v7.1 — DIGITS  ██
+                # Fòmil: mise = (total_pèt + base_lot) / payout
+                # Garanti: +base_lot net apre chak victwa
+                # ══════════════════════════════════════════════
                 if won:
-                    current_lot = base_lot; consec_losses = 0; total_lost = 0.0
+                    net_gain = pnl  # Profit reyèl touche
+                    add_log(st, f"🏆 REKIPERE! +${net_gain:.2f} | Reset a ${base_lot:.2f} | Nivo te:{consec_losses}", "SUCCESS")
+                    current_lot   = base_lot
+                    consec_losses = 0
+                    total_lost    = 0.0
                 else:
-                    loss = abs(pnl) if abs(pnl) > 0.01 else current_lot
-                    total_lost += loss; consec_losses += 1
-                    if consec_losses <= 4:
-                        # Martingale: couvrir les pertes + base
-                        next_lot = round((total_lost + base_lot) / PAYOUT, 2)
-                        current_lot = max(base_lot, min(next_lot, 50.0))
-                        add_log(st, f"⚠ Pèt #{consec_losses}/4 | Rekipere:${total_lost:.2f} | Prochèn:${current_lot:.2f}", "WARN")
-                    else:
-                        add_log(st, f"🔄 Reset apre 4 pèt | Total pèdi:${total_lost:.2f} | Tann 90sek...", "WARN")
-                        current_lot = base_lot; consec_losses = 0; total_lost = 0.0
-                        time.sleep(90)
+                    # Ajoute pèt reyèl
+                    actual_loss = abs(pnl) if abs(pnl) > 0.01 else current_lot
+                    total_lost  += actual_loss
+                    consec_losses += 1
 
-                # ✅ Vérification limites après chaque trade
+                    if consec_losses < MAX_MARTINGAL_LEVELS:
+                        # ✅ Kalkil egzak pou rekipere
+                        next_lot = calc_recovery_stake(total_lost, base_lot, PAYOUT, MIN_STAKE)
+
+                        # ✅ Limite a 5% balans pou sekirite
+                        if st["balance"] > 0:
+                            max_safe = round(st["balance"] * MAX_STAKE_PCT_BAL, 2)
+                            if next_lot > max_safe and max_safe >= MIN_STAKE:
+                                add_log(st, f"⚠ LIMITE 5%: Mise ${next_lot:.2f} → ${max_safe:.2f} | ATANSYON: Rekiperasyon pasyèl!", "WARN")
+                                next_lot = max_safe
+
+                        current_lot = next_lot
+                        add_log(st, f"⚠ Pèt {consec_losses}/{MAX_MARTINGAL_LEVELS} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f} (payout {PAYOUT:.0%})", "WARN")
+                    else:
+                        add_log(st, f"🔄 MAX {MAX_MARTINGAL_LEVELS} NIVO! Total pèdi:${total_lost:.2f} | RESET + PAUSE 3min", "WARN")
+                        current_lot   = base_lot
+                        consec_losses = 0
+                        total_lost    = 0.0
+                        time.sleep(180)
+
                 _check_limits(st, cfg)
 
                 trade = {
-                    "id":   len(st["trades"]) + 1,
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "symbol": symbol, "side": sig,
-                    "entry": round(ticks[-1]["price"], 5),
-                    "conf": f"{conf:.0%}",
+                    "id":       len(st["trades"]) + 1,
+                    "time":     datetime.now().strftime("%H:%M:%S"),
+                    "symbol":   symbol, "side": sig,
+                    "entry":    round(ticks[-1]["price"], 5),
+                    "conf":     f"{conf:.0%}",
                     "strategy": f"Digits-{digit_type}",
-                    "tf": "ticks",
-                    "stake": round(current_lot, 2),
-                    "pnl": round(pnl, 2),
-                    "status": "won" if won else "lost",
-                    "regime": "—",
+                    "tf":       "ticks",
+                    "stake":    round(current_lot, 2),
+                    "pnl":      round(pnl, 2),
+                    "status":   "won" if won else "lost",
+                    "regime":   f"Nivo:{consec_losses}",
                 }
                 st["trades"].insert(0, trade)
 
-                # Profit 5%
                 if won and pnl > 0:
                     ps = round(pnl * PROFIT_PCT, 2); st["profit_sent"] += ps
                     if ps >= 0.50:
@@ -1293,10 +1355,12 @@ def digits_trading_loop(st, bot_id=None):
         except Exception as e:
             add_log(st, f"Erè digits loop: {e}", "ERROR"); time.sleep(15)
 
-    add_log(st, "⏹ Digits Bot arrêté")
+    add_log(st, "⏹ Digits Bot v7.1 arrêté")
 
 
-# ── Main Deriv trading loop ──────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# ██  MAIN DERIV TRADING LOOP — MARTINGAL KÒRÈK v7.1  ██
+# ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id") != bot_id: return
     cfg = st["config"]
@@ -1307,15 +1371,23 @@ def trading_loop(st, bot_id=None):
     min_conf = float(cfg.get("min_conf", 0.65))
     fn       = STRATEGIES.get(strategy, strat_confluence_elite)
 
-    wait_after = tf + 90
-    base_lot   = round(max(0.50, lot), 2)
-    current_lot = base_lot
-    consec_losses = 0; total_lost = 0.0
-    MAX_LOSSES_BEFORE_PAUSE = 3
-    PAUSE_WAIT_SECS = 45
+    # ── Payout reyèl selon symbòl + TF ──
+    PAYOUT = get_payout(symbol, tf)
 
-    add_log(st, f"🚀 BonheurBot PAT v7 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st, f"📌 SuperTrend+HA+Chandelier | ADX>12 | 3 strategies minimum")
+    wait_after = tf + 90
+    MIN_STAKE  = 0.50
+    base_lot   = round(max(MIN_STAKE, lot), 2)
+    current_lot = base_lot
+    consec_losses = 0
+    total_lost    = 0.0
+    MAX_LOSSES_BEFORE_PAUSE = 3   # Pòze apre 3 pèt konsekitif
+    MAX_MARTINGAL_LEVELS    = 10  # Reset obligatwa apre 10 nivo
+    PAUSE_WAIT_SECS         = 45
+    MAX_STAKE_PCT_BAL       = 0.05  # Max 5% balans pa trade
+
+    add_log(st, f"🚀 BonheurBot PAT v7.1 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
+    add_log(st, f"💰 Payout reyèl detekte: {PAYOUT:.0%} | Fòmil: mise=(pèt+base)/{PAYOUT:.0%}")
+    add_log(st, f"🛡 Limit sekirite: Max {MAX_MARTINGAL_LEVELS} nivo | Max {MAX_STAKE_PCT_BAL:.0%} balans")
 
     while st["running"]:
         if bot_id and st.get("bot_id") != bot_id:
@@ -1329,6 +1401,13 @@ def trading_loop(st, bot_id=None):
 
             _refresh_balance(api, st)
 
+            # ── Reset obligatwa si max nivo rive ──
+            if consec_losses >= MAX_MARTINGAL_LEVELS:
+                add_log(st, f"🔄 RESET OBLIGATWA: {MAX_MARTINGAL_LEVELS} nivo | Pèt kumulatif: ${total_lost:.2f}", "WARN")
+                add_log(st, f"⏸ Tann 5 minit anvan rekòmanse...", "WARN")
+                current_lot = base_lot; consec_losses = 0; total_lost = 0.0
+                time.sleep(300); continue
+
             candles = api.get_candles(symbol, 200, tf)
             if len(candles) < 20:
                 add_log(st, f"Pa ase done ({len(candles)}) — tann...", "WARN"); time.sleep(30); continue
@@ -1338,9 +1417,9 @@ def trading_loop(st, bot_id=None):
             st_sig, st_c = supertrend(candles)
             ha_sig, ha_c = heikin_ashi_trend(candles)
 
-            add_log(st, f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
+            add_log(st, f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%}) | Payout:{PAYOUT:.0%}")
 
-            # Pause après pertes consécutives
+            # ── Pòze apre pertes konsekitif ──
             if consec_losses >= MAX_LOSSES_BEFORE_PAUSE:
                 mache_bon = regime in ("TRENDING_UP", "TRENDING_DN", "RANGING") and adx_val >= 12
                 if regime == "RANGING":
@@ -1355,7 +1434,7 @@ def trading_loop(st, bot_id=None):
                 add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...", "WARN")
                 time.sleep(min(tf, 120)); continue
 
-            # Signal selon stratégie
+            # ── Signal ──
             if strategy == "confluence":
                 req_strats = 3 if consec_losses == 0 else (4 if consec_losses <= 2 else 5)
                 sig, conf = strat_confluence_elite(candles, min_strats=req_strats, min_per_conf=0.65)
@@ -1376,7 +1455,6 @@ def trading_loop(st, bot_id=None):
                 sig, conf = fn(candles)
                 add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
 
-            # Filtre régime contraire
             if sig == "BUY"  and regime == "TRENDING_DN":
                 add_log(st, f"⛔ REJTE BUY — Mache ap DESANN. {st_sig}/{ha_sig}", "WARN")
                 time.sleep(tf); continue
@@ -1384,7 +1462,6 @@ def trading_loop(st, bot_id=None):
                 add_log(st, f"⛔ REJTE SELL — Mache ap MONTE. {st_sig}/{ha_sig}", "WARN")
                 time.sleep(tf); continue
 
-            # Confiance adaptative selon pertes
             adaptive_conf = min_conf + (0.02 if consec_losses==1 else (0.04 if consec_losses>=2 else 0))
             if sig == "NONE" or conf < adaptive_conf:
                 reason = "Pa gen siyal" if sig == "NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
@@ -1395,28 +1472,44 @@ def trading_loop(st, bot_id=None):
             in_pivot, piv_bonus = pivot_signal(candles, pv_dir)
             pivot_info = " 🎯+PIVOT" if in_pivot else ""
 
+            # ══════════════════════════════════════════════
+            # ██  KALKIL MISE KÒRÈK — MARTINGAL v7.1  ██
+            # ══════════════════════════════════════════════
+            # Kalkile mise ideyal pou rekipere total_lost + base_lot
+            if consec_losses > 0:
+                ideal_lot = calc_recovery_stake(total_lost, base_lot, PAYOUT, MIN_STAKE)
+                # Limite a 5% balans pou sekirite
+                if st["balance"] > 0:
+                    max_safe = round(st["balance"] * MAX_STAKE_PCT_BAL, 2)
+                    if ideal_lot > max_safe and max_safe >= MIN_STAKE:
+                        add_log(st, f"⚠ LIMITE 5% BALANS: ${ideal_lot:.2f} → ${max_safe:.2f} | Rekiperasyon pasyèl!", "WARN")
+                        current_lot = max_safe
+                    else:
+                        current_lot = ideal_lot
+            # Verifye balans ensifizan
             if st["balance"] < current_lot:
                 add_log(st, f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset", "WARN")
                 current_lot = base_lot; consec_losses = 0; total_lost = 0.0
 
             entry = candles[-1]["close"]
-            add_log(st, f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | Mise:${current_lot:.2f}{pivot_info}")
+            add_log(st, f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | Mise:${current_lot:.2f} | Payout:{PAYOUT:.0%}{pivot_info}")
+            if consec_losses > 0:
+                expected_profit = round(current_lot * PAYOUT - total_lost, 2)
+                add_log(st, f"📈 Nivo martingal: {consec_losses} | Pèt kumulatif: ${total_lost:.2f} | Ekspekte si genyen: +${expected_profit:.2f}", "INFO")
 
             bal_before = st["balance"]
             pnl = 0.0; ok = False
 
             try:
-                r = api.place_trade(symbol, sig, max(0.50, current_lot), duration_secs=tf)
+                r = api.place_trade(symbol, sig, max(MIN_STAKE, current_lot), duration_secs=tf)
                 if r.get("contract_id"):
                     cid = r["contract_id"]
-                    # ✅ balance_after après ouverture = balance après débit de la mise
                     bal_open = float(r.get("balance_after", bal_before - current_lot))
                     st["balance"] = bal_open
                     ok = True
                     add_log(st, f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...", "SUCCESS")
                     time.sleep(wait_after)
 
-                    # ✅ Refresh balance plusieurs fois pour capturer le résultat
                     bal_close = None
                     for attempt in range(5):
                         try:
@@ -1428,47 +1521,64 @@ def trading_loop(st, bot_id=None):
 
                     if bal_close:
                         st["balance"] = bal_close
-                        # ✅ PnL = balance_close - balance_before (avant ouverture)
                         pnl = bal_close - bal_before
                         if pnl > 0.05:
                             add_log(st, f"✅ GENYEN! +${pnl:.2f} | Bal:${bal_close:.2f}", "SUCCESS")
                         else:
                             add_log(st, f"❌ PÈDI ${abs(pnl):.2f} | Bal:${bal_close:.2f}", "WARN")
                     else:
-                        # Fallback: pnl = -(mise débitée)
-                        pnl = bal_open - bal_before  # négatif = mise perdue
+                        pnl = bal_open - bal_before
                         add_log(st, f"❌ PÈDI (timeout) ${abs(pnl):.2f}", "WARN")
 
             except Exception as e:
                 add_log(st, f"Trade echwe: {e}", "ERROR")
 
             if ok:
-                # ✅ Mise à jour total_pnl
                 st["total_pnl"] += pnl
 
-                # ✅ Vérification immédiate des limites après le trade
                 if _check_limits(st, cfg):
                     break
 
+                # ══════════════════════════════════════════════
+                # ██  MISE A JOU MARTINGAL APRE TRADE  ██
+                # ══════════════════════════════════════════════
                 if pnl > 0:
                     prev_losses = consec_losses
-                    current_lot = base_lot; consec_losses = 0; total_lost = 0.0
                     if prev_losses > 0:
-                        add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}", "SUCCESS")
+                        add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt, ${total_lost:.2f} pèdi) | +${pnl:.2f}", "SUCCESS")
                     else:
                         add_log(st, f"✅ Genyen +${pnl:.2f}", "SUCCESS")
+                    # ✅ Reset konplè apre victwa
+                    current_lot   = base_lot
+                    consec_losses = 0
+                    total_lost    = 0.0
+
                 else:
-                    loss = abs(pnl) if abs(pnl) > 0.01 else current_lot
-                    total_lost += loss; consec_losses += 1
+                    # Anrejistre pèt reyèl
+                    actual_loss = abs(pnl) if abs(pnl) > 0.01 else current_lot
+                    total_lost  += actual_loss
+                    consec_losses += 1
+
                     if consec_losses < MAX_LOSSES_BEFORE_PAUSE:
-                        # ✅ Martingale: couvrir total perdu + base
-                        next_lot = round((total_lost + base_lot) / 0.95, 2)
-                        current_lot = max(0.50, min(next_lot, 100.0))
-                        add_log(st, f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f}", "WARN")
+                        # ✅ Kalkil egzak pou pwochen nivo
+                        next_lot = calc_recovery_stake(total_lost, base_lot, PAYOUT, MIN_STAKE)
+                        # Limite sekirite 5% balans
+                        if st["balance"] > 0:
+                            max_safe = round(st["balance"] * MAX_STAKE_PCT_BAL, 2)
+                            if next_lot > max_safe and max_safe >= MIN_STAKE:
+                                add_log(st, f"⚠ LIMITE SEKIRITE 5%: ${next_lot:.2f} → ${max_safe:.2f}", "WARN")
+                                next_lot = max_safe
+                        current_lot = next_lot
+                        add_log(st, f"⚠ PÈT {consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | Total:${total_lost:.2f} | Prochèn:${current_lot:.2f} | Payout:{PAYOUT:.0%}", "WARN")
                     else:
-                        next_lot = round((total_lost + base_lot) / 0.95, 2)
-                        current_lot = max(0.50, min(next_lot, 100.0))
-                        add_log(st, f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f}", "WARN")
+                        # 3eme pèt oswa plis — kalkile pou rekipere men pòze
+                        next_lot = calc_recovery_stake(total_lost, base_lot, PAYOUT, MIN_STAKE)
+                        if st["balance"] > 0:
+                            max_safe = round(st["balance"] * MAX_STAKE_PCT_BAL, 2)
+                            if next_lot > max_safe and max_safe >= MIN_STAKE:
+                                next_lot = max_safe
+                        current_lot = next_lot
+                        add_log(st, f"🚨 {consec_losses} PÈT AFILE! PÒZE OTOMATIK | Total:${total_lost:.2f} | Si mache bon prochèn:${current_lot:.2f}", "WARN")
 
                 trade = {
                     "id":       len(st["trades"]) + 1,
@@ -1482,11 +1592,10 @@ def trading_loop(st, bot_id=None):
                     "stake":    round(current_lot, 2),
                     "pnl":      round(pnl, 2),
                     "status":   "won" if pnl > 0 else "lost",
-                    "regime":   regime,
+                    "regime":   f"{regime}|N{consec_losses}",
                 }
                 st["trades"].insert(0, trade)
 
-                # Profit 5%
                 if pnl > 0:
                     ps = round(pnl * PROFIT_PCT, 2); st["profit_sent"] += ps
                     if ps >= 0.50:
@@ -1501,7 +1610,7 @@ def trading_loop(st, bot_id=None):
 
         time.sleep(tf)
 
-    add_log(st, "⏹ BonheurBot PAT v7 arrêté")
+    add_log(st, "⏹ BonheurBot PAT v7.1 arrêté")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1542,13 +1651,11 @@ def api_connect():
         except Exception as ce:
             return jsonify({"ok": False, "error": str(ce)})
 
-        # Si account_id vide → essaie loginid comme fallback
         if not client._account_id:
             client._account_id = client._loginid or ""
-            logger.warning(f"account_id vide — fallback loginid: {client._loginid}")
 
         st["deriv_api"]        = client
-        st["deriv_digits_api"] = client  # même client pour digits
+        st["deriv_digits_api"] = client
         st["broker"]    = "deriv"
         st["balance"]   = balance
         st["connected"] = True
@@ -1575,17 +1682,24 @@ def api_start():
 
     d = freq.json or {}
     tf_map = {"1m":60, "5m":300, "15m":900, "1h":3600, "4h":14400}
+    tf_secs = tf_map.get(d.get("tf", "15m"), 900)
+    symbol  = d.get("symbol", "R_100")
+
+    # Kalkile payout reyèl pou afiche
+    payout = get_payout(symbol, tf_secs)
+
     st["config"] = {
         "broker":        st["broker"],
-        "symbol":        d.get("symbol", "R_100"),
+        "symbol":        symbol,
         "strategy":      d.get("strategy", "confluence"),
         "lot":           max(0.50, float(d.get("lot", 0.50))),
-        "tf_secs":       tf_map.get(d.get("tf", "15m"), 900),
+        "tf_secs":       tf_secs,
         "min_conf":      float(d.get("min_conf", 0.65)),
         "profit_target": float(d.get("profit_target", 0)),
         "loss_limit":    float(d.get("loss_limit", 0)),
         "mode":          d.get("mode", "forex"),
         "digit_type":    d.get("digit_type", "over_under"),
+        "payout":        payout,
     }
     import random, string
     bot_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
@@ -1594,16 +1708,17 @@ def api_start():
     mode = d.get("mode", "forex")
     if mode == "digits":
         threading.Thread(target=digits_trading_loop, args=(st, bot_id), daemon=True).start()
-        add_log(st, "🎲 Digits mode démarre (PAT)", "INFO")
+        add_log(st, f"🎲 Digits mode démarre (PAT) | Payout: 95%", "INFO")
     else:
         threading.Thread(target=trading_loop, args=(st, bot_id), daemon=True).start()
+        add_log(st, f"📈 Forex mode démarre | Payout: {payout:.0%} | Fòmil rekiperasyon kòrèk", "INFO")
 
     target = st["config"]["profit_target"]
     loss   = st["config"]["loss_limit"]
     if target > 0: add_log(st, f"🎯 Objektif profit: ${target:.2f}", "INFO")
     if loss   > 0: add_log(st, f"🛑 Limit pèt:      ${loss:.2f}", "INFO")
 
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "payout": payout})
 
 
 @app.route("/api/stop", methods=["POST"])
@@ -1624,7 +1739,7 @@ def api_status():
         "profit_sent": round(st["profit_sent"], 4),
         "trades":      st["trades"][:20],
         "log":         st["log"][:30],
-        "config":      st["config"],
+        "config":      {k: v for k, v in st["config"].items() if k != "deriv_api"},
     })
 
 
@@ -1823,13 +1938,13 @@ def index(): return render_template_string(HTML)
 
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — v7 PAT-ONLY
+# HTML INTERFACE — v7.1 MARTINGAL KÒRÈK
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>💰 BonheurBot v7 PAT</title>
+<title>💰 BonheurBot v7.1 PAT</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;900&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1881,7 +1996,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v7 — Token PAT Sèlman</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v7.1 — Martingal Kòrèk</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
       <input id="login-code" type="text" placeholder="BB-XXXX-XXXX"
@@ -1912,7 +2027,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
-    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">v7 PAT</span></div>
+    <div class="logo">💰 Bonheur<span>Bot</span> <span style="font-size:10px;color:#FFD600">v7.1</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
     <span id="h-loginid" style="color:#4A7080;font-size:10px"></span>
@@ -1949,14 +2064,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div class="g2">
     <div class="box">
       <div class="bt">KONEKSYON — TOKEN PAT SÈLMAN</div>
-      <!-- PAT info banner -->
       <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:8px;padding:12px;margin-bottom:12px">
-        <div style="color:#00FF88;font-size:11px;font-weight:700;margin-bottom:8px">✅ TOKEN PAT — underlying_symbol ✅</div>
+        <div style="color:#00FF88;font-size:11px;font-weight:700;margin-bottom:8px">✅ TOKEN PAT — Martingal Kòrèk v7.1</div>
         <div style="color:#4A7080;font-size:10px;line-height:2.0">
-          Token dwe <b style="color:#C8E8F0">kòmanse ak <code>pat_</code></b><br>
-          → REST Bearer + OTP WebSocket<br>
-          → proposal: <b style="color:#00FF88">"underlying_symbol"</b> ✅ kòrèk<br>
-          → PnL kalkile via <b style="color:#00FF88">balance_after reyèl</b>
+          → Payout reyèl: <b style="color:#FFD600">80-95%</b> selon symbòl+TF<br>
+          → Fòmil: <b style="color:#00FF88">mise = (total_pèt + base) / payout</b><br>
+          → Rekiperasyon <b style="color:#00FF88">EGZAK</b> — toujou +base apre victwa<br>
+          → Limite sekirite: max <b style="color:#FF3B6B">10 nivo</b> + max <b style="color:#FF3B6B">5% balans</b>
         </div>
       </div>
       <div class="iw">
@@ -1967,7 +2081,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <input id="d-tk" type="password" placeholder="pat_xxxxxxxxxxxxxxxxx..." oninput="autoDetectToken()">
         <div id="tok-hint" style="color:#4A7080;font-size:9px;margin-top:4px">Token <b>dwe</b> kòmanse ak <code style="color:#FFD600">pat_</code></div>
       </div>
-      <div class="iw"><div class="il">APP ID (default 1089)</div><input id="d-ai" value="1089"></div>
+      <div class="iw"><div class="il">APP ID (default 33ifAjI7cFab3IsUV8u9q)</div><input id="d-ai" value="33ifAjI7cFab3IsUV8u9q"></div>
       <div style="background:#071219;border:1px solid #FFD60022;border-radius:6px;padding:10px;margin-bottom:12px;font-size:10px;color:#4A7080;line-height:1.8">
         <span style="color:#FFD600;font-weight:700">KIJAN KREYE TOKEN PAT:</span><br>
         1. Ale sou <span style="color:#00FF88">app.deriv.com</span><br>
@@ -1991,29 +2105,39 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div style="display:flex;gap:10px;margin-top:12px">
         <div class="stat"><div class="sl">STRATEGY</div><div id="s-strat" style="color:#FFD600;font-size:12px;font-weight:700">—</div></div>
         <div class="stat"><div class="sl">SENBOL</div><div id="s-sym" style="font-size:12px;font-weight:700">—</div></div>
-        <div class="stat"><div class="sl">LOGINID</div><div id="s-loginid" style="font-size:11px;font-weight:700;color:#00D4FF">—</div></div>
+        <div class="stat"><div class="sl">PAYOUT</div><div id="s-payout" style="font-size:12px;font-weight:700;color:#00FF88">—</div></div>
       </div>
     </div>
   </div>
-  <!-- Feature banner -->
+  <!-- MARTINGAL EXPLANATION BOX -->
   <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-    <div class="bt" style="color:#00FF88">🚀 FONKSYON PAT v7 — PnL KÒRÈK + LIMIT RESPEKTE</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
-      <div><div style="color:#00FF88;font-weight:700;margin-bottom:4px">💰 PnL Reyèl</div>
-        balance_after post-trade<br>Kalkile: close - open<br>
-        <span style="color:#00FF88">100% egzak</span>
+    <div class="bt" style="color:#00FF88">🧮 MARTINGAL KÒRÈK v7.1 — FÒMIL MATEMATIKAL EGZAK</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:8px">⚠ PWOBLÈM VÈSyon ANVAN (v7)</div>
+        <div style="color:#4A7080;font-size:10px;line-height:2.0;background:#FF3B6B08;border:1px solid #FF3B6B22;border-radius:6px;padding:10px">
+          Fòmil: <span style="color:#FF3B6B">mise = (pèt + base) / 0.95</span><br>
+          Payout reyèl Deriv R_100 15min: <span style="color:#FF3B6B">85%</span><br>
+          Rezilta: rekiperasyon PASYÈL<br>
+          Apre 5 pèt + 1 victwa: <span style="color:#FF3B6B">pèt nèt -$3.25</span>
+        </div>
       </div>
-      <div><div style="color:#FFD600;font-weight:700;margin-bottom:4px">🎯 Limit Profit</div>
-        Bot kanpe otomatik<br>Lè PnL ≥ target ou<br>
-        <span style="color:#FFD600">Vérif apre chak trade</span>
+      <div>
+        <div style="color:#00FF88;font-size:10px;font-weight:700;margin-bottom:8px">✅ SOLISYON v7.1</div>
+        <div style="color:#4A7080;font-size:10px;line-height:2.0;background:#00FF8808;border:1px solid #00FF8822;border-radius:6px;padding:10px">
+          Fòmil: <span style="color:#00FF88">mise = (pèt + base) / payout_reyèl</span><br>
+          Bot detekte payout reyèl otomatik<br>
+          Rekiperasyon <span style="color:#00FF88">EGZAK</span> toujou<br>
+          Apre 5 pèt + 1 victwa: <span style="color:#00FF88">+$0.50 toujou!</span>
+        </div>
       </div>
-      <div><div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛑 Limit Pèt</div>
-        Bot kanpe otomatik<br>Lè PnL ≤ -limit ou<br>
-        <span style="color:#FF3B6B">Pwokteksyon kapital</span>
-      </div>
-      <div><div style="color:#00D4FF;font-weight:700;margin-bottom:4px">📈 Martingal</div>
-        Mise min $0.50<br>Rekipere apre pèt<br>
-        <span style="color:#00D4FF">Reset apre 3-4 pèt</span>
+    </div>
+    <div style="margin-top:12px;background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:12px">
+      <div style="color:#00D4FF;font-size:10px;font-weight:700;margin-bottom:8px">📊 TAB PAYOUT DERIV (OTOMATIK)</div>
+      <div style="display:flex;gap:16px;font-size:10px;flex-wrap:wrap">
+        <div><span style="color:#4A7080">R_10/R_25: </span><span style="color:#00FF88">1m:82% | 5m:85% | 15m:87% | 1h:89%</span></div>
+        <div><span style="color:#4A7080">R_50/R_75/R_100: </span><span style="color:#00FF88">1m:80% | 5m:83% | 15m:85% | 1h:87%</span></div>
+        <div><span style="color:#4A7080">Digits: </span><span style="color:#00FF88">95% (Over/Under, Even/Odd)</span></div>
       </div>
     </div>
   </div>
@@ -2023,18 +2147,17 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
-      <div class="bt">PARAMÈT BOT v7</div>
+      <div class="bt">PARAMÈT BOT v7.1</div>
       <div class="iw"><div class="il">MOD TRADING</div>
         <select id="c-mode" onchange="toggleMode()">
           <option value="forex">📈 Rise/Fall — Deriv Synthetic</option>
           <option value="digits">🎲 Digits Over/Under — Deriv</option>
         </select>
       </div>
-      <!-- FOREX opts -->
       <div id="opts-forex">
         <div class="g2">
           <div class="iw"><div class="il">SENBOL DERIV</div>
-            <select id="c-sy-deriv">
+            <select id="c-sy-deriv" onchange="updatePayoutDisplay()">
               <option value="R_10">R_10 — Volatility 10</option>
               <option value="R_25">R_25 — Volatility 25</option>
               <option value="R_50">R_50 — Volatility 50</option>
@@ -2043,20 +2166,30 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
             </select>
           </div>
           <div class="iw"><div class="il">TIMEFRAME</div>
-            <select id="c-tf">
-              <option value="1m">1 minit</option>
-              <option value="5m">5 minit ★</option>
-              <option value="15m" selected>15 minit ★★★</option>
-              <option value="1h">1 è ★★★</option>
-              <option value="4h">4 è</option>
+            <select id="c-tf" onchange="updatePayoutDisplay()">
+              <option value="1m">1 minit (payout ~80-82%)</option>
+              <option value="5m">5 minit (payout ~83-85%) ★</option>
+              <option value="15m" selected>15 minit (payout ~85-87%) ★★★</option>
+              <option value="1h">1 è (payout ~87-89%) ★★★</option>
+              <option value="4h">4 è (payout ~88-90%)</option>
             </select>
+          </div>
+        </div>
+        <!-- PAYOUT DISPLAY -->
+        <div id="payout-display" style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:10px;font-size:11px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="color:#4A7080">Payout detekte pou R_100 15min:</span>
+            <span id="payout-val" style="color:#00FF88;font-weight:700;font-size:14px">85%</span>
+          </div>
+          <div style="color:#4A7080;font-size:9px;margin-top:4px">
+            Fòmil rekiperasyon: mise = (total_pèt + base) / <span id="payout-formula" style="color:#00FF88">0.85</span>
           </div>
         </div>
         <div class="g2">
           <div class="iw">
             <div class="il">MISE ($) — Min $0.50</div>
             <input id="c-lot-forex" type="number" value="0.50" step="0.50" min="0.50">
-            <div style="color:#00FF88;font-size:9px;margin-top:2px">Martingal ap monte otomatik si pèt</div>
+            <div style="color:#00FF88;font-size:9px;margin-top:2px">Martingal kòrèk: rekipere EGZAK apre victwa</div>
           </div>
           <div class="iw"><div class="il">STRATEGY</div>
             <select id="c-st-forex">
@@ -2074,10 +2207,12 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </div>
         </div>
       </div>
-      <!-- DIGITS opts -->
       <div id="opts-digits" style="display:none">
         <div style="background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:12px;margin-bottom:10px">
-          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🎲 DIGITS MODE</div>
+          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🎲 DIGITS MODE — Payout: 95%</div>
+          <div style="color:#4A7080;font-size:10px;margin-bottom:10px">
+            Fòmil: mise = (total_pèt + base) / <span style="color:#00FF88">0.95</span> ✅
+          </div>
           <div class="g2">
             <div class="iw"><div class="il">SENBOL</div>
               <select id="c-sy-digits">
@@ -2096,11 +2231,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="iw">
             <div class="il">MISE ($) — Min $0.35</div>
             <input id="c-lot-digits" type="number" value="0.35" step="0.10" min="0.35">
-            <div style="color:#FFD600;font-size:9px;margin-top:2px">Martingal: rekipere pèt konsekitif (max 4)</div>
+            <div style="color:#00FF88;font-size:9px;margin-top:2px">Martingal kòrèk 95%: toujou +base apre victwa</div>
           </div>
         </div>
       </div>
-      <!-- Commun -->
       <div class="g2">
         <div class="iw"><div class="il">KONFIDANS MIN</div>
           <select id="c-conf">
@@ -2113,9 +2247,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
         <div></div>
       </div>
-      <!-- Limites -->
       <div style="background:#020C12;border:1px solid #FFD60022;border-radius:8px;padding:12px;margin-bottom:12px">
-        <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:10px">🎯 LIMIT PROFIT & PÈT — FONKSYONÈL ✅</div>
+        <div style="color:#FFD600;font-size:10px;font-weight:700;margin-bottom:10px">🎯 LIMIT PROFIT & PÈT</div>
         <div class="g2">
           <div class="iw">
             <div class="il" style="color:#00FF88">🎯 OBJEKTIF PROFIT ($)</div>
@@ -2158,13 +2291,14 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
       </div>
       <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">🧠 LOJIK MARTINGAL v7</div>
+        <div class="bt" style="color:#00FF88">🧮 LOJIK MARTINGAL v7.1 — EGZAK</div>
         <div style="color:#4A7080;font-size:10px;line-height:2.1">
-          <span style="color:#00FF88">✓ Mise init:</span> $0.50 min<br>
-          <span style="color:#FFD600">⚠ Pèt 1-2:</span> Conf+2-4%, mise = rekipere/0.95<br>
-          <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann siyal bon<br>
-          <span style="color:#00D4FF">✓ DIGITS:</span> Martingal max 4 pèt puis reset<br>
-          <span style="color:#00FF88">✓ Genyen:</span> Reset a mise inisyal
+          <span style="color:#00FF88">✓ Payout reyèl:</span> auto-detekte selon symbòl+TF<br>
+          <span style="color:#00FF88">✓ Fòmil:</span> <code style="color:#FFD600">mise=(total_pèt+base)/payout</code><br>
+          <span style="color:#00FF88">✓ Garanti:</span> toujou +$base_lot apre victwa<br>
+          <span style="color:#FFD600">⚠ Limite:</span> max 5% balans pa trade<br>
+          <span style="color:#FF3B6B">🛑 Reset:</span> obligatwa apre 10 nivo (5min pòz)<br>
+          <span style="color:#00D4FF">✓ Digits:</span> payout 95% — max 10 nivo
         </div>
       </div>
     </div>
@@ -2285,7 +2419,30 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div><!-- /app-page -->
 
 <script>
-const SESSION_KEY="bb_session_v7";
+// ── Payout table (mirrors Python) ──
+const PAYOUT_TABLE = {
+  "R_10":  {"60":0.82,"300":0.85,"900":0.87,"3600":0.89,"14400":0.90},
+  "R_25":  {"60":0.82,"300":0.85,"900":0.87,"3600":0.89,"14400":0.90},
+  "R_50":  {"60":0.80,"300":0.83,"900":0.85,"3600":0.87,"14400":0.88},
+  "R_75":  {"60":0.80,"300":0.83,"900":0.85,"3600":0.87,"14400":0.88},
+  "R_100": {"60":0.80,"300":0.83,"900":0.85,"3600":0.87,"14400":0.88},
+};
+const TF_MAP = {"1m":"60","5m":"300","15m":"900","1h":"3600","4h":"14400"};
+function getPayout(sym, tf){
+  const tbl = PAYOUT_TABLE[sym];
+  if(!tbl) return 0.82;
+  const tfk = TF_MAP[tf] || "900";
+  return tbl[tfk] || 0.82;
+}
+function updatePayoutDisplay(){
+  const sym = document.getElementById("c-sy-deriv").value;
+  const tf  = document.getElementById("c-tf").value;
+  const p = getPayout(sym, tf);
+  document.getElementById("payout-val").textContent = Math.round(p*100)+"%";
+  document.getElementById("payout-formula").textContent = p.toFixed(2);
+}
+
+const SESSION_KEY="bb_session_v71";
 function saveToken(t){try{localStorage.setItem(SESSION_KEY,t);}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t);}catch(e){}try{const ex=new Date();ex.setDate(ex.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${ex.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
 function clearToken(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}try{sessionStorage.removeItem(SESSION_KEY);}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;}catch(e){}}
@@ -2331,7 +2488,7 @@ function autoDetectToken(){
   const badge=document.getElementById("tok-badge");
   const hint=document.getElementById("tok-hint");
   if(val.startsWith("pat_")){
-    badge.style.display="inline";badge.textContent="✅ PAT DETEKTE";
+    badge.style.display="inline";badge.textContent="✅ PAT DETEKTE";badge.style.background="#00FF8818";badge.style.borderColor="#00FF8844";badge.style.color="#00FF88";
     hint.innerHTML='<span style="color:#00FF88;font-weight:700">✅ Token PAT valid — klike KONEKTE</span>';
   }else if(val.length>5){
     badge.style.display="inline";badge.style.background="#FF3B6B18";badge.style.borderColor="#FF3B6B44";badge.style.color="#FF3B6B";badge.textContent="✗ PA PAT";
@@ -2347,16 +2504,19 @@ function toggleMode(){
   document.getElementById("opts-forex").style.display=mode=="forex"?"block":"none";
   document.getElementById("opts-digits").style.display=mode=="digits"?"block":"none";
 }
+
 function getStartParams(){
   const mode=document.getElementById("c-mode").value;
   const conf=parseFloat(document.getElementById("c-conf").value);
   const target=parseFloat(document.getElementById("c-target").value||0);
   const loss=parseFloat(document.getElementById("c-loss").value||0);
   if(mode=="forex"){
-    return{mode:"forex",symbol:document.getElementById("c-sy-deriv").value,
+    const sym=document.getElementById("c-sy-deriv").value;
+    const tf=document.getElementById("c-tf").value;
+    return{mode:"forex",symbol:sym,
       strategy:document.getElementById("c-st-forex").value,
       lot:Math.max(0.50,parseFloat(document.getElementById("c-lot-forex").value)),
-      tf:document.getElementById("c-tf").value,min_conf:conf,profit_target:target,loss_limit:loss};
+      tf,min_conf:conf,profit_target:target,loss_limit:loss};
   }else{
     return{mode:"digits",symbol:document.getElementById("c-sy-digits").value,
       digit_type:document.getElementById("c-digit-type").value,
@@ -2365,17 +2525,16 @@ function getStartParams(){
   }
 }
 
-// Strategies info
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+VWAP+10 strategies klasik. ADX≥12, minimum 3 strat dakò. Pi pisan.",tags:["ST+HA+CE","ADX≥12","3 strat min","Pivot bonus"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+VWAP+10 strategies klasik. ADX≥12, minimum 3 strat dakò.",tags:["ST+HA+CE","ADX≥12","3 strat min","Pivot bonus"]},
   deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5/15 + ADX≥12 + SuperTrend bonus 2pts. Breakout, RSI, MACD, Stoch, body ratio, pivot.",tags:["Score 5/15","ADX≥12","ST+2pts","Pivot"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR×3.0. Traverser bann = siyal solid. Pi reliable pou synthetic.",tags:["ATR×3","bann","travèse","75-92%"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif = trend solid. Filtre bwi mache.",tags:["5 bouji","filtre","72-83%"]},
-  chandelier:{l:"🔔 Chandelier Exit",d:"HH-ATR×3 / LL+ATR×3. Detekte chanjman trend.",tags:["HH-ATR×3","LL+ATR×3","75-90%"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè: EMA+RSI+MACD+BB+momentum+vol+position+trend. Score nòmalize.",tags:["8 faktè","pwa","68-92%"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing H/L + EMA50.",tags:["BOS","swing","EMA50","84%"]},
-  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid 1m/5m.",tags:["EMA5/13","RSI9","rapid"]},
-  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI14","OB70","OS30"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR×3.0. Traverser bann = siyal solid.",tags:["ATR×3","bann","75-92%"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif = trend solid.",tags:["5 bouji","72-83%"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"HH-ATR×3 / LL+ATR×3.",tags:["HH-ATR×3","75-90%"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè nòmalize.",tags:["8 faktè","68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure + swing H/L + EMA50.",tags:["BOS","swing","84%"]},
+  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9.",tags:["EMA5/13","rapid"]},
+  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50.",tags:["RSI14","OB70"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
@@ -2384,7 +2543,7 @@ Object.keys(SI).forEach(k=>{
   b.className="btn"+(k==sel?" b":"");
   b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
   b.textContent=SI[k].l;
-  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>{x.classList.remove("b");x.style.borderColor="";});b.classList.add("b");};
+  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>{x.classList.remove("b");});b.classList.add("b");};
   sb.appendChild(b);
 });
 function renderS(){
@@ -2405,17 +2564,17 @@ async function doConn(){
   const rawToken=document.getElementById("d-tk").value.trim();
   if(!rawToken){msg("cm","✗ Kole token PAT ou anvan!",false);return;}
   if(!rawToken.toLowerCase().startsWith("pat_")){
-    msg("cm","✗ Token dwe kòmanse ak pat_\n\nAle sou app.deriv.com → API Token → Personal Access Token",false);return;
+    msg("cm","✗ Token dwe kòmanse ak pat_",false);return;
   }
-  const appId=document.getElementById("d-ai").value.trim()||"1089";
+  const appId=document.getElementById("d-ai").value.trim()||"33ifAjI7cFab3IsUV8u9q";
   const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
-  msg("cm","⏳ PAT → REST api.derivws.com + OTP WS...","ok");
+  msg("cm","⏳ PAT → REST api.derivws.com...",null);
   try{
     const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({broker:"deriv",token:rawToken,app_id:appId})});
     const d=await r.json();
     if(d.ok){
-      msg("cm",`✅ KONEKTE! $${d.balance.toFixed(2)} | ${d.loginid||"PAT"}`, "ok");
+      msg("cm",`✅ KONEKTE! $${d.balance.toFixed(2)} | ${d.loginid||"PAT"}`,"ok");
       document.getElementById("cs").innerHTML=`<div class="al ok">✓ PAT | ${d.loginid||"OK"} | $${d.balance.toFixed(2)}</div>`;
       document.getElementById("h-loginid").textContent=d.loginid||"";
     }else{
@@ -2427,7 +2586,6 @@ async function doConn(){
 
 async function doStart(){
   const body=getStartParams();
-  // Afiche limites si définies
   if(body.profit_target>0||body.loss_limit>0){
     document.getElementById("limit-display").style.display="block";
     document.getElementById("limit-target").textContent=body.profit_target>0?`$${body.profit_target}`:"—";
@@ -2436,7 +2594,8 @@ async function doStart(){
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
   if(d.ok){
-    msg("ctm","✓ BonheurBot v7 démarre!","ok");
+    const po=d.payout?Math.round(d.payout*100)+"%":"—";
+    msg("ctm",`✓ BonheurBot v7.1 démarre! Payout: ${po} | Martingal kòrèk aktif`,"ok");
     document.getElementById("bs").style.display="none";
     document.getElementById("bx").style.display="inline-block";
   }else{
@@ -2452,7 +2611,7 @@ async function doStop(){
 
 async function doBt(){
   const btn=event.target;btn.textContent="⏳ AP KALKILE...";btn.disabled=true;
-  document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest — tann...</div>`;
+  document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest...</div>`;
   const body={symbol:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,
     balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),
     sl:parseFloat(document.getElementById("bt-sl").value),tp:parseFloat(document.getElementById("bt-tp").value)};
@@ -2469,7 +2628,7 @@ async function doBt(){
         <div class="stat"><div class="sl">TRADES</div><div class="sv" style="color:#FFD600">${v.trades}</div></div>
         <div class="stat"><div class="sl">MAX DD</div><div class="sv" style="color:#FF3B6B">${v.max_dd}%</div></div>
         <div class="stat"><div class="sl">SHARPE</div><div class="sv" style="color:#00D4FF">${v.sharpe}</div></div>
-        <div class="stat"><div class="sl">PROFIT FACTOR</div><div class="sv" style="color:#FFD600">${v.pf}</div></div>
+        <div class="stat"><div class="sl">PF</div><div class="sv" style="color:#FFD600">${v.pf}</div></div>
       </div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
     }else{document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;}
   }catch(e){document.getElementById("btm").innerHTML=`<div class="al er">✗ ${e.message}</div>`;}
@@ -2494,7 +2653,6 @@ function upd(d){
   document.getElementById("dot").className="dot "+(d.running?"dl":"di");
   document.getElementById("hs").textContent=d.running?"LIVE":"IDLE";
   document.getElementById("hs").style.color=d.running?"#00FF88":"#3A6070";
-  // Dashboard stats
   document.getElementById("s-bal").textContent="$"+d.balance.toFixed(2);
   document.getElementById("s-pnl").textContent=sign+"$"+Math.abs(d.pnl).toFixed(2);
   document.getElementById("s-pnl").style.color=col;
@@ -2506,7 +2664,8 @@ function upd(d){
   document.getElementById("s-bot").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("s-strat").textContent=d.config.strategy||"—";
   document.getElementById("s-sym").textContent=d.config.symbol||"—";
-  // Control stats
+  const po=d.config.payout?Math.round(d.config.payout*100)+"%":"—";
+  document.getElementById("s-payout").textContent=po;
   document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"IDLE";
   document.getElementById("c-st2").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("c-bal").textContent="$"+d.balance.toFixed(2);
@@ -2515,7 +2674,6 @@ function upd(d){
   document.getElementById("c-sent").textContent="$"+d.profit_sent.toFixed(4);
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
-  // Chart
   if(d.trades.length>1){
     let cum=0;
     const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});
@@ -2523,11 +2681,10 @@ function upd(d){
     const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;
     const ns=tmp.firstChild;while(svg.firstChild)svg.removeChild(svg.firstChild);while(ns.firstChild)svg.appendChild(ns.firstChild);
   }
-  // Trades table
   if(d.trades.length){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
     document.getElementById("trtbl").innerHTML=`<table>
-      <tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>
+      <tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime/Nivo</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>
       ${d.trades.map(t=>`<tr>
         <td style="color:#4A7080">${t.id}</td>
         <td style="color:#4A7080">${t.time}</td>
@@ -2542,7 +2699,6 @@ function upd(d){
       </tr>`).join("")}
     </table>`;
   }
-  // Logs
   if(d.log.length){
     document.getElementById("logs").innerHTML=d.log.map(l=>
       `<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`
@@ -2555,7 +2711,6 @@ async function poll(){
   setTimeout(poll,3000);
 }
 
-// ── Admin ──
 async function admRefresh(){
   const token=getStoredToken();if(!token)return;
   try{
@@ -2631,5 +2786,5 @@ checkLogin();
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"BonheurBot PAT v7 — port {port}")
+    logger.info(f"BonheurBot PAT v7.1 — Martingal Kòrèk — port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

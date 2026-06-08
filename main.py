@@ -1,14 +1,13 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     BONHEURBOT PRO v7.2 PAT-ONLY — MARTINGAL FIX + API PAY ║
+║     BONHEURBOT PRO v7.2 PAT-ONLY — MARTINGAL NIVO FIXED     ║
 ║      Multi-User Trading Bot — Deriv PAT                      ║
 ║                                                              ║
 ║  CHANJMAN v7.2:                                              ║
-║   ✅ Nivo Martingal FIX: 0.50→1.05→2.16→4.43→9.09→18.66→38.31
-║   ✅ Payout reyèl: mande API Deriv anvan CHAK trade          ║
-║   ✅ Retire PAYOUT_TABLE statik la nèt                       ║
-║   ✅ get_proposal_payout() — payout egzak nan proposal       ║
-║   ✅ Kalkil martingal ak payout API a                        ║
+║   ✅ 7 nivo Martingal fixed: 0.54/1.13/2.33/4.77/9.80/...  ║
+║   ✅ Payout jwenn nan API proposal (pa PAYOUT_TABLE)         ║
+║   ✅ Timeframe respekte EGZAK (wait = tf_secs)               ║
+║   ✅ Tout lòt fonksyon v7.1 konsève                          ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -26,31 +25,35 @@ DERIV_WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
 DERIV_WS_LEGACY = "wss://ws.derivws.com/websockets/v3"
 
 # ═══════════════════════════════════════════════════════════
-# ██  NIVO MARTINGAL FIX v7.2  ██
-# Kalkilasyon: chak nivo kalkile pou rekipere tout pèt anvan
-# yo + base_lot apre victwa, baze sou payout mwayen ~82%
+# ██  NIVO MARTINGAL FIXED v7.2  ██
 # ═══════════════════════════════════════════════════════════
-MARTINGAL_LEVELS = [0.50, 1.05, 2.16, 4.43, 9.09, 18.66, 38.31]
-# Nivo 1: $0.50 (base)
-# Nivo 2: $1.05
-# Nivo 3: $2.16
-# Nivo 4: $4.43
-# Nivo 5: $9.09
-# Nivo 6: $18.66
-# Nivo 7: $38.31
+# 7 nivo egzak — pa kalkile, fixed
+MARTINGAL_STAKES = [0.54, 1.13, 2.33, 4.77, 9.80, 20.10, 41.30]
 
-MARTINGAL_LEVELS_DIGITS = [0.35, 0.72, 1.48, 3.03, 6.21, 12.74, 26.13]
-# Nivo digits (payout 95% ≈ menm lojik)
-
-def get_martingal_stake(level: int, is_digits: bool = False) -> float:
+def get_martingal_stake(level: int) -> float:
     """
     Retounen mise pou nivo martingal la.
-    level: 0 = premye trade (base), 1 = apre 1 pèt, etc.
-    Max nivo = 6 (endèks 6 = nivo 7)
+    level 0 = premye trade (base)
+    level 1-6 = nivo rekiperasyon
+    Si depase 6 → reset
     """
-    levels = MARTINGAL_LEVELS_DIGITS if is_digits else MARTINGAL_LEVELS
-    idx = min(level, len(levels) - 1)
-    return levels[idx]
+    if level <= 0:
+        return MARTINGAL_STAKES[0]
+    if level >= len(MARTINGAL_STAKES):
+        return MARTINGAL_STAKES[-1]
+    return MARTINGAL_STAKES[level]
+
+
+# ═══════════════════════════════════════════════════════════
+# ██  PAYOUT DEPREKE — pou referans sèlman  ██
+# Nou pa itilize PAYOUT_TABLE ankò — API la bay payout reyèl
+# ═══════════════════════════════════════════════════════════
+def get_payout(symbol: str, tf_secs: int) -> float:
+    """
+    Fonksyon depreke — konsève pou konpatibilite sèlman.
+    Kounye a, payout reyèl jwenn nan proposal API.
+    """
+    return 0.82  # valè defo — pa itilize nan trading loop
 
 
 ACCESS_CODES = {
@@ -142,7 +145,7 @@ def get_state():
 
 
 # ═══════════════════════════════════════════════════════════
-# ██  DERIV PAT REST CLIENT — v7.2 ak get_proposal_payout ██
+# ██  DERIV PAT REST CLIENT — KONPLÈ  ██
 # ═══════════════════════════════════════════════════════════
 class DerivPATClient:
     def __init__(self, pat_token: str, app_id: str = "33ifAjI7cFab3IsUV8u9q", timeout: int = 25):
@@ -300,151 +303,6 @@ class DerivPATClient:
         except: pass
         return self._bal
 
-    # ══════════════════════════════════════════════════════
-    # ██  GET PAYOUT REYÈL nan API — NOUVO v7.2  ██
-    # Voye yon proposal pou $1 epi li payout retounen
-    # ══════════════════════════════════════════════════════
-    def get_proposal_payout(self, symbol: str, direction: str, duration_secs: int = 900) -> float:
-        """
-        Mande Deriv API payout reyèl pou kontrak sa a.
-        Retounen: payout kòm desimal (ex: 0.87 = 87%)
-        Si echèk → retounen 0.82 (konservatif)
-        """
-        ct = "CALL" if direction == "BUY" else "PUT"
-        if   duration_secs <= 60:    dv, du = 1,  "m"
-        elif duration_secs <= 300:   dv, du = 5,  "m"
-        elif duration_secs <= 900:   dv, du = 15, "m"
-        elif duration_secs <= 3600:  dv, du = 1,  "h"
-        else:                        dv, du = 4,  "h"
-
-        import websocket as wsl
-        res = [None]; done = threading.Event()
-
-        def on_open(ws):
-            ws.send(json.dumps({
-                "proposal": 1,
-                "amount": 1.00,
-                "basis": "stake",
-                "contract_type": ct,
-                "currency": "USD",
-                "underlying_symbol": symbol,
-                "duration": dv,
-                "duration_unit": du,
-            }))
-
-        def on_msg(ws, msg):
-            d = json.loads(msg)
-            if d.get("msg_type") == "proposal":
-                if "error" not in d:
-                    prop = d.get("proposal", {})
-                    # payout = payout_per_point oswa ask_price ratio
-                    # ask_price = stake = 1.00
-                    # payout reyèl = (bid_price - ask_price) / ask_price oswa profit / stake
-                    ask  = float(prop.get("ask_price", 1.0))
-                    bid  = float(prop.get("bid_price", 0))
-                    # Fòmil: profit_ratio = bid/ask - 1 si sold early
-                    # Men payout reyèl si genyen: prop["payout"] oswa prop["profit_percent"]
-                    payout_val = prop.get("payout")
-                    if payout_val is not None:
-                        # payout = valè total si genyen (stake + profit)
-                        # profit % = (payout - stake) / stake
-                        p = (float(payout_val) - ask) / max(ask, 0.01)
-                        res[0] = round(p, 4)
-                    else:
-                        # Essaye lòt champ
-                        pp = prop.get("profit_percent") or prop.get("return_percent")
-                        if pp is not None:
-                            res[0] = round(float(pp) / 100, 4)
-                        else:
-                            # Kalkile manual: bid soti nan proposal
-                            if bid > 0 and ask > 0:
-                                res[0] = round((bid - ask) / ask, 4)
-                            else:
-                                res[0] = 0.82
-                done.set()
-                try: ws.close()
-                except: pass
-            elif "error" in d:
-                done.set()
-                try: ws.close()
-                except: pass
-
-        def on_err(ws, e):
-            if not done.is_set(): done.set()
-
-        try:
-            ws = wsl.WebSocketApp(DERIV_WS_PUBLIC, on_open=on_open,
-                                  on_message=on_msg, on_error=on_err)
-            t = threading.Thread(target=ws.run_forever, daemon=True)
-            t.start()
-            done.wait(timeout=15)
-            if res[0] is not None and 0.50 <= res[0] <= 1.0:
-                return res[0]
-        except Exception as e:
-            logger.warning(f"get_proposal_payout echwe: {e}")
-        return 0.82  # fallback konservatif
-
-    def get_digits_proposal_payout(self, symbol: str, contract_type: str, barrier=None) -> float:
-        """
-        Mande payout reyèl pou Digits contract.
-        """
-        import websocket as wsl
-        res = [None]; done = threading.Event()
-        proposal_msg = {
-            "proposal": 1,
-            "amount": 1.00,
-            "basis": "stake",
-            "contract_type": contract_type,
-            "currency": "USD",
-            "underlying_symbol": symbol,
-            "duration": 5,
-            "duration_unit": "t",
-        }
-        if barrier is not None:
-            proposal_msg["barrier"] = str(barrier)
-
-        def on_open(ws):
-            ws.send(json.dumps(proposal_msg))
-
-        def on_msg(ws, msg):
-            d = json.loads(msg)
-            if d.get("msg_type") == "proposal":
-                if "error" not in d:
-                    prop = d.get("proposal", {})
-                    ask  = float(prop.get("ask_price", 1.0))
-                    payout_val = prop.get("payout")
-                    if payout_val is not None:
-                        p = (float(payout_val) - ask) / max(ask, 0.01)
-                        res[0] = round(p, 4)
-                    else:
-                        pp = prop.get("profit_percent") or prop.get("return_percent")
-                        if pp is not None:
-                            res[0] = round(float(pp) / 100, 4)
-                        else:
-                            res[0] = 0.95  # default digits
-                done.set()
-                try: ws.close()
-                except: pass
-            elif "error" in d:
-                done.set()
-                try: ws.close()
-                except: pass
-
-        def on_err(ws, e):
-            if not done.is_set(): done.set()
-
-        try:
-            ws = wsl.WebSocketApp(DERIV_WS_PUBLIC, on_open=on_open,
-                                  on_message=on_msg, on_error=on_err)
-            t = threading.Thread(target=ws.run_forever, daemon=True)
-            t.start()
-            done.wait(timeout=15)
-            if res[0] is not None and 0.50 <= res[0] <= 1.0:
-                return res[0]
-        except Exception as e:
-            logger.warning(f"get_digits_payout echwe: {e}")
-        return 0.95  # fallback digits
-
     def get_candles(self, symbol="R_100", count=200, gran=60):
         if self._account_id:
             def send(ws):
@@ -501,6 +359,109 @@ class DerivPATClient:
         if not res[0]: return []
         return [{"price": float(p), "time": t}
                 for p, t in zip(res[0].get("prices", []), res[0].get("times", []))]
+
+    # ══════════════════════════════════════════════════════
+    # ██  PAYOUT REYÈL NAN PROPOSAL API v7.2  ██
+    # Rele proposal pou jwenn payout aktyèl avant chak trade
+    # ══════════════════════════════════════════════════════
+    def get_proposal_payout(self, symbol: str, contract_type: str,
+                             amount: float, duration_secs: int) -> float:
+        """
+        Mande payout reyèl nan API Deriv via proposal.
+        Retounen payout kòm desimal (ex: 0.87 = 87%).
+        Si echèk → retounen 0.82 kòm valè defo sekirite.
+        """
+        if   duration_secs <= 60:    dv, du = 1,  "m"
+        elif duration_secs <= 300:   dv, du = 5,  "m"
+        elif duration_secs <= 900:   dv, du = 15, "m"
+        elif duration_secs <= 3600:  dv, du = 1,  "h"
+        else:                        dv, du = 4,  "h"
+
+        proposal_msg = {
+            "proposal":          1,
+            "amount":            float(amount),
+            "basis":             "stake",
+            "contract_type":     contract_type,
+            "currency":          "USD",
+            "underlying_symbol": symbol,
+            "duration":          dv,
+            "duration_unit":     du,
+        }
+
+        def send(ws): ws.send(json.dumps(proposal_msg))
+
+        def recv(d, ws, res, err, done):
+            if d.get("msg_type") == "proposal":
+                if "error" in d:
+                    err[0] = d["error"].get("message", "proposal err")
+                    done.set()
+                    return
+                p = d.get("proposal", {})
+                # Payout nan proposal = payout_percentage / 100
+                # oswa = (payout - stake) / stake
+                ask   = float(p.get("ask_price", 0) or 0)
+                payout_abs = float(p.get("payout", 0) or 0)
+                if ask > 0 and payout_abs > 0:
+                    # payout reyèl = profit / stake = (payout_abs - ask) / ask
+                    real_payout = (payout_abs - ask) / ask
+                    res[0] = round(max(0.50, min(1.0, real_payout)), 4)
+                else:
+                    # Eseye payout_percent direkteman
+                    pp = float(p.get("payout_percentage", 0) or 0)
+                    if pp > 0:
+                        res[0] = round(pp / 100.0, 4)
+                    else:
+                        res[0] = 0.82  # defo sekirite
+                done.set()
+                try: ws.close()
+                except: pass
+
+        result, e = self._ws_call(send, recv, timeout=15)
+        if result and result > 0:
+            return result
+        logger.warning(f"get_proposal_payout echwe ({e}) — itilize 0.82 defo")
+        return 0.82
+
+    def get_digits_proposal_payout(self, symbol: str, contract_type: str,
+                                    amount: float, barrier=None) -> float:
+        """
+        Payout reyèl pou Digits trade via proposal.
+        """
+        proposal_msg = {
+            "proposal":          1,
+            "amount":            float(amount),
+            "basis":             "stake",
+            "contract_type":     contract_type,
+            "currency":          "USD",
+            "underlying_symbol": symbol,
+            "duration":          5,
+            "duration_unit":     "t",
+        }
+        if barrier is not None:
+            proposal_msg["barrier"] = str(barrier)
+
+        def send(ws): ws.send(json.dumps(proposal_msg))
+
+        def recv(d, ws, res, err, done):
+            if d.get("msg_type") == "proposal":
+                if "error" in d:
+                    err[0] = d["error"].get("message", "err"); done.set(); return
+                p = d.get("proposal", {})
+                ask       = float(p.get("ask_price", 0) or 0)
+                payout_ab = float(p.get("payout", 0) or 0)
+                if ask > 0 and payout_ab > 0:
+                    res[0] = round((payout_ab - ask) / ask, 4)
+                else:
+                    pp = float(p.get("payout_percentage", 0) or 0)
+                    res[0] = round(pp / 100.0, 4) if pp > 0 else 0.95
+                done.set()
+                try: ws.close()
+                except: pass
+
+        result, e = self._ws_call(send, recv, timeout=15)
+        if result and result > 0:
+            return result
+        return 0.95  # defo digits
 
     def place_trade(self, symbol, direction, amount=1.0, duration_secs=60):
         ct = "CALL" if direction == "BUY" else "PUT"
@@ -1275,35 +1236,22 @@ def _refresh_balance(api, st):
 
 
 # ═══════════════════════════════════════════════════════════
-# ██  DIGITS TRADING LOOP — NIVO FIX + API PAYOUT v7.2  ██
+# ██  DIGITS TRADING LOOP — MARTINGAL NIVO FIXED v7.2  ██
 # ═══════════════════════════════════════════════════════════
 def digits_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id") != bot_id: return
     cfg = st["config"]
     symbol     = cfg.get("symbol", "R_10")
-    lot        = float(cfg.get("lot", 0.35))
     digit_type = cfg.get("digit_type", "over_under")
     min_conf   = float(cfg.get("min_conf", 0.65))
 
     MIN_STAKE = 0.35
-    base_lot  = round(max(MIN_STAKE, MARTINGAL_LEVELS_DIGITS[0]), 2)
-    # Itilize base_lot itilizatè a si li pi gwo
-    if lot > base_lot:
-        # Recalcule tout nivo proportionèlman
-        ratio = lot / MARTINGAL_LEVELS_DIGITS[0]
-        levels = [round(l * ratio, 2) for l in MARTINGAL_LEVELS_DIGITS]
-        base_lot = levels[0]
-    else:
-        levels = MARTINGAL_LEVELS_DIGITS
-        base_lot = levels[0]
+    MAX_MARTINGAL_LEVELS = len(MARTINGAL_STAKES)  # 7 nivo
+
+    add_log(st, f"🎲 Digits Bot PAT v7.2 | {symbol} | {digit_type} | Nivo:${MARTINGAL_STAKES}")
+    add_log(st, f"🛡 Pwoteksyon: Max {MAX_MARTINGAL_LEVELS} nivo fixed | Payout API reyèl", "INFO")
 
     consec_losses = 0
-    MAX_LEVELS    = len(levels)  # 7 nivo
-    MAX_STAKE_PCT = 0.05  # 5% sekirite
-
-    add_log(st, f"🎲 Digits Bot PAT v7.2 | {symbol} | {digit_type} | Base:${base_lot}")
-    add_log(st, f"📊 Nivo FIX: {' → '.join(['$'+str(l) for l in levels])}", "INFO")
-    add_log(st, f"💡 Payout: mande API Deriv anvan chak trade", "INFO")
 
     while st["running"]:
         if bot_id and st.get("bot_id") != bot_id:
@@ -1317,23 +1265,17 @@ def digits_trading_loop(st, bot_id=None):
 
             _refresh_balance(api, st)
 
-            # ── Reset si max nivo ──
-            if consec_losses >= MAX_LEVELS:
-                add_log(st, f"🔄 RESET: {MAX_LEVELS} nivo rive | Pòz 3 min...", "WARN")
+            # ── Reset si depase max nivo ──
+            if consec_losses >= MAX_MARTINGAL_LEVELS:
+                add_log(st, f"🔄 RESET: {MAX_MARTINGAL_LEVELS} nivo fini | Pause 3min", "WARN")
                 consec_losses = 0
                 time.sleep(180); continue
 
-            current_lot = levels[consec_losses]
-
-            # ── Sekirite 5% balans ──
-            if st["balance"] > 0:
-                max_allowed = round(st["balance"] * MAX_STAKE_PCT, 2)
-                if current_lot > max_allowed and max_allowed >= MIN_STAKE:
-                    add_log(st, f"⚠ LIMITE 5%: ${current_lot:.2f} → ${max_allowed:.2f}", "WARN")
-                    current_lot = max_allowed
+            # ── Mise selon nivo ──
+            current_lot = get_martingal_stake(consec_losses)
 
             if st["balance"] < current_lot:
-                add_log(st, f"⚠ Balans ensifizan — reset", "WARN")
+                add_log(st, f"⚠ Balans ${st['balance']:.2f} ensifizan pou nivo {consec_losses} (${current_lot:.2f}) — reset", "WARN")
                 consec_losses = 0; time.sleep(10); continue
 
             ticks = api.get_ticks(symbol, 100)
@@ -1352,17 +1294,21 @@ def digits_trading_loop(st, bot_id=None):
                 elif action == "ODD":  contract_type = "DIGITODD";  sig = "ODD"
 
             if sig == "NONE":
-                add_log(st, "⏭ Pa gen siyal — tann 15sek..."); time.sleep(15); continue
+                add_log(st, "⏭ Pa gen siyal klè — tann 15sek..."); time.sleep(15); continue
             if conf < min_conf:
                 add_log(st, f"⏭ Conf {conf:.0%} < {min_conf:.0%}"); time.sleep(15); continue
 
-            # ══════════════════════════════════════════════
-            # ██  MANDE PAYOUT REYÈL nan API  ██
-            # ══════════════════════════════════════════════
-            add_log(st, f"🔍 Ap mande payout API pou {contract_type}...")
-            real_payout = api.get_digits_proposal_payout(symbol, contract_type, barrier)
-            add_log(st, f"💰 Payout API: {real_payout:.1%} | Nivo:{consec_losses+1}/{MAX_LEVELS} | Mise:${current_lot:.2f}")
+            # ── Jwenn payout reyèl nan API ──
+            try:
+                api_payout = api.get_digits_proposal_payout(symbol, contract_type, current_lot, barrier)
+                add_log(st, f"💱 Payout API Digits: {api_payout:.2%}", "INFO")
+            except Exception as ep:
+                api_payout = 0.95
+                add_log(st, f"⚠ Payout API echwe ({ep}) → defo 95%", "WARN")
 
+            if consec_losses > 0:
+                add_log(st, f"📊 Nivo {consec_losses+1}/{MAX_MARTINGAL_LEVELS} | Mise:${current_lot:.2f} | Payout:{api_payout:.2%}")
+            add_log(st, f"✅ {sig} | Conf:{conf:.0%} | Mise:${current_lot:.2f} | Payout:{api_payout:.2%}")
             bal_before = st["balance"]
 
             try:
@@ -1373,8 +1319,8 @@ def digits_trading_loop(st, bot_id=None):
 
                 bal_open = float(r.get("balance_after", bal_before - current_lot))
                 st["balance"] = bal_open
-                add_log(st, f"⏳ #{cid} | {sig} | Payout:{real_payout:.1%} | Ap tann...", "SUCCESS")
 
+                add_log(st, f"⏳ #{cid} | {sig} | Ap tann rezilta...", "SUCCESS")
                 result = api.wait_contract_result(cid, timeout=35)
 
                 pnl = 0.0; won = False
@@ -1407,21 +1353,17 @@ def digits_trading_loop(st, bot_id=None):
 
                 st["total_pnl"] += pnl
 
+                # ── Martingal nivo fixed ──
                 if won:
-                    add_log(st, f"🏆 GENYEN! +${pnl:.2f} | Payout reyèl: {real_payout:.1%} | Reset nivo 1", "SUCCESS")
+                    add_log(st, f"🏆 WON nivo {consec_losses}! Reset → nivo 0 (${MARTINGAL_STAKES[0]})", "SUCCESS")
                     consec_losses = 0
                 else:
                     consec_losses += 1
-                    if consec_losses < MAX_LEVELS:
-                        next_lot = levels[consec_losses]
-                        # Sekirite 5%
-                        if st["balance"] > 0:
-                            max_safe = round(st["balance"] * MAX_STAKE_PCT, 2)
-                            if next_lot > max_safe and max_safe >= MIN_STAKE:
-                                next_lot = max_safe
-                        add_log(st, f"⚠ Pèt {consec_losses}/{MAX_LEVELS} | Prochèn nivo: ${next_lot:.2f}", "WARN")
+                    if consec_losses < MAX_MARTINGAL_LEVELS:
+                        nxt = get_martingal_stake(consec_losses)
+                        add_log(st, f"⚠ PÈT {consec_losses}/{MAX_MARTINGAL_LEVELS} | Prochèn nivo: ${nxt:.2f}", "WARN")
                     else:
-                        add_log(st, f"🔄 MAX {MAX_LEVELS} NIVO! RESET + PAUSE 3min", "WARN")
+                        add_log(st, f"🔄 MAX NIVO {MAX_MARTINGAL_LEVELS}! Reset + Pause 3min", "WARN")
                         consec_losses = 0
                         time.sleep(180)
 
@@ -1438,7 +1380,7 @@ def digits_trading_loop(st, bot_id=None):
                     "stake":    round(current_lot, 2),
                     "pnl":      round(pnl, 2),
                     "status":   "won" if won else "lost",
-                    "regime":   f"Nivo:{consec_losses}|Pay:{real_payout:.0%}",
+                    "regime":   f"N{consec_losses}|P{api_payout:.0%}",
                 }
                 st["trades"].insert(0, trade)
 
@@ -1461,39 +1403,33 @@ def digits_trading_loop(st, bot_id=None):
 
 
 # ═══════════════════════════════════════════════════════════
-# ██  MAIN TRADING LOOP — NIVO FIX + API PAYOUT v7.2  ██
+# ██  MAIN DERIV TRADING LOOP — MARTINGAL NIVO FIXED v7.2  ██
 # ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id") != bot_id: return
     cfg = st["config"]
     symbol   = cfg.get("symbol", "R_100")
     strategy = cfg.get("strategy", "confluence")
-    lot      = float(cfg.get("lot", 0.50))
     tf       = int(cfg.get("tf_secs", 900))
     min_conf = float(cfg.get("min_conf", 0.65))
     fn       = STRATEGIES.get(strategy, strat_confluence_elite)
 
-    wait_after = tf + 90
-    MIN_STAKE  = 0.50
-    # ── Kalkile nivo martingal FIX ──
-    base_lot = round(max(MIN_STAKE, MARTINGAL_LEVELS[0]), 2)
-    if lot > MARTINGAL_LEVELS[0]:
-        ratio = lot / MARTINGAL_LEVELS[0]
-        levels = [round(l * ratio, 2) for l in MARTINGAL_LEVELS]
-        base_lot = levels[0]
-    else:
-        levels = MARTINGAL_LEVELS
-        base_lot = levels[0]
+    # ══════════════════════════════════════════════════════
+    # ██  TIMEFRAME RESPEKTE EGZAK v7.2  ██
+    # wait_after = tf EGZAK — pa tf + 90
+    # ══════════════════════════════════════════════════════
+    wait_after = tf  # EGZAK — pa tf + 90
 
-    consec_losses = 0
-    MAX_LEVELS    = len(levels)  # 7 nivo
+    MIN_STAKE  = 0.50
+    MAX_MARTINGAL_LEVELS    = len(MARTINGAL_STAKES)  # 7
     MAX_LOSSES_BEFORE_PAUSE = 3
     PAUSE_WAIT_SECS         = 45
-    MAX_STAKE_PCT           = 0.05
 
-    add_log(st, f"🚀 BonheurBot PAT v7.2 | {symbol} | {strategy} | TF:{tf//60}min")
-    add_log(st, f"📊 Nivo FIX: {' → '.join(['$'+str(l) for l in levels])}", "INFO")
-    add_log(st, f"💡 Payout: mande API Deriv ANVAN chak trade | Max {MAX_LEVELS} nivo", "INFO")
+    add_log(st, f"🚀 BonheurBot PAT v7.2 | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
+    add_log(st, f"📊 Nivo Martingal: {[f'${s}' for s in MARTINGAL_STAKES]}")
+    add_log(st, f"⏱ Wait apre trade: {wait_after}s EGZAK (={tf//60}min) | Payout API reyèl aktivé")
+
+    consec_losses = 0
 
     while st["running"]:
         if bot_id and st.get("bot_id") != bot_id:
@@ -1507,9 +1443,9 @@ def trading_loop(st, bot_id=None):
 
             _refresh_balance(api, st)
 
-            # ── Reset obligatwa si max nivo ──
-            if consec_losses >= MAX_LEVELS:
-                add_log(st, f"🔄 RESET OBLIGATWA: {MAX_LEVELS} nivo | Pòz 5 min...", "WARN")
+            # ── Reset si max nivo ──
+            if consec_losses >= MAX_MARTINGAL_LEVELS:
+                add_log(st, f"🔄 RESET: {MAX_MARTINGAL_LEVELS} nivo fini | Pause 5min", "WARN")
                 consec_losses = 0
                 time.sleep(300); continue
 
@@ -1522,9 +1458,16 @@ def trading_loop(st, bot_id=None):
             st_sig, st_c = supertrend(candles)
             ha_sig, ha_c = heikin_ashi_trend(candles)
 
-            add_log(st, f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
+            # ── Mise selon nivo martingal fixed ──
+            current_lot = get_martingal_stake(consec_losses)
 
-            # ── Pòze apre pertes konsekitif ──
+            add_log(st, f"📡 {len(candles)} bouji | {symbol} | {regime} | ADX:{adx_val:.0f} | ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%}) | Nivo:{consec_losses} Mise:${current_lot:.2f}")
+
+            if st["balance"] < current_lot:
+                add_log(st, f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset", "WARN")
+                consec_losses = 0; continue
+
+            # ── Pòz apre pèt konsekitif ──
             if consec_losses >= MAX_LOSSES_BEFORE_PAUSE:
                 mache_bon = regime in ("TRENDING_UP", "TRENDING_DN", "RANGING") and adx_val >= 12
                 if regime == "RANGING":
@@ -1532,6 +1475,8 @@ def trading_loop(st, bot_id=None):
                 if not mache_bon:
                     add_log(st, f"⏸ PÒZ APRE {consec_losses} PÈT | {regime}(ADX:{adx_val:.0f}) — Tann {PAUSE_WAIT_SECS}sek", "WARN")
                     time.sleep(PAUSE_WAIT_SECS); continue
+                else:
+                    add_log(st, f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f}", "SUCCESS")
 
             if regime == "VOLATILE":
                 add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...", "WARN")
@@ -1541,58 +1486,54 @@ def trading_loop(st, bot_id=None):
             if strategy == "confluence":
                 req_strats = 3 if consec_losses == 0 else (4 if consec_losses <= 2 else 5)
                 sig, conf = strat_confluence_elite(candles, min_strats=req_strats, min_per_conf=0.65)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Elite({req_strats}strat)")
             elif strategy == "deriv_pro":
                 sig, conf = strat_deriv_pro_elite(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | DerivPro Elite")
             elif strategy == "supertrend":
                 sig, conf = supertrend(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | SuperTrend")
             elif strategy == "heikin_ashi":
                 sig, conf = heikin_ashi_trend(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Heikin Ashi")
             elif strategy == "chandelier":
                 sig, conf = chandelier_exit(candles)
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | Chandelier")
             else:
                 sig, conf = fn(candles)
-
-            add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
+                add_log(st, f"📊 {symbol} | {sig} | Conf:{conf:.0%} | {strategy}")
 
             if sig == "BUY"  and regime == "TRENDING_DN":
-                add_log(st, f"⛔ REJTE BUY — Mache ap DESANN.", "WARN")
+                add_log(st, f"⛔ REJTE BUY — Mache ap DESANN. {st_sig}/{ha_sig}", "WARN")
                 time.sleep(tf); continue
             if sig == "SELL" and regime == "TRENDING_UP":
-                add_log(st, f"⛔ REJTE SELL — Mache ap MONTE.", "WARN")
+                add_log(st, f"⛔ REJTE SELL — Mache ap MONTE. {st_sig}/{ha_sig}", "WARN")
                 time.sleep(tf); continue
 
             adaptive_conf = min_conf + (0.02 if consec_losses==1 else (0.04 if consec_losses>=2 else 0))
             if sig == "NONE" or conf < adaptive_conf:
-                add_log(st, f"⏭ {('Pa gen siyal' if sig=='NONE' else f'Conf {conf:.0%} < {adaptive_conf:.0%}')} — tann...")
+                reason = "Pa gen siyal" if sig == "NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
+                add_log(st, f"⏭ {reason} — tann pwochen bouji...")
                 time.sleep(tf); continue
-
-            # ── Nivo FIX ──
-            current_lot = levels[consec_losses]
-            # Sekirite 5% balans
-            if st["balance"] > 0:
-                max_safe = round(st["balance"] * MAX_STAKE_PCT, 2)
-                if current_lot > max_safe and max_safe >= MIN_STAKE:
-                    add_log(st, f"⚠ LIMITE 5%: ${current_lot:.2f} → ${max_safe:.2f}", "WARN")
-                    current_lot = max_safe
-
-            if st["balance"] < current_lot:
-                add_log(st, f"⚠ Balans ensifizan — reset nivo 1", "WARN")
-                consec_losses = 0
-                current_lot = levels[0]
-
-            # ══════════════════════════════════════════════
-            # ██  MANDE PAYOUT REYÈL nan API ANVAN TRADE  ██
-            # ══════════════════════════════════════════════
-            add_log(st, f"🔍 Ap mande payout API pou {symbol} {sig} TF:{tf//60}min...")
-            real_payout = api.get_proposal_payout(symbol, sig, tf)
-            add_log(st, f"💰 Payout API reyèl: {real_payout:.1%} | Nivo:{consec_losses+1}/{MAX_LEVELS} | Mise:${current_lot:.2f}")
 
             pv_dir = "TRENDING_UP" if sig == "BUY" else "TRENDING_DN"
             in_pivot, piv_bonus = pivot_signal(candles, pv_dir)
             pivot_info = " 🎯+PIVOT" if in_pivot else ""
 
+            # ══════════════════════════════════════════════
+            # ██  PAYOUT REYÈL NAN API PROPOSAL v7.2  ██
+            # Rele proposal API pou jwenn payout aktyèl
+            # ══════════════════════════════════════════════
+            ct_for_payout = "CALL" if sig == "BUY" else "PUT"
+            try:
+                api_payout = api.get_proposal_payout(symbol, ct_for_payout, current_lot, tf)
+                add_log(st, f"💱 Payout API reyèl: {api_payout:.2%} ({symbol} {tf//60}min)", "INFO")
+            except Exception as ep:
+                api_payout = 0.82
+                add_log(st, f"⚠ Payout API echwe ({ep}) → defo 82%", "WARN")
+
             entry = candles[-1]["close"]
-            add_log(st, f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | Mise:${current_lot:.2f} | Pay:{real_payout:.1%}{pivot_info}")
+            add_log(st, f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | Nivo:{consec_losses} | Mise:${current_lot:.2f} | Payout:{api_payout:.2%}{pivot_info}")
 
             bal_before = st["balance"]
             pnl = 0.0; ok = False
@@ -1604,7 +1545,18 @@ def trading_loop(st, bot_id=None):
                     bal_open = float(r.get("balance_after", bal_before - current_lot))
                     st["balance"] = bal_open
                     ok = True
-                    add_log(st, f"⏳ #{cid} | Ap tann {wait_after//60}min {wait_after%60}s...", "SUCCESS")
+
+                    # ══════════════════════════════════════════
+                    # ██  TIMEFRAME EGZAK v7.2  ██
+                    # wait_after = tf EGZAK
+                    # ══════════════════════════════════════════
+                    tf_min = tf // 60
+                    tf_sec = tf % 60
+                    if tf_sec > 0:
+                        tf_str = f"{tf_min}min {tf_sec}s"
+                    else:
+                        tf_str = f"{tf_min}min"
+                    add_log(st, f"⏳ #{cid} | Ap tann {tf_str} (TF egzak)...", "SUCCESS")
                     time.sleep(wait_after)
 
                     bal_close = None
@@ -1636,25 +1588,21 @@ def trading_loop(st, bot_id=None):
                 if _check_limits(st, cfg):
                     break
 
+                # ── Martingal nivo fixed ──
                 if pnl > 0:
-                    prev_losses = consec_losses
-                    if prev_losses > 0:
-                        add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) | +${pnl:.2f} | Payout API: {real_payout:.1%}", "SUCCESS")
+                    prev = consec_losses
+                    if prev > 0:
+                        add_log(st, f"🏆 WON nivo {prev}! Reset → nivo 0 (${MARTINGAL_STAKES[0]})", "SUCCESS")
                     else:
-                        add_log(st, f"✅ Genyen +${pnl:.2f} | Payout: {real_payout:.1%}", "SUCCESS")
+                        add_log(st, f"✅ Genyen +${pnl:.2f}", "SUCCESS")
                     consec_losses = 0
-
                 else:
                     consec_losses += 1
-                    if consec_losses < MAX_LEVELS:
-                        next_lot = levels[consec_losses]
-                        if st["balance"] > 0:
-                            max_safe = round(st["balance"] * MAX_STAKE_PCT, 2)
-                            if next_lot > max_safe and max_safe >= MIN_STAKE:
-                                next_lot = max_safe
-                        add_log(st, f"⚠ PÈT {consec_losses}/{MAX_LEVELS} | Prochèn nivo: ${next_lot:.2f} | Pay:{real_payout:.1%}", "WARN")
+                    if consec_losses < MAX_MARTINGAL_LEVELS:
+                        nxt = get_martingal_stake(consec_losses)
+                        add_log(st, f"⚠ PÈT {consec_losses}/{MAX_MARTINGAL_LEVELS} | Prochèn nivo: ${nxt:.2f} | Payout:{api_payout:.2%}", "WARN")
                     else:
-                        add_log(st, f"🔄 MAX {MAX_LEVELS} NIVO! RESET + PAUSE 5min", "WARN")
+                        add_log(st, f"🔄 MAX NIVO! Reset + Pause 5min", "WARN")
                         consec_losses = 0
                         time.sleep(300)
 
@@ -1670,7 +1618,7 @@ def trading_loop(st, bot_id=None):
                     "stake":    round(current_lot, 2),
                     "pnl":      round(pnl, 2),
                     "status":   "won" if pnl > 0 else "lost",
-                    "regime":   f"{regime}|N{consec_losses}|{real_payout:.0%}",
+                    "regime":   f"{regime}|N{consec_losses}|P{api_payout:.0%}",
                 }
                 st["trades"].insert(0, trade)
 
@@ -1692,7 +1640,7 @@ def trading_loop(st, bot_id=None):
 
 
 # ═══════════════════════════════════════════════════════════
-# FLASK ROUTES — IDANTIK v7.1 + nouvo payout_levels
+# FLASK ROUTES
 # ═══════════════════════════════════════════════════════════
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
@@ -1701,7 +1649,7 @@ def api_connect():
         d = freq.json
         broker = d.get("broker")
         if broker != "deriv":
-            return jsonify({"ok": False, "error": "Sèlman Deriv PAT sipòte"})
+            return jsonify({"ok": False, "error": "Sèlman Deriv PAT sipòte nan vèsyon sa"})
 
         raw_token = d.get("token", "").strip()
         app_id    = d.get("app_id", "1089").strip() or "1089"
@@ -1721,7 +1669,7 @@ def api_connect():
                 "  App ID: 1089"
             )})
 
-        add_log(st, f"🔑 PAT → REST api.derivws.com | App ID:{app_id}", "INFO")
+        add_log(st, f"🔑 PAT → REST api.derivws.com + OTP WS | App ID:{app_id}", "INFO")
 
         client = DerivPATClient(raw_token, app_id)
         try:
@@ -1738,7 +1686,7 @@ def api_connect():
         st["balance"]   = balance
         st["connected"] = True
 
-        note = f"✅ PAT | {client.loginid} | ${balance:.2f}"
+        note = f"✅ PAT | {client.loginid} | ${balance:.2f} | account_id:{client._account_id[:12]}..."
         add_log(st, note, "SUCCESS")
         return jsonify({"ok": True, "balance": balance, "broker": "deriv",
                         "note": note, "token_type": "PAT", "loginid": client.loginid})
@@ -1774,9 +1722,7 @@ def api_start():
         "loss_limit":    float(d.get("loss_limit", 0)),
         "mode":          d.get("mode", "forex"),
         "digit_type":    d.get("digit_type", "over_under"),
-        # Afiche nivo pou UI
-        "martingal_levels": MARTINGAL_LEVELS_DIGITS if d.get("mode")=="digits" else MARTINGAL_LEVELS,
-        "payout_source": "API Deriv (reyèl)",
+        "payout":        0.0,  # payout jwenn nan API reyèl
     }
     import random, string
     bot_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
@@ -1785,17 +1731,17 @@ def api_start():
     mode = d.get("mode", "forex")
     if mode == "digits":
         threading.Thread(target=digits_trading_loop, args=(st, bot_id), daemon=True).start()
-        add_log(st, f"🎲 Digits mode démarre | Nivo FIX | Payout: mande API", "INFO")
+        add_log(st, f"🎲 Digits mode démarre (PAT) | Payout API reyèl | Nivo: {MARTINGAL_STAKES}", "INFO")
     else:
         threading.Thread(target=trading_loop, args=(st, bot_id), daemon=True).start()
-        add_log(st, f"📈 Forex mode démarre | Nivo FIX | Payout: mande API anvan chak trade", "INFO")
+        add_log(st, f"📈 Forex mode démarre | Payout API reyèl | Wait=TF egzak | Nivo: {MARTINGAL_STAKES}", "INFO")
 
     target = st["config"]["profit_target"]
     loss   = st["config"]["loss_limit"]
     if target > 0: add_log(st, f"🎯 Objektif profit: ${target:.2f}", "INFO")
     if loss   > 0: add_log(st, f"🛑 Limit pèt:      ${loss:.2f}", "INFO")
 
-    return jsonify({"ok": True, "levels": st["config"]["martingal_levels"]})
+    return jsonify({"ok": True, "stakes": MARTINGAL_STAKES})
 
 
 @app.route("/api/stop", methods=["POST"])
@@ -2015,7 +1961,7 @@ def index(): return render_template_string(HTML)
 
 
 # ═══════════════════════════════════════════════════════════
-# HTML INTERFACE — v7.2 NIVO FIX + API PAYOUT
+# HTML INTERFACE — v7.2 MARTINGAL NIVO FIXED
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
@@ -2068,12 +2014,12 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </head>
 <body>
 
-<!-- LOGIN -->
+<!-- ── LOGIN ── -->
 <div id="login-page" style="display:none;min-height:100vh;background:#040A0F;align-items:center;justify-content:center;flex-direction:column">
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
     <div style="font-size:20px;font-weight:900;color:#00FF88;letter-spacing:2px;margin-bottom:4px">BonheurBot Pro</div>
-    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">v7.2 — Nivo FIX + Payout API Reyèl</div>
+    <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot v7.2 — Martingal Nivo Fixed</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
       <input id="login-code" type="text" placeholder="BB-XXXX-XXXX"
@@ -2100,7 +2046,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
 </div>
 
-<!-- APP -->
+<!-- ── APP ── -->
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
@@ -2142,12 +2088,12 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div class="box">
       <div class="bt">KONEKSYON — TOKEN PAT SÈLMAN</div>
       <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:8px;padding:12px;margin-bottom:12px">
-        <div style="color:#00FF88;font-size:11px;font-weight:700;margin-bottom:8px">✅ NOUVO v7.2 — Nivo FIX + Payout API Reyèl</div>
+        <div style="color:#00FF88;font-size:11px;font-weight:700;margin-bottom:8px">✅ TOKEN PAT — Martingal Nivo Fixed v7.2</div>
         <div style="color:#4A7080;font-size:10px;line-height:2.0">
-          → Nivo FIX: <b style="color:#FFD600">$0.50 → $1.05 → $2.16 → $4.43 → $9.09 → $18.66 → $38.31</b><br>
-          → Payout: <b style="color:#00FF88">mande API Deriv ANVAN chak trade</b><br>
-          → Retire tab payout statik — <b style="color:#00FF88">payout reyèl toujou</b><br>
-          → Limite sekirite: max <b style="color:#FF3B6B">7 nivo</b> + max <b style="color:#FF3B6B">5% balans</b>
+          → Payout reyèl: <b style="color:#FFD600">nan API proposal</b> anvan chak trade<br>
+          → Nivo Martingal: <b style="color:#00FF88">$0.54→$1.13→$2.33→$4.77→$9.80→$20.10→$41.30</b><br>
+          → Timeframe: <b style="color:#00FF88">EGZAK</b> — wait = TF user mete a<br>
+          → Max 7 nivo → reset + pause 5min
         </div>
       </div>
       <div class="iw">
@@ -2158,7 +2104,15 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <input id="d-tk" type="password" placeholder="pat_xxxxxxxxxxxxxxxxx..." oninput="autoDetectToken()">
         <div id="tok-hint" style="color:#4A7080;font-size:9px;margin-top:4px">Token <b>dwe</b> kòmanse ak <code style="color:#FFD600">pat_</code></div>
       </div>
-      <div class="iw"><div class="il">APP ID</div><input id="d-ai" value="33ifAjI7cFab3IsUV8u9q"></div>
+      <div class="iw"><div class="il">APP ID (default 33ifAjI7cFab3IsUV8u9q)</div><input id="d-ai" value="33ifAjI7cFab3IsUV8u9q"></div>
+      <div style="background:#071219;border:1px solid #FFD60022;border-radius:6px;padding:10px;margin-bottom:12px;font-size:10px;color:#4A7080;line-height:1.8">
+        <span style="color:#FFD600;font-weight:700">KIJAN KREYE TOKEN PAT:</span><br>
+        1. Ale sou <span style="color:#00FF88">app.deriv.com</span><br>
+        2. Klike foto ou → <b>API Token</b><br>
+        3. Chwazi <b>Personal Access Token</b><br>
+        4. Koche: ✓ Read ✓ Trade ✓ Payments<br>
+        5. Kole token (kòmanse ak <span style="color:#FFD600">pat_</span>)
+      </div>
       <div id="cm" style="margin-bottom:8px"></div>
       <button class="btn fw" onclick="doConn()">⚡ KONEKTE PAT</button>
       <div id="cs" style="margin-top:10px"></div>
@@ -2174,28 +2128,57 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div style="display:flex;gap:10px;margin-top:12px">
         <div class="stat"><div class="sl">STRATEGY</div><div id="s-strat" style="color:#FFD600;font-size:12px;font-weight:700">—</div></div>
         <div class="stat"><div class="sl">SENBOL</div><div id="s-sym" style="font-size:12px;font-weight:700">—</div></div>
-        <div class="stat"><div class="sl">PAYOUT SOS</div><div id="s-payout" style="font-size:12px;font-weight:700;color:#00FF88">API ↗</div></div>
+        <div class="stat"><div class="sl">TF</div><div id="s-tf" style="font-size:12px;font-weight:700;color:#00D4FF">—</div></div>
       </div>
     </div>
   </div>
-  <!-- NIVO DISPLAY -->
+  <!-- MARTINGAL NIVO FIXED BOX -->
   <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-    <div class="bt" style="color:#00FF88">📊 NIVO MARTINGAL FIX v7.2 — 7 NIVO</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="levels-display">
-      <!-- Rempli par JS -->
+    <div class="bt" style="color:#00FF88">📊 MARTINGAL NIVO FIXED v7.2 — PAYOUT API REYÈL</div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:14px">
+      <div style="text-align:center;background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:8px">
+        <div style="color:#4A7080;font-size:9px">NIVO 1</div>
+        <div style="color:#00FF88;font-weight:700;font-size:14px">$0.54</div>
+      </div>
+      <div style="text-align:center;background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:8px">
+        <div style="color:#4A7080;font-size:9px">NIVO 2</div>
+        <div style="color:#00FF88;font-weight:700;font-size:14px">$1.13</div>
+      </div>
+      <div style="text-align:center;background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:8px">
+        <div style="color:#4A7080;font-size:9px">NIVO 3</div>
+        <div style="color:#FFD600;font-weight:700;font-size:14px">$2.33</div>
+      </div>
+      <div style="text-align:center;background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:8px">
+        <div style="color:#4A7080;font-size:9px">NIVO 4</div>
+        <div style="color:#FFD600;font-weight:700;font-size:14px">$4.77</div>
+      </div>
+      <div style="text-align:center;background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:8px">
+        <div style="color:#4A7080;font-size:9px">NIVO 5</div>
+        <div style="color:#FF9900;font-weight:700;font-size:14px">$9.80</div>
+      </div>
+      <div style="text-align:center;background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:8px">
+        <div style="color:#4A7080;font-size:9px">NIVO 6</div>
+        <div style="color:#FF9900;font-weight:700;font-size:14px">$20.10</div>
+      </div>
+      <div style="text-align:center;background:#020C12;border:1px solid #FF3B6B33;border-radius:6px;padding:8px">
+        <div style="color:#4A7080;font-size:9px">NIVO 7</div>
+        <div style="color:#FF3B6B;font-weight:700;font-size:14px">$41.30</div>
+      </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-      <div style="background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:12px;font-size:10px;color:#4A7080;line-height:2.0">
-        <span style="color:#FFD600;font-weight:700">🔴 ANVAN (v7.1) — Fòmil dinamik</span><br>
-        Kalkile mise a chak fwa ak payout tab<br>
-        Rezilta: <span style="color:#FF3B6B">enkonstan, pafwa twò wo</span><br>
-        Depann de payout yo estoke nan kòd
+      <div style="background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:10px;font-size:10px;color:#4A7080;line-height:2.0">
+        <span style="color:#00FF88;font-weight:700">✅ Chanjman v7.2:</span><br>
+        → Nivo <b style="color:#FFD600">FIXED</b> — pa kalkile chak fwa<br>
+        → Payout <b style="color:#FFD600">API reyèl</b> anvan chak trade<br>
+        → Wait = <b style="color:#FFD600">TF EGZAK</b> — pa TF+90s<br>
+        → 7 nivo max → reset + pause
       </div>
-      <div style="background:#020C12;border:1px solid #00FF8822;border-radius:6px;padding:12px;font-size:10px;color:#4A7080;line-height:2.0">
-        <span style="color:#00FF88;font-weight:700">✅ KOUNYE A (v7.2) — Nivo FIX + API</span><br>
-        Nivo yo FIX: toujou menm sekans<br>
-        Payout: <span style="color:#00FF88">mande API reyèl anvan chak trade</span><br>
-        Lojik klè, prediksyon fasil, payout egzak
+      <div style="background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:10px;font-size:10px;color:#4A7080;line-height:2.0">
+        <span style="color:#00D4FF;font-weight:700">💱 Payout API Deriv:</span><br>
+        → Bot rele <b>proposal</b> anvan trade<br>
+        → Payout reyèl = (payout - mise) / mise<br>
+        → Afiche nan log: <span style="color:#00FF88">💱 Payout API: XX%</span><br>
+        → Defo si echèk: 82%
       </div>
     </div>
   </div>
@@ -2225,49 +2208,46 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </div>
           <div class="iw"><div class="il">TIMEFRAME</div>
             <select id="c-tf">
-              <option value="1m">1 minit</option>
-              <option value="5m">5 minit ★</option>
-              <option value="15m" selected>15 minit ★★★</option>
-              <option value="1h">1 è ★★★</option>
-              <option value="4h">4 è</option>
+              <option value="1m">1 minit — wait 1min egzak</option>
+              <option value="5m">5 minit — wait 5min egzak ★</option>
+              <option value="15m" selected>15 minit — wait 15min egzak ★★★</option>
+              <option value="1h">1 è — wait 1h egzak ★★★</option>
+              <option value="4h">4 è — wait 4h egzak</option>
             </select>
           </div>
         </div>
-        <!-- PAYOUT API INFO -->
-        <div style="background:#00D4FF10;border:1px solid #00D4FF30;border-radius:6px;padding:10px;margin-bottom:10px;font-size:11px">
-          <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🔍 Payout: mande API Deriv anvan CHAK trade</div>
-          <div style="color:#4A7080;font-size:10px">
-            Bot ap voye yon proposal $1 → li payout reyèl → kalkile martingal<br>
-            <span style="color:#00FF88">Toujou payout aktyèl, pa estatsyon!</span>
+        <!-- MARTINGAL NIVO INFO -->
+        <div style="background:#00FF8810;border:1px solid #00FF8830;border-radius:6px;padding:10px;margin-bottom:10px;font-size:10px">
+          <div style="color:#00FF88;font-weight:700;margin-bottom:6px">📊 NIVO MARTINGAL FIXED — PAYOUT API REYÈL</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <span style="color:#C8E8F0;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px">N1:$0.54</span>
+            <span style="color:#C8E8F0;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px">N2:$1.13</span>
+            <span style="color:#FFD600;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px">N3:$2.33</span>
+            <span style="color:#FFD600;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px">N4:$4.77</span>
+            <span style="color:#FF9900;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px">N5:$9.80</span>
+            <span style="color:#FF9900;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px">N6:$20.10</span>
+            <span style="color:#FF3B6B;background:#020C12;border:1px solid #FF3B6B33;border-radius:4px;padding:2px 6px">N7:$41.30</span>
           </div>
+          <div style="color:#4A7080;margin-top:6px">Payout jwenn nan API anvan chak trade | Wait = TF egzak</div>
         </div>
-        <div class="g2">
-          <div class="iw">
-            <div class="il">MISE BASE ($) — Nivo 1</div>
-            <input id="c-lot-forex" type="number" value="0.50" step="0.50" min="0.50">
-            <div style="color:#4A7080;font-size:9px;margin-top:2px" id="forex-levels-hint">
-              Nivo FIX: $0.50 → $1.05 → $2.16 → $4.43...
-            </div>
-          </div>
-          <div class="iw"><div class="il">STRATEGY</div>
-            <select id="c-st-forex">
-              <option value="confluence">🔥 Confluence ELITE</option>
-              <option value="deriv_pro">🚀 Deriv Pro ELITE</option>
-              <option value="supertrend">📈 SuperTrend</option>
-              <option value="heikin_ashi">🕯 Heikin Ashi</option>
-              <option value="chandelier">🔔 Chandelier Exit</option>
-              <option value="ai">🤖 AI Score</option>
-              <option value="smc">🏛 Smart Money</option>
-              <option value="scalping_pro">⚡ Scalping Pro</option>
-              <option value="ema">📊 EMA Classic</option>
-              <option value="rsi">📉 RSI Classic</option>
-            </select>
-          </div>
+        <div class="iw"><div class="il">STRATEGY</div>
+          <select id="c-st-forex">
+            <option value="confluence">🔥 Confluence ELITE (ST+HA+CE)</option>
+            <option value="deriv_pro">🚀 Deriv Pro ELITE</option>
+            <option value="supertrend">📈 SuperTrend</option>
+            <option value="heikin_ashi">🕯 Heikin Ashi</option>
+            <option value="chandelier">🔔 Chandelier Exit</option>
+            <option value="ai">🤖 AI Score</option>
+            <option value="smc">🏛 Smart Money</option>
+            <option value="scalping_pro">⚡ Scalping Pro</option>
+            <option value="ema">📊 EMA Classic</option>
+            <option value="rsi">📉 RSI Classic</option>
+          </select>
         </div>
       </div>
       <div id="opts-digits" style="display:none">
         <div style="background:#FFD60010;border:1px solid #FFD60033;border-radius:6px;padding:12px;margin-bottom:10px">
-          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🎲 DIGITS MODE — Nivo FIX + Payout API</div>
+          <div style="color:#FFD600;font-size:11px;font-weight:700;margin-bottom:8px">🎲 DIGITS MODE — Payout API Reyèl</div>
           <div class="g2">
             <div class="iw"><div class="il">SENBOL</div>
               <select id="c-sy-digits">
@@ -2283,21 +2263,25 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
               </select>
             </div>
           </div>
-          <div class="iw">
-            <div class="il">MISE BASE ($) — Nivo 1</div>
-            <input id="c-lot-digits" type="number" value="0.35" step="0.10" min="0.35">
-            <div style="color:#4A7080;font-size:9px;margin-top:2px">Nivo FIX: $0.35 → $0.72 → $1.48 → $3.03 → $6.21...</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+            <span style="color:#C8E8F0;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px;font-size:10px">N1:$0.54</span>
+            <span style="color:#C8E8F0;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px;font-size:10px">N2:$1.13</span>
+            <span style="color:#FFD600;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px;font-size:10px">N3:$2.33</span>
+            <span style="color:#FFD600;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px;font-size:10px">N4:$4.77</span>
+            <span style="color:#FF9900;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px;font-size:10px">N5:$9.80</span>
+            <span style="color:#FF9900;background:#020C12;border:1px solid #0D2233;border-radius:4px;padding:2px 6px;font-size:10px">N6:$20.10</span>
+            <span style="color:#FF3B6B;background:#020C12;border:1px solid #FF3B6B33;border-radius:4px;padding:2px 6px;font-size:10px">N7:$41.30</span>
           </div>
         </div>
       </div>
       <div class="g2">
         <div class="iw"><div class="il">KONFIDANS MIN</div>
           <select id="c-conf">
-            <option value="0.60">60%</option>
-            <option value="0.65" selected>65% (rekòmande)</option>
-            <option value="0.70">70%</option>
-            <option value="0.75">75%</option>
-            <option value="0.80">80%</option>
+            <option value="0.60">60% (maksimòm siyal)</option>
+            <option value="0.65" selected>65% (rekòmande ★)</option>
+            <option value="0.70">70% (balans)</option>
+            <option value="0.75">75% (konsèvatif)</option>
+            <option value="0.80">80% (presiz)</option>
           </select>
         </div>
         <div></div>
@@ -2316,10 +2300,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
       </div>
       <div id="ctm"></div>
-      <div id="levels-after-start" style="display:none;background:#00FF8808;border:1px solid #00FF8822;border-radius:6px;padding:10px;margin-bottom:10px;font-size:10px;color:#4A7080">
-        <div style="color:#00FF88;font-weight:700;margin-bottom:6px">📊 Nivo Aktif:</div>
-        <div id="levels-active"></div>
-      </div>
       <div style="display:flex;gap:10px">
         <button class="btn" id="bs" onclick="doStart()">▶ START BOT</button>
         <button class="btn r" id="bx" onclick="doStop()" style="display:none">■ STOP BOT</button>
@@ -2336,18 +2316,25 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
           <div class="stat"><div class="sl">PROFIT 5%</div><div id="c-sent" class="sv" style="color:#FFD600">$0.00</div></div>
         </div>
-      </div>
-      <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">📊 NIVO MARTINGAL FIX</div>
-        <div style="color:#4A7080;font-size:10px;line-height:2.2">
-          <div style="display:flex;flex-direction:column;gap:4px" id="ctrl-levels">
-            <!-- Rempli par JS -->
+        <div id="limit-display" style="display:none;background:#020C12;border:1px solid #0D2233;border-radius:6px;padding:10px;font-size:11px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+            <span style="color:#00FF88">🎯 Objektif:</span>
+            <span id="limit-target" style="color:#00FF88;font-weight:700">$0</span>
+          </div>
+          <div style="display:flex;justify-content:space-between">
+            <span style="color:#FF3B6B">🛑 Limit Pèt:</span>
+            <span id="limit-loss" style="color:#FF3B6B;font-weight:700">$0</span>
           </div>
         </div>
-        <div style="margin-top:12px;padding-top:10px;border-top:1px solid #0D2233;color:#4A7080;font-size:10px;line-height:1.9">
-          <span style="color:#00D4FF;font-weight:700">🔍 Payout API:</span> mande Deriv anvan chak trade<br>
-          <span style="color:#FF3B6B">🛑 Sekirite:</span> max 5% balans pa nivo<br>
-          <span style="color:#FFD600">🔄 Reset:</span> apre 7 nivo + pòz 5min
+      </div>
+      <div class="box" style="background:#00FF8808;border-color:#00FF8822">
+        <div class="bt" style="color:#00FF88">⚡ CHANJMAN KLÈ v7.2</div>
+        <div style="color:#4A7080;font-size:10px;line-height:2.3">
+          <span style="color:#00FF88">✓ Nivo fixed:</span> $0.54/$1.13/$2.33/$4.77/$9.80/$20.10/$41.30<br>
+          <span style="color:#00FF88">✓ Payout API:</span> proposal reyèl anvan chak trade<br>
+          <span style="color:#00FF88">✓ Wait = TF:</span> 1min wait 1min, 15min wait 15min<br>
+          <span style="color:#FFD600">⚠ Max 7 nivo:</span> apre nivo 7 → reset + 5min pòz<br>
+          <span style="color:#4A7080">Defo payout:</span> 82% si API echèk
         </div>
       </div>
     </div>
@@ -2377,7 +2364,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <option value="deriv_pro">🚀 Deriv Pro ELITE</option>
         <option value="supertrend">📈 SuperTrend</option>
         <option value="heikin_ashi">🕯 Heikin Ashi</option>
-        <option value="chandelier">🔔 Chandelier</option>
+        <option value="chandelier">🔔 Chandelier Exit</option>
         <option value="ai">🤖 AI Score</option>
         <option value="smc">🏛 SMC</option>
         <option value="macd_bollinger">📊 MACD+BB</option>
@@ -2468,32 +2455,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div><!-- /app-page -->
 
 <script>
-// Nivo FIX — mirrors Python
-const MARTINGAL_LEVELS        = [0.50, 1.05, 2.16, 4.43, 9.09, 18.66, 38.31];
-const MARTINGAL_LEVELS_DIGITS = [0.35, 0.72, 1.48, 3.03, 6.21, 12.74, 26.13];
-
-function renderLevels(levels, containerId) {
-  const c = document.getElementById(containerId);
-  if (!c) return;
-  c.innerHTML = levels.map((l, i) =>
-    `<span class="tag" style="background:#${i===0?'00FF88':'FFD600'}18;border-color:#${i===0?'00FF88':'FFD600'}44;color:#${i===0?'00FF88':'FFD600'};font-size:11px;padding:4px 10px">
-      N${i+1}: $${l}
-    </span>`
-  ).join('');
-}
-function renderCtrlLevels(levels) {
-  const c = document.getElementById('ctrl-levels');
-  if (!c) return;
-  c.innerHTML = levels.map((l, i) =>
-    `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #0D223318">
-      <span style="color:${i===0?'#00FF88':'#4A7080'}">Nivo ${i+1}</span>
-      <span style="color:${i===0?'#00FF88':'#FFD600'};font-weight:700">$${l}</span>
-    </div>`
-  ).join('');
-}
-renderLevels(MARTINGAL_LEVELS, 'levels-display');
-renderCtrlLevels(MARTINGAL_LEVELS);
-
 const SESSION_KEY="bb_session_v72";
 function saveToken(t){try{localStorage.setItem(SESSION_KEY,t);}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t);}catch(e){}try{const ex=new Date();ex.setDate(ex.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${ex.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
@@ -2540,11 +2501,11 @@ function autoDetectToken(){
   const badge=document.getElementById("tok-badge");
   const hint=document.getElementById("tok-hint");
   if(val.startsWith("pat_")){
-    badge.style.display="inline";badge.textContent="✅ PAT";badge.style.background="#00FF8818";badge.style.borderColor="#00FF8844";badge.style.color="#00FF88";
-    hint.innerHTML='<span style="color:#00FF88">✅ Token PAT valid</span>';
+    badge.style.display="inline";badge.textContent="✅ PAT DETEKTE";badge.style.background="#00FF8818";badge.style.borderColor="#00FF8844";badge.style.color="#00FF88";
+    hint.innerHTML='<span style="color:#00FF88;font-weight:700">✅ Token PAT valid — klike KONEKTE</span>';
   }else if(val.length>5){
     badge.style.display="inline";badge.style.background="#FF3B6B18";badge.style.borderColor="#FF3B6B44";badge.style.color="#FF3B6B";badge.textContent="✗ PA PAT";
-    hint.innerHTML='<span style="color:#FF3B6B">✗ Dwe kòmanse ak <code>pat_</code></span>';
+    hint.innerHTML='<span style="color:#FF3B6B">✗ Token sa PA yon PAT — dwe kòmanse ak <code>pat_</code></span>';
   }else{
     badge.style.display="none";
     hint.innerHTML='Token <b>dwe</b> kòmanse ak <code style="color:#FFD600">pat_</code>';
@@ -2555,7 +2516,6 @@ function toggleMode(){
   const mode=document.getElementById("c-mode").value;
   document.getElementById("opts-forex").style.display=mode=="forex"?"block":"none";
   document.getElementById("opts-digits").style.display=mode=="digits"?"block":"none";
-  renderCtrlLevels(mode=="digits"?MARTINGAL_LEVELS_DIGITS:MARTINGAL_LEVELS);
 }
 
 function getStartParams(){
@@ -2564,27 +2524,27 @@ function getStartParams(){
   const target=parseFloat(document.getElementById("c-target").value||0);
   const loss=parseFloat(document.getElementById("c-loss").value||0);
   if(mode=="forex"){
-    return{mode:"forex",symbol:document.getElementById("c-sy-deriv").value,
+    const sym=document.getElementById("c-sy-deriv").value;
+    const tf=document.getElementById("c-tf").value;
+    return{mode:"forex",symbol:sym,
       strategy:document.getElementById("c-st-forex").value,
-      lot:Math.max(0.50,parseFloat(document.getElementById("c-lot-forex").value)),
-      tf:document.getElementById("c-tf").value,min_conf:conf,profit_target:target,loss_limit:loss};
+      lot:0.54,tf,min_conf:conf,profit_target:target,loss_limit:loss};
   }else{
     return{mode:"digits",symbol:document.getElementById("c-sy-digits").value,
       digit_type:document.getElementById("c-digit-type").value,
-      lot:Math.max(0.35,parseFloat(document.getElementById("c-lot-digits").value)),
-      tf:"1m",min_conf:conf,profit_target:target,loss_limit:loss,strategy:"digits"};
+      lot:0.54,tf:"1m",min_conf:conf,profit_target:target,loss_limit:loss,strategy:"digits"};
   }
 }
 
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi+Chandelier+VWAP+10 strategies. ADX≥12, min 3 strat.",tags:["ST+HA+CE","ADX≥12","3 min"]},
-  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5/15 + ADX≥12 + SuperTrend +2pts.",tags:["Score 5/15","ADX≥12","ST+2pts"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR×3.0. Traverser bann = siyal.",tags:["ATR×3","75-92%"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+VWAP+10 strategies klasik. ADX≥12, minimum 3 strat dakò.",tags:["ST+HA+CE","ADX≥12","3 strat min","Pivot bonus"]},
+  deriv_pro:{l:"🚀 Deriv Pro ELITE",d:"Score 5/15 + ADX≥12 + SuperTrend bonus 2pts. Breakout, RSI, MACD, Stoch, body ratio, pivot.",tags:["Score 5/15","ADX≥12","ST+2pts","Pivot"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR×3.0. Traverser bann = siyal solid.",tags:["ATR×3","bann","75-92%"]},
   heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif = trend solid.",tags:["5 bouji","72-83%"]},
   chandelier:{l:"🔔 Chandelier Exit",d:"HH-ATR×3 / LL+ATR×3.",tags:["HH-ATR×3","75-90%"]},
   ai:{l:"🤖 AI Score",d:"8 faktè nòmalize.",tags:["8 faktè","68-92%"]},
   smc:{l:"🏛 SMC",d:"Break of Structure + swing H/L + EMA50.",tags:["BOS","swing","84%"]},
-  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9.",tags:["EMA5/13"]},
+  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9.",tags:["EMA5/13","rapid"]},
   rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50.",tags:["RSI14","OB70"]},
 };
 let sel="confluence";
@@ -2614,7 +2574,9 @@ function msg(id,txt,ok){const cls=ok===true?"ok":(ok===false?"er":"in");document
 async function doConn(){
   const rawToken=document.getElementById("d-tk").value.trim();
   if(!rawToken){msg("cm","✗ Kole token PAT ou anvan!",false);return;}
-  if(!rawToken.toLowerCase().startsWith("pat_")){msg("cm","✗ Token dwe kòmanse ak pat_",false);return;}
+  if(!rawToken.toLowerCase().startsWith("pat_")){
+    msg("cm","✗ Token dwe kòmanse ak pat_",false);return;
+  }
   const appId=document.getElementById("d-ai").value.trim()||"33ifAjI7cFab3IsUV8u9q";
   const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
   msg("cm","⏳ PAT → REST api.derivws.com...",null);
@@ -2624,23 +2586,28 @@ async function doConn(){
     const d=await r.json();
     if(d.ok){
       msg("cm",`✅ KONEKTE! $${d.balance.toFixed(2)} | ${d.loginid||"PAT"}`,"ok");
+      document.getElementById("cs").innerHTML=`<div class="al ok">✓ PAT | ${d.loginid||"OK"} | $${d.balance.toFixed(2)}</div>`;
       document.getElementById("h-loginid").textContent=d.loginid||"";
-    }else{msg("cm",d.error||"✗ Echèk",false);}
+    }else{
+      msg("cm",d.error||"✗ Echèk",false);
+    }
   }catch(e){msg("cm","✗ Erè rezo: "+e.message,false);}
   btn.textContent="⚡ KONEKTE PAT";btn.disabled=false;
 }
 
 async function doStart(){
   const body=getStartParams();
+  if(body.profit_target>0||body.loss_limit>0){
+    document.getElementById("limit-display").style.display="block";
+    document.getElementById("limit-target").textContent=body.profit_target>0?`$${body.profit_target}`:"—";
+    document.getElementById("limit-loss").textContent=body.loss_limit>0?`$${body.loss_limit}`:"—";
+  }
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
   if(d.ok){
-    const levels=d.levels||MARTINGAL_LEVELS;
-    msg("ctm",`✓ BonheurBot v7.2 démarre! Nivo FIX: ${levels.map(l=>'$'+l).join(' → ')} | Payout: mande API anvan chak trade`,"ok");
+    msg("ctm",`✓ BonheurBot v7.2 démarre! Nivo: ${d.stakes?d.stakes.join(' → '):'—'}`,"ok");
     document.getElementById("bs").style.display="none";
     document.getElementById("bx").style.display="inline-block";
-    document.getElementById("levels-after-start").style.display="block";
-    document.getElementById("levels-active").textContent=levels.map((l,i)=>`N${i+1}:$${l}`).join(' → ');
   }else{
     msg("ctm","✗ "+d.error,false);
   }
@@ -2650,7 +2617,6 @@ async function doStop(){
   msg("ctm","✓ Bot arrêté","ok");
   document.getElementById("bs").style.display="inline-block";
   document.getElementById("bx").style.display="none";
-  document.getElementById("levels-after-start").style.display="none";
 }
 
 async function doBt(){
@@ -2672,6 +2638,7 @@ async function doBt(){
         <div class="stat"><div class="sl">TRADES</div><div class="sv" style="color:#FFD600">${v.trades}</div></div>
         <div class="stat"><div class="sl">MAX DD</div><div class="sv" style="color:#FF3B6B">${v.max_dd}%</div></div>
         <div class="stat"><div class="sl">SHARPE</div><div class="sv" style="color:#00D4FF">${v.sharpe}</div></div>
+        <div class="stat"><div class="sl">PF</div><div class="sv" style="color:#FFD600">${v.pf}</div></div>
       </div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
     }else{document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;}
   }catch(e){document.getElementById("btm").innerHTML=`<div class="al er">✗ ${e.message}</div>`;}
@@ -2707,6 +2674,9 @@ function upd(d){
   document.getElementById("s-bot").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("s-strat").textContent=d.config.strategy||"—";
   document.getElementById("s-sym").textContent=d.config.symbol||"—";
+  const tf_secs=d.config.tf_secs||900;
+  const tf_min=Math.floor(tf_secs/60);
+  document.getElementById("s-tf").textContent=tf_min>=60?(tf_min/60)+"h":tf_min+"min";
   document.getElementById("c-st2").textContent=d.running?"LIVE 🟢":"IDLE";
   document.getElementById("c-st2").style.color=d.running?"#00FF88":"#3A6070";
   document.getElementById("c-bal").textContent="$"+d.balance.toFixed(2);
@@ -2725,7 +2695,7 @@ function upd(d){
   if(d.trades.length){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
     document.getElementById("trtbl").innerHTML=`<table>
-      <tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Nivo/Payout</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>
+      <tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Regime/Nivo/Payout</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>
       ${d.trades.map(t=>`<tr>
         <td style="color:#4A7080">${t.id}</td>
         <td style="color:#4A7080">${t.time}</td>
@@ -2792,6 +2762,7 @@ async function admRefresh(){
           <td style="display:flex;gap:4px">
             ${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
             <button onclick="admClearTrades('${u.uid}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button>
+            <button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
           </td>
         </tr>`).join("")}</table>`;
     }
@@ -2815,6 +2786,7 @@ async function admRevoke(code){if(!confirm(`Revoke ${code}?`))return;const token
 async function admReset(code){const token=getStoredToken();const r=await fetch("/api/admin/reset_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
+async function admClearUser(uid){if(!confirm(`Efase TOUT ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admClearTrades(uid){if(!confirm(`Efase trades ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
 function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}
@@ -2825,5 +2797,5 @@ checkLogin();
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"BonheurBot PAT v7.2 — Nivo FIX + Payout API — port {port}")
+    logger.info(f"BonheurBot PAT v7.2 — Martingal Nivo Fixed — port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

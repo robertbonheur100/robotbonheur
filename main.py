@@ -24,9 +24,9 @@ DERIV_REST_BASE = "https://api.derivws.com/trading/v1"
 DERIV_WS_PUBLIC = "wss://api.derivws.com/trading/v1/options/ws/public"
 DERIV_WS_LEGACY = "wss://ws.derivws.com/websockets/v3"
 
-# ═══════════════════════════════════════════════════════════
-# ██  NIVO MARTINGAL FIXED v7.2  ██
-# ═══════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
+# ██  NIVO MARTINGAL FIXED v7
+# ═══════════════════════════════════════════════════════
 # 7 nivo egzak — pa kalkile, fixed
 MARTINGAL_STAKES = [0.54, 1.13, 2.33, 4.77, 9.80, 20.10, 41.30]
 

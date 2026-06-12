@@ -3,7 +3,7 @@
 ║              BONHEURBOT PRO — QUOTEX EDITION                 ║
 ║         Multi-User Trading Bot — Quotex (Binary)             ║
 ║   Confluence Strategies | Martingale | 3-Loss Pause          ║
-║   FIX: pyquotex reyèl ak verifikasyon koneksyon estrik        ║
+║   FIX: pyquotex 1.1.0 API kòrèk + verifikasyon estrik        ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ABÒNMAN / ACCESS CODES
 # ═══════════════════════════════════════════════════════════
 SUB_PRICE   = 50
-WHATSAPP    = "50942867885"   # +509 4286-7885
+WHATSAPP    = "50942867885"
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
@@ -758,28 +758,33 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# QUOTEX CLIENT — pyquotex REYÈL (verifikasyon estrik)
-# ✅ FIX: balans $0 = erè | check=False = erè | connected=True sèlman si bal > 0
+# QUOTEX CLIENT — pyquotex 1.1.0 API KÒRÈK
+# ✅ connect() retounen (bool, str) — pa tuple unpack erè
+# ✅ get_balance() retounen float dirèkteman (pa need float())
+# ✅ get_payout_by_asset(asset, timeframe="1") — signature kòrèk
+# ✅ buy(amount, asset, direction, duration) — "call"/"put"
+# ✅ check_win(order_id, duration) — retounen (str, float)
+# ✅ set_account_mode("PRACTICE" | "REAL")
 # ═══════════════════════════════════════════════════════════
 class QuotexClient:
     def __init__(self, email, password, is_demo=True):
-        self.email = email
+        self.email    = email
         self.password = password
-        self.is_demo = is_demo
-        self.client = None
-        self.loop = None
-        self.thread = None
-        self._bal = 0.0
+        self.is_demo  = is_demo
+        self.client   = None
+        self.loop     = None
+        self.thread   = None
+        self._bal     = 0.0
         self._connected = False
 
     def _start_loop(self):
         self.loop = asyncio.new_event_loop()
-        def _run_loop():
+        def _run():
             asyncio.set_event_loop(self.loop)
             self.loop.run_forever()
-        self.thread = threading.Thread(target=_run_loop, daemon=True)
+        self.thread = threading.Thread(target=_run, daemon=True)
         self.thread.start()
-        time.sleep(0.1)
+        time.sleep(0.2)
 
     def _run(self, coro, timeout=30):
         if not self.loop or not self.loop.is_running():
@@ -788,6 +793,11 @@ class QuotexClient:
         return fut.result(timeout=timeout)
 
     def connect(self):
+        """
+        Konekte ak Quotex epi verifye balans.
+        Leve Exception si: login echwe, websocket echwe, balans <= 0
+        Retounen balans (float) si koneksyon reyèl.
+        """
         try:
             from pyquotex.stable_api import Quotex
         except ImportError as e:
@@ -795,160 +805,196 @@ class QuotexClient:
 
         self._start_loop()
 
-        async def _conn():
-            self.client = Quotex(email=self.email, password=self.password, lang="pt")
-            self.client.set_account_mode("PRACTICE" if self.is_demo else "REAL")
+        async def _do_connect():
+            # Kreye kliyan
+            self.client = Quotex(
+                email=self.email,
+                password=self.password,
+                lang="pt"
+            )
+            # Mete mode kont (PRACTICE oswa REAL)
+            mode = "PRACTICE" if self.is_demo else "REAL"
+            self.client.set_account_mode(mode)
+
+            # ── connect() retounen (bool, str) ──────────────────────────
             check, reason = await self.client.connect()
-            return check, reason
-
-        try:
-            check, reason = self._run(_conn(), timeout=45)
-        except Exception as e:
-            self._connected = False
-            raise Exception(f"Echèk koneksyon: {e}")
-
-        # ── VERIFIKASYON #1: check retounen False = login echwe ──────────
-        if not check:
-            self._connected = False
-            try:
-                self.close()
-            except Exception:
-                pass
-            raise Exception(
-                f"Login Quotex echwe — email oswa password ou pa bon. "
-                f"Verifye nan sit Quotex la direkteman. ({reason})"
-            )
-
-        # ── VERIFIKASYON #2: websocket otantifye ─────────────────────────
-        try:
-            is_ok = self.client.check_connect()
-            if is_ok is False:
-                self._connected = False
-                try:
-                    self.close()
-                except Exception:
-                    pass
+            if not check:
                 raise Exception(
-                    "Quotex websocket pa otantifye — "
-                    "email oswa password ou pa bon."
+                    f"Login Quotex echwe — email oswa password ou pa bon. "
+                    f"Verifye nan sit Quotex la direkteman. (raison: {reason})"
                 )
-        except Exception as ck_err:
-            if "pa bon" in str(ck_err) or "websocket" in str(ck_err):
-                raise
-            # check_connect metòd pa disponib nan vèsyon sa — kontinye
 
-        # ── VERIFIKASYON #3: jwenn balans REYÈL ──────────────────────────
-        # Si balans la se 0 oswa None = kont pa otantifye reyèlman
-        async def _get_bal():
+            # ── verifye websocket ────────────────────────────────────────
+            try:
+                is_ok = await self.client.check_connect()
+                if is_ok is False:
+                    raise Exception(
+                        "Quotex websocket pa otantifye — "
+                        "email oswa password ou pa bon."
+                    )
+            except Exception as ck_err:
+                err_str = str(ck_err)
+                if "pa bon" in err_str or "websocket" in err_str or "otantifye" in err_str:
+                    raise
+                # Metòd pa disponib nan vèsyon sa — kontinye
+
+            # ── jwenn balans reyèl ───────────────────────────────────────
             await asyncio.sleep(2.0)
-            return await self.client.get_balance()
+            # get_balance() nan 1.1.0 retounen float dirèkteman
+            bal = await self.client.get_balance()
+
+            if bal is None or float(bal) <= 0:
+                raise Exception(
+                    "Balans $0 oswa vid apre koneksyon — "
+                    "email/password ou pa bon, oswa kont ou vid nèt. "
+                    "Konekte nan sit Quotex la e verifye kont ou."
+                )
+            return float(bal)
 
         try:
-            bal = self._run(_get_bal(), timeout=35)
+            bal = self._run(_do_connect(), timeout=60)
         except Exception as e:
             self._connected = False
+            self.client = None
             try:
-                self.close()
+                if self.loop:
+                    self.loop.call_soon_threadsafe(self.loop.stop)
             except Exception:
                 pass
-            raise Exception(
-                f"Pa ka jwenn balans apre koneksyon — "
-                f"koneksyon an ka echwe: {e}"
-            )
+            raise Exception(str(e))
 
-        if bal is None or float(bal) <= 0:
-            self._connected = False
-            try:
-                self.close()
-            except Exception:
-                pass
-            raise Exception(
-                "Balans $0 oswa vid apre koneksyon — "
-                "email/password ou pa bon, oswa kont ou vid nèt. "
-                "Konekte nan sit Quotex la e verifye kont ou."
-            )
-
-        # ── TOUT BON — kont reyèl konekte ────────────────────────────────
         self._connected = True
-        self._bal = float(bal)
-        return self._bal
+        self._bal = bal
+        return bal
 
     def get_candles(self, asset, count=200, gran=60):
+        """
+        Jwenn chandèl yo depi Quotex.
+        Retounen lis dict: {open, high, low, close, volume}
+        """
         if not self._connected:
             raise Exception("Pa konekte ak Quotex")
+
         async def _get():
             try:
+                # get_candle_v2(asset, period, timeout=30)
                 candles = await self.client.get_candle_v2(asset, gran, timeout=25)
             except Exception as e:
-                logger.error(f"get_candle_v2: {e}")
+                logger.error(f"get_candle_v2 erè: {e}")
                 candles = None
             return candles or []
-        raw = self._run(_get(), timeout=30)
-        if not raw: return []
+
+        raw = self._run(_get(), timeout=35)
+        if not raw:
+            return []
+
         out = []
         for c in raw[-count:]:
             try:
                 out.append({
-                    "open":  float(c.get("open",  c.get("o",0))),
-                    "high":  float(c.get("high",  c.get("h",0))),
-                    "low":   float(c.get("low",   c.get("l",0))),
-                    "close": float(c.get("close", c.get("c",0))),
-                    "volume": float(c.get("volume", c.get("v",1000)) or 1000),
+                    "open":   float(c.get("open",  c.get("o", 0))),
+                    "high":   float(c.get("high",  c.get("h", 0))),
+                    "low":    float(c.get("low",   c.get("l", 0))),
+                    "close":  float(c.get("close", c.get("c", 0))),
+                    "volume": float(c.get("volume", c.get("v", 1000)) or 1000),
                 })
             except Exception:
                 continue
         return out
 
     def place_trade(self, asset, direction, amount=1.0, duration_secs=60):
+        """
+        Pase yon trade binary options sou Quotex.
+        direction: "BUY" → "call" | "SELL" → "put"
+        Retounen (status: bool, info: Any)
+        """
         if not self._connected:
             raise Exception("Pa konekte ak Quotex — rekonekte epi eseye ankò")
+
         async def _buy():
-            d = "call" if direction=="BUY" else "put"
-            status, info = await self.client.buy(float(amount), asset, d, int(duration_secs))
+            d = "call" if direction == "BUY" else "put"
+            # buy(amount, asset, direction, duration) — duration an segonn
+            status, info = await self.client.buy(
+                float(amount), asset, d, int(duration_secs)
+            )
             return status, info
-        return self._run(_buy(), timeout=duration_secs+15)
+
+        return self._run(_buy(), timeout=duration_secs + 20)
 
     def check_win(self, order_id, duration_secs=60):
+        """
+        Verifye rezilta yon trade.
+        Retounen (status: str, profit: float)
+        status: "win" | "loss" | "equal"
+        """
         async def _check():
-            status, profit = await self.client.check_win(order_id, duration_secs)
+            # check_win(order_id, duration=0) — retounen (str, float)
+            status, profit = await self.client.check_win(order_id, int(duration_secs))
             return status, profit
-        return self._run(_check(), timeout=duration_secs+30)
+
+        return self._run(_check(), timeout=duration_secs + 35)
 
     def get_balance_sync(self):
+        """
+        Jwenn balans aktyèl la.
+        Retounen float — $0 oswa erè = koneksyon pèdi.
+        """
         if not self._connected:
             return self._bal
+
         async def _bal():
-            return await self.client.get_balance()
+            # get_balance(timeout=30) — retounen float
+            return await self.client.get_balance(timeout=20)
+
         try:
-            b = self._run(_bal(), timeout=20)
-            if b is not None and float(b) > 0:
-                self._bal = float(b)
-            elif b is not None and float(b) == 0:
-                logger.warning("get_balance_sync: balans $0 — koneksyon ka pèdi")
+            b = self._run(_bal(), timeout=25)
+            if b is not None:
+                b = float(b)
+                if b > 0:
+                    self._bal = b
+                else:
+                    logger.warning("get_balance_sync: balans $0 — koneksyon ka pèdi")
         except Exception as e:
             logger.error(f"get_balance_sync: {e}")
         return self._bal
 
     def get_payout(self, asset):
+        """
+        Jwenn pousantaj payout pou aktif la.
+        Retounen float (ex: 0.85 = 85%)
+        """
         if not self._connected:
             return 0.85
-        async def _pay():
-            try:
-                return self.client.get_payout_by_asset(asset)
-            except Exception:
-                return None
+
         try:
-            data = self._run(_pay(), timeout=15)
+            # get_payout_by_asset(asset_name, timeframe="1")
+            # retounen float | dict | None
+            # timeframe "1" = 1 minit, "5" = 5 minit, "24H" = 24h
+            data = self.client.get_payout_by_asset(asset, timeframe="1")
+
+            if data is None:
+                # eseye san timeframe
+                data = self.client.get_payout_by_asset(asset)
+
+            if isinstance(data, (int, float)) and data is not None:
+                pct = float(data)
+                # Si valè a se 85 (pousantaj) oswa 0.85 (desimal)
+                if pct > 1:
+                    return pct / 100.0
+                return pct
+
             if isinstance(data, dict):
-                info = data.get(asset) or next(iter(data.values()), None)
-                if info:
-                    pct = info.get("payment") or info.get("turbo_payment") or 85
-                    return float(pct) / 100.0
-        except Exception:
-            pass
-        return 0.85
+                # ka retounen {"turbo_payment": 85, "payment": 80, ...}
+                pct = data.get("turbo_payment") or data.get("payment") or 85
+                return float(pct) / 100.0 if float(pct) > 1 else float(pct)
+
+        except Exception as e:
+            logger.error(f"get_payout: {e}")
+
+        return 0.85  # valè defo si echwe
 
     def close(self):
+        """Fèmen koneksyon an pwòpman."""
         self._connected = False
         try:
             if self.client:
@@ -958,38 +1004,44 @@ class QuotexClient:
         except Exception:
             pass
         try:
-            if self.loop:
+            if self.loop and self.loop.is_running():
                 self.loop.call_soon_threadsafe(self.loop.stop)
         except Exception:
             pass
 
     @property
-    def balance(self): return self._bal
+    def balance(self):
+        return self._bal
 
     @property
-    def connected(self): return self._connected
+    def connected(self):
+        return self._connected
+
 
 # ═══════════════════════════════════════════════════════════
 # LOG HELPER
 # ═══════════════════════════════════════════════════════════
 def add_log(st, msg, level="INFO"):
-    ts=datetime.now().strftime("%H:%M:%S")
-    st["log"].insert(0,{"time":ts,"msg":msg,"level":level})
-    st["log"]=st["log"][:80]
+    ts = datetime.now().strftime("%H:%M:%S")
+    st["log"].insert(0, {"time": ts, "msg": msg, "level": level})
+    st["log"] = st["log"][:80]
     logger.info(f"[{st['uid'][:8]}] {msg}")
+
 
 # ═══════════════════════════════════════════════════════════
 # QUOTEX TRADING LOOP — Binary Options + Martingale
 # ═══════════════════════════════════════════════════════════
 def quotex_trading_loop(st, bot_id=None):
-    if bot_id and st.get("bot_id")!=bot_id: return
-    cfg      = st["config"]
-    asset    = cfg.get("asset","EURUSD_otc")
-    strategy = cfg.get("strategy","confluence")
-    lot      = float(cfg.get("lot",1.0))
-    duration = int(cfg.get("duration",60))
-    min_conf = float(cfg.get("min_conf",0.65))
-    mart_mult= float(cfg.get("martingale",2.0))
+    if bot_id and st.get("bot_id") != bot_id:
+        return
+
+    cfg       = st["config"]
+    asset     = cfg.get("asset", "EURUSD_otc")
+    strategy  = cfg.get("strategy", "confluence")
+    lot       = float(cfg.get("lot", 1.0))
+    duration  = int(cfg.get("duration", 60))
+    min_conf  = float(cfg.get("min_conf", 0.65))
+    mart_mult = float(cfg.get("martingale", 2.0))
 
     fn = STRATEGIES.get(strategy, strat_confluence_elite)
 
@@ -1005,40 +1057,46 @@ def quotex_trading_loop(st, bot_id=None):
 
     while st["running"]:
         if bot_id and st.get("bot_id") != bot_id:
-            add_log(st, "⏹ Bot anile","WARN"); return
+            add_log(st, "⏹ Bot anile", "WARN")
+            return
 
-        _target = float(cfg.get("profit_target",0))
-        _loss   = float(cfg.get("loss_limit",0))
-        if _target>0 and st["total_pnl"]>=_target:
-            add_log(st, f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!","SUCCESS")
-            st["running"]=False; break
-        if _loss>0 and st["total_pnl"]<=-abs(_loss):
-            add_log(st, f"🛑 LIMIT PÈT ${_loss:.2f} RIVE! Bot kanpe!","ERROR")
-            st["running"]=False; break
+        # ── Verifye objektif/limit ───────────────────────────────────────
+        _target = float(cfg.get("profit_target", 0))
+        _loss   = float(cfg.get("loss_limit", 0))
+        if _target > 0 and st["total_pnl"] >= _target:
+            add_log(st, f"🎯 OBJEKTIF ${_target:.2f} RIVE! Bot kanpe!", "SUCCESS")
+            st["running"] = False; break
+        if _loss > 0 and st["total_pnl"] <= -abs(_loss):
+            add_log(st, f"🛑 LIMIT PÈT ${_loss:.2f} RIVE! Bot kanpe!", "ERROR")
+            st["running"] = False; break
 
         try:
             api = st.get("quotex_api")
             if not api or not api.connected:
-                add_log(st, "Quotex pa konekte — STOP","ERROR")
-                st["running"]=False; break
+                add_log(st, "Quotex pa konekte — STOP", "ERROR")
+                st["running"] = False; break
 
+            # ── Aktyalize balans ─────────────────────────────────────────
             try:
                 b = api.get_balance_sync()
-                if b and b>0: st["balance"]=b
+                if b and b > 0:
+                    st["balance"] = b
             except Exception:
-                add_log(st, "⚠ Koneksyon pèdi — tann...","WARN")
+                add_log(st, "⚠ Koneksyon pèdi — tann...", "WARN")
                 time.sleep(15); continue
 
             if st["balance"] < current_lot:
-                add_log(st, f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset","WARN")
-                current_lot=base_lot; consec_losses=0; total_lost=0.0
+                add_log(st, f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset", "WARN")
+                current_lot = base_lot; consec_losses = 0; total_lost = 0.0
                 time.sleep(10); continue
 
+            # ── Jwenn chandèl yo ─────────────────────────────────────────
             candles = api.get_candles(asset, 200, 60)
             if len(candles) < 30:
-                add_log(st, f"Pa ase done ({len(candles)}) — tann...","WARN")
+                add_log(st, f"Pa ase done ({len(candles)}) — tann...", "WARN")
                 time.sleep(15); continue
 
+            # ── Analiz mache ─────────────────────────────────────────────
             regime, regime_score = market_regime(candles)
             adx_val, pdi_val, mdi_val = calc_adx_full(candles, 14)
             st_sig, st_c = supertrend(candles)
@@ -1048,8 +1106,9 @@ def quotex_trading_loop(st, bot_id=None):
                 f"📡 {len(candles)} bouji | {asset} | {regime} | ADX:{adx_val:.0f} | "
                 f"ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
 
+            # ── Pause si 3 pèt konsekitif ────────────────────────────────
             if consec_losses >= MAX_LOSSES_BEFORE_PAUSE:
-                mache_bon = regime in ("TRENDING_UP","TRENDING_DN","RANGING") and adx_val >= 12
+                mache_bon = regime in ("TRENDING_UP", "TRENDING_DN", "RANGING") and adx_val >= 12
                 if regime == "RANGING":
                     mache_bon = (st_sig != "NONE") and (ha_sig != "NONE") and adx_val >= 10
                 if not mache_bon:
@@ -1060,103 +1119,139 @@ def quotex_trading_loop(st, bot_id=None):
                 else:
                     add_log(st, f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | Reprann ${current_lot:.2f}", "SUCCESS")
 
+            # ── Evite mache VOLATILE ─────────────────────────────────────
             if regime == "VOLATILE":
-                add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(duration,120)}sek...","WARN")
+                add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(duration,120)}sek...", "WARN")
                 time.sleep(min(duration, 120)); continue
 
+            # ── Kalkile siyal ────────────────────────────────────────────
             if strategy == "confluence":
-                req_strats = 3 if consec_losses==0 else (4 if consec_losses<=2 else 5)
+                req_strats = 3 if consec_losses == 0 else (4 if consec_losses <= 2 else 5)
                 sig, conf = strat_confluence_elite(candles, min_strats=req_strats, min_per_conf=0.65)
                 add_log(st, f"📊 {asset} | {sig} | Conf:{conf:.0%} | Elite({req_strats}strat)")
             else:
                 sig, conf = fn(candles)
                 add_log(st, f"📊 {asset} | {sig} | Conf:{conf:.0%} | {strategy}")
 
+            # ── Filtre kontra-trend ──────────────────────────────────────
             if sig == "BUY" and regime == "TRENDING_DN":
-                add_log(st, f"⛔ REJTE BUY — Mache ap DESANN. {st_sig}/{ha_sig}","WARN")
+                add_log(st, f"⛔ REJTE BUY — Mache ap DESANN. {st_sig}/{ha_sig}", "WARN")
                 time.sleep(duration); continue
             if sig == "SELL" and regime == "TRENDING_UP":
-                add_log(st, f"⛔ REJTE SELL — Mache ap MONTE. {st_sig}/{ha_sig}","WARN")
+                add_log(st, f"⛔ REJTE SELL — Mache ap MONTE. {st_sig}/{ha_sig}", "WARN")
                 time.sleep(duration); continue
 
-            adaptive_conf = min_conf + (0.02 if consec_losses==1 else (0.04 if consec_losses>=2 else 0))
+            # ── Konfidans adaptif ────────────────────────────────────────
+            adaptive_conf = min_conf + (0.02 if consec_losses == 1 else (0.04 if consec_losses >= 2 else 0))
             if sig == "NONE" or conf < adaptive_conf:
-                reason = "Pa gen siyal" if sig=="NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
+                reason = "Pa gen siyal" if sig == "NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
                 add_log(st, f"⏭ {reason} — tann pwochen bouji...")
                 time.sleep(duration); continue
 
-            pv_sig_dir = "TRENDING_UP" if sig=="BUY" else "TRENDING_DN"
+            # ── Pivot info ───────────────────────────────────────────────
+            pv_sig_dir = "TRENDING_UP" if sig == "BUY" else "TRENDING_DN"
             in_pivot, _ = pivot_signal(candles, pv_sig_dir)
             pivot_info = " 🎯+PIVOT" if in_pivot else ""
 
-            direction = sig
+            # ── Payout ───────────────────────────────────────────────────
             payout = api.get_payout(asset)
-            entry = candles[-1]["close"]
+            entry  = candles[-1]["close"]
+
             add_log(st,
                 f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | "
                 f"Payout:{payout:.0%} | Mise:${current_lot:.2f}{pivot_info}")
 
+            # ── Pase trade ───────────────────────────────────────────────
             try:
-                status, info = api.place_trade(asset, direction, current_lot, duration)
+                status, info = api.place_trade(asset, sig, current_lot, duration)
             except Exception as e:
-                add_log(st, f"❌ Trade echwe: {e}","ERROR")
+                add_log(st, f"❌ Trade echwe: {e}", "ERROR")
                 time.sleep(10); continue
 
             if not status:
-                add_log(st, f"❌ Trade echwe: {info}","ERROR")
+                add_log(st, f"❌ Trade echwe: {info}", "ERROR")
                 time.sleep(10); continue
 
+            # Ekstrè trade ID
             trade_id = None
             if isinstance(info, dict):
-                trade_id = info.get("id")
-            add_log(st, f"⏳ #{trade_id} ouvri | Ap tann {duration}s...","SUCCESS")
+                trade_id = info.get("id") or info.get("order_id")
+            elif isinstance(info, (int, str)):
+                trade_id = info
+
+            add_log(st, f"⏳ #{trade_id} ouvri | Ap tann {duration}s...", "SUCCESS")
             time.sleep(duration + 3)
 
-            pnl=0.0; won=False
+            # ── Verifye rezilta ──────────────────────────────────────────
+            pnl = 0.0; won = False
             if trade_id:
                 try:
+                    # check_win retounen (str, float): ("win"|"loss"|"equal", profit)
                     result, profit = api.check_win(trade_id, duration)
-                    if result in ("win","won"):
-                        pnl = round(float(profit), 2); won=True
-                    elif result in ("loss","loose","lost"):
-                        pnl = -current_lot; won=False
+                    profit = float(profit) if profit is not None else 0.0
+                    if result in ("win", "won"):
+                        pnl = round(profit, 2) if profit > 0 else round(current_lot * payout, 2)
+                        won = True
+                    elif result in ("loss", "loose", "lost"):
+                        pnl = -current_lot
+                        won = False
+                    elif result == "equal":
+                        pnl = 0.0
+                        won = False
                     else:
-                        pnl = round(float(profit), 2); won = pnl>0
+                        # rezilta enkoni — itilize balans
+                        nb = api.get_balance_sync()
+                        pnl = round(nb - st["balance"], 2)
+                        won = pnl > 0
+                        st["balance"] = nb
                 except Exception as e:
-                    add_log(st, f"check_win erè: {e}","WARN")
+                    add_log(st, f"check_win erè: {e}", "WARN")
                     nb = api.get_balance_sync()
-                    pnl = round(nb - st["balance"], 2); won = pnl>0
-                    st["balance"]=nb
+                    pnl = round(nb - st["balance"], 2)
+                    won = pnl > 0
+                    st["balance"] = nb
             else:
+                # Pa gen ID — kalkile depi balans
                 nb = api.get_balance_sync()
-                pnl = round(nb - st["balance"], 2); won = pnl>0
-                st["balance"]=nb
+                pnl = round(nb - st["balance"], 2)
+                won = pnl > 0
+                st["balance"] = nb
 
+            # ── Afiche rezilta ───────────────────────────────────────────
             if won:
-                if pnl <= 0: pnl = round(current_lot*payout,2)
-                add_log(st, f"✅ GENYEN! +${pnl:.2f}","SUCCESS")
+                if pnl <= 0:
+                    pnl = round(current_lot * payout, 2)
+                add_log(st, f"✅ GENYEN! +${pnl:.2f}", "SUCCESS")
             else:
-                if pnl >= 0: pnl = -current_lot
-                add_log(st, f"❌ PÈDI ${abs(pnl):.2f}","WARN")
+                if pnl >= 0 and not won:
+                    pnl = -current_lot
+                add_log(st, f"❌ PÈDI ${abs(pnl):.2f}", "WARN")
 
             st["total_pnl"] += pnl
+
+            # Aktyalize balans apre trade
             try:
                 nb = api.get_balance_sync()
-                if nb: st["balance"]=nb
-            except Exception: pass
+                if nb and nb > 0:
+                    st["balance"] = nb
+            except Exception:
+                pass
 
             stake_used = current_lot
+
+            # ── Martingale / Reset ───────────────────────────────────────
             if won:
                 prev_losses = consec_losses
-                current_lot = base_lot
-                consec_losses = 0; total_lost = 0.0
+                current_lot   = base_lot
+                consec_losses = 0
+                total_lost    = 0.0
                 if prev_losses > 0:
-                    add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}","SUCCESS")
+                    add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}", "SUCCESS")
             else:
-                total_lost += current_lot
+                total_lost    += current_lot
                 consec_losses += 1
-                next_lot = round(current_lot * mart_mult, 2)
-                current_lot = max(base_lot, min(next_lot, 500.0))
+                next_lot       = round(current_lot * mart_mult, 2)
+                current_lot    = max(base_lot, min(next_lot, 500.0))
                 if consec_losses < MAX_LOSSES_BEFORE_PAUSE:
                     add_log(st,
                         f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
@@ -1166,26 +1261,29 @@ def quotex_trading_loop(st, bot_id=None):
                         f"🚨 {consec_losses} PÈT AFILE! PÒZE OTOMATIK | "
                         f"Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f} | Ap tann mache...", "WARN")
 
+            # ── Anrejistre trade ─────────────────────────────────────────
             trade = {
-                "id": len(st["trades"])+1,
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "asset": asset, "side": sig,
-                "entry": round(entry, 5),
-                "conf": f"{conf:.0%}",
+                "id":       len(st["trades"]) + 1,
+                "time":     datetime.now().strftime("%H:%M:%S"),
+                "asset":    asset,
+                "side":     sig,
+                "entry":    round(entry, 5),
+                "conf":     f"{conf:.0%}",
                 "strategy": strategy,
                 "duration": f"{duration}s",
-                "stake": round(stake_used, 2),
-                "pnl": round(pnl, 2),
-                "status": "won" if won else "lost",
-                "regime": regime,
+                "stake":    round(stake_used, 2),
+                "pnl":      round(pnl, 2),
+                "status":   "won" if won else "lost",
+                "regime":   regime,
             }
             st["trades"].insert(0, trade)
 
         except Exception as e:
-            add_log(st, f"Erè: {e}","ERROR")
+            add_log(st, f"Erè: {e}", "ERROR")
             time.sleep(15)
 
     add_log(st, "⏹ BonheurBot Quotex arrêté")
+
 
 # ═══════════════════════════════════════════════════════════
 # API ROUTES
@@ -1196,14 +1294,15 @@ def api_connect():
     if not st.get("access"):
         return jsonify({"ok": False, "error": "⚠ Ou bezwen yon kòd aksè valid!"})
     try:
-        d = request.json or {}
+        d        = request.json or {}
         email    = d.get("email", "").strip()
         password = d.get("password", "").strip()
         is_demo  = bool(d.get("is_demo", True))
+
         if not email or not password:
             return jsonify({"ok": False, "error": "Email ak password obligatwa"})
 
-        # Fèmen ansyen koneksyon an anvan
+        # Fèmen ansyen koneksyon an
         old_api = st.get("quotex_api")
         if old_api:
             try:
@@ -1214,21 +1313,20 @@ def api_connect():
             st["connected"]  = False
             st["balance"]    = 0.0
 
-        add_log(st, f"⏳ Ap konekte Quotex ({email[:3]}***) — tann 20-45sek...")
+        add_log(st, f"⏳ Ap konekte Quotex ({email[:3]}***) — tann 30-60sek...")
 
         api = QuotexClient(email, password, is_demo)
         try:
-            # connect() leve Exception klè si login echwe oswa balans $0
             bal = api.connect()
         except Exception as conn_err:
             st["connected"]  = False
             st["quotex_api"] = None
             st["balance"]    = 0.0
             err_msg = str(conn_err)
-            add_log(st, f"✗ Koneksyon echwe: {err_msg[:120]}", "ERROR")
+            add_log(st, f"✗ Koneksyon echwe: {err_msg[:150]}", "ERROR")
             return jsonify({"ok": False, "error": err_msg})
 
-        # Sèlman rive isit si bal > 0 konfime
+        # Sèlman rive isit si bal > 0
         st["quotex_api"]   = api
         st["balance"]      = bal
         st["connected"]    = True
@@ -1242,243 +1340,299 @@ def api_connect():
         st["connected"]  = False
         st["quotex_api"] = None
         st["balance"]    = 0.0
-        add_log(st, f"✗ Erè inatandi: {str(e)[:120]}", "ERROR")
+        add_log(st, f"✗ Erè inatandi: {str(e)[:150]}", "ERROR")
         return jsonify({"ok": False, "error": str(e)})
+
 
 @app.route("/api/start", methods=["POST"])
 def api_start():
-    st=get_state()
-    if not st.get("access"): return jsonify({"ok":False,"error":"⚠ Ou bezwen yon kòd aksè valid!"})
+    st = get_state()
+    if not st.get("access"):
+        return jsonify({"ok": False, "error": "⚠ Ou bezwen yon kòd aksè valid!"})
     api = st.get("quotex_api")
     if not st["connected"] or not api or not api.connected:
-        return jsonify({"ok":False,"error":"Konekte kont Quotex ou anvan! (email/password)"})
-    if st["running"]: return jsonify({"ok":False,"error":"Bot déjà ap kouri"})
-    d=request.json or {}
+        return jsonify({"ok": False, "error": "Konekte kont Quotex ou anvan! (email/password)"})
+    if st["running"]:
+        return jsonify({"ok": False, "error": "Bot déjà ap kouri"})
 
-    dur_map={"30s":30,"1m":60,"2m":120,"5m":300}
-    st["config"]={
-        "asset":        d.get("asset","EURUSD_otc"),
-        "strategy":     d.get("strategy","confluence"),
-        "lot":          float(d.get("lot",1.0)),
-        "duration":     dur_map.get(d.get("duration","1m"),60),
-        "min_conf":     float(d.get("min_conf",0.65)),
-        "martingale":   float(d.get("martingale",2.0)),
-        "profit_target":float(d.get("profit_target",0)),
-        "loss_limit":   float(d.get("loss_limit",0)),
+    d = request.json or {}
+    dur_map = {"30s": 30, "1m": 60, "2m": 120, "5m": 300}
+    st["config"] = {
+        "asset":         d.get("asset", "EURUSD_otc"),
+        "strategy":      d.get("strategy", "confluence"),
+        "lot":           float(d.get("lot", 1.0)),
+        "duration":      dur_map.get(d.get("duration", "1m"), 60),
+        "min_conf":      float(d.get("min_conf", 0.65)),
+        "martingale":    float(d.get("martingale", 2.0)),
+        "profit_target": float(d.get("profit_target", 0)),
+        "loss_limit":    float(d.get("loss_limit", 0)),
     }
 
-    import random,string
-    bot_id=''.join(random.choices(string.ascii_uppercase+string.digits,k=8))
-    st["running"]=True; st["bot_id"]=bot_id
-    st["total_pnl"]=0.0
+    import random, string
+    bot_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    st["running"]    = True
+    st["bot_id"]     = bot_id
+    st["total_pnl"]  = 0.0
 
-    threading.Thread(target=quotex_trading_loop,args=(st,bot_id),daemon=True).start()
-    return jsonify({"ok":True})
+    threading.Thread(target=quotex_trading_loop, args=(st, bot_id), daemon=True).start()
+    return jsonify({"ok": True})
+
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    st=get_state()
-    st["running"]=False; st["bot_id"]=None
-    return jsonify({"ok":True})
+    st = get_state()
+    st["running"] = False
+    st["bot_id"]  = None
+    return jsonify({"ok": True})
+
 
 @app.route("/api/status")
 def api_status():
-    st=get_state()
+    st = get_state()
     return jsonify({
-        "connected":st["connected"],
-        "account_type": st.get("account_type","PRACTICE"),
-        "running":st["running"],"balance":round(st["balance"],2),
-        "pnl":round(st["total_pnl"],2),
-        "trades":st["trades"][:20],"log":st["log"][:30],"config":st["config"],
+        "connected":    st["connected"],
+        "account_type": st.get("account_type", "PRACTICE"),
+        "running":      st["running"],
+        "balance":      round(st["balance"], 2),
+        "pnl":          round(st["total_pnl"], 2),
+        "trades":       st["trades"][:20],
+        "log":          st["log"][:30],
+        "config":       st["config"],
     })
+
 
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():
-    st=get_state()
+    st = get_state()
     try:
-        d=request.json or {}
-        asset=d.get("asset","EURUSD_otc"); strat=d.get("strategy","confluence")
-        api=st.get("quotex_api")
-        if not api or not api.connected: return jsonify({"ok":False,"error":"Konekte Quotex anvan!"})
-        candles=api.get_candles(asset,500,60)
-        if len(candles)<100: return jsonify({"ok":False,"error":f"Pa ase done ({len(candles)})"})
-        r=run_backtest(candles,strat,float(d.get("balance",10000)),float(d.get("lot",0.01)),float(d.get("sl",20)),float(d.get("tp",40)))
-        return jsonify({"ok":True,"result":r})
+        d     = request.json or {}
+        asset = d.get("asset", "EURUSD_otc")
+        strat = d.get("strategy", "confluence")
+        api   = st.get("quotex_api")
+        if not api or not api.connected:
+            return jsonify({"ok": False, "error": "Konekte Quotex anvan!"})
+        candles = api.get_candles(asset, 500, 60)
+        if len(candles) < 100:
+            return jsonify({"ok": False, "error": f"Pa ase done ({len(candles)})"})
+        r = run_backtest(
+            candles, strat,
+            float(d.get("balance", 10000)),
+            float(d.get("lot", 0.01)),
+            float(d.get("sl", 20)),
+            float(d.get("tp", 40))
+        )
+        return jsonify({"ok": True, "result": r})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
+
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
-    st=get_state()
-    d=request.json or {}
-    token=d.get("session_token","").strip()
-    code=d.get("code","").strip().upper()
+    st = get_state()
+    d  = request.json or {}
+    token = d.get("session_token", "").strip()
+    code  = d.get("code", "").strip().upper()
+
     if token:
-        ok,msg_text=validate_session(token)
+        ok, msg_text = validate_session(token)
         if ok:
-            with _sess_lock: is_adm=_sessions.get(token,{}).get("is_admin",False)
-            st["access"]=True; st["session_token"]=token; st["is_admin"]=is_adm
-            return jsonify({"ok":True,"msg":msg_text,"session_token":token,"is_admin":is_adm})
+            with _sess_lock:
+                is_adm = _sessions.get(token, {}).get("is_admin", False)
+            st["access"] = True; st["session_token"] = token; st["is_admin"] = is_adm
+            return jsonify({"ok": True, "msg": msg_text, "session_token": token, "is_admin": is_adm})
         else:
-            st["access"]=False
-            return jsonify({"ok":False,"msg":msg_text,"need_code":True})
+            st["access"] = False
+            return jsonify({"ok": False, "msg": msg_text, "need_code": True})
+
     if not code:
-        return jsonify({"ok":False,"msg":"Mete kòd aksè ou a","need_code":True})
-    ok,msg_text=check_access(code)
+        return jsonify({"ok": False, "msg": "Mete kòd aksè ou a", "need_code": True})
+
+    ok, msg_text = check_access(code)
     if ok:
         use_code(code)
-        new_token,expire=create_session()
-        is_adm=ACCESS_CODES.get(code,{}).get("is_adm",False) or ACCESS_CODES.get(code,{}).get("created_at") is None
+        new_token, expire = create_session()
+        is_adm = ACCESS_CODES.get(code, {}).get("is_adm", False) or \
+                 ACCESS_CODES.get(code, {}).get("created_at") is None
         with _sess_lock:
-            _sessions[new_token]["is_admin"]=is_adm
+            _sessions[new_token]["is_admin"] = is_adm
             _save_sessions()
-        st["access"]=True; st["session_token"]=new_token; st["is_admin"]=is_adm
-        msg_out="✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete"
-        return jsonify({"ok":True,"msg":msg_out,"session_token":new_token,"expire":expire,"is_admin":is_adm})
-    return jsonify({"ok":False,"msg":msg_text,"need_code":True})
+        st["access"] = True; st["session_token"] = new_token; st["is_admin"] = is_adm
+        msg_out = "✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete"
+        return jsonify({"ok": True, "msg": msg_out, "session_token": new_token,
+                        "expire": expire, "is_admin": is_adm})
+
+    return jsonify({"ok": False, "msg": msg_text, "need_code": True})
+
 
 def require_admin(d):
-    token=d.get("admin_token","").strip()
+    token = d.get("admin_token", "").strip()
     if not token: return False
-    with _sess_lock: sess=_sessions.get(token)
+    with _sess_lock:
+        sess = _sessions.get(token)
     if not sess: return False
-    return sess.get("is_admin",False)
+    return sess.get("is_admin", False)
+
 
 @app.route("/api/admin/codes", methods=["POST"])
 def admin_get_codes():
-    d=request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    now=time.time(); codes=[]
-    for c,entry in ACCESS_CODES.items():
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    now = time.time(); codes = []
+    for c, entry in ACCESS_CODES.items():
         if entry["created_at"] is None or entry.get("is_adm"):
-            status="ADM"; remaining="∞"
+            status = "ADM"; remaining = "∞"
         elif entry["used"]:
-            status="ITILIZE"; remaining="0"
+            status = "ITILIZE"; remaining = "0"
         else:
-            age=now-entry["created_at"]
-            if age>CODE_TTL_SECONDS: status="EKSPIRE"; remaining="0"
-            else: status="AKTIF"; remaining=str(int((CODE_TTL_SECONDS-age)/86400))+" jou"
-        codes.append({"code":c,"status":status,"remaining":remaining,"used":entry["used"],"is_adm":entry.get("is_adm",False) or entry["created_at"] is None})
-    today=date.today()
-    active_sess=sum(1 for s in _sessions.values() if date.fromisoformat(s["expire"])>today)
-    return jsonify({"ok":True,"codes":codes,"total_sessions":active_sess})
+            age = now - entry["created_at"]
+            if age > CODE_TTL_SECONDS: status = "EKSPIRE"; remaining = "0"
+            else: status = "AKTIF"; remaining = str(int((CODE_TTL_SECONDS - age) / 86400)) + " jou"
+        codes.append({
+            "code": c, "status": status, "remaining": remaining,
+            "used": entry["used"],
+            "is_adm": entry.get("is_adm", False) or entry["created_at"] is None
+        })
+    today = date.today()
+    active_sess = sum(1 for s in _sessions.values() if date.fromisoformat(s["expire"]) > today)
+    return jsonify({"ok": True, "codes": codes, "total_sessions": active_sess})
+
 
 @app.route("/api/admin/add_code", methods=["POST"])
 def admin_add_code():
-    d=request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    code=d.get("code","").strip().upper()
-    if not code or len(code)<3: return jsonify({"ok":False,"error":"Kòd dwe gen 3+ karaktè"})
-    if code in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd sa deja egziste"})
-    is_adm=d.get("is_adm",False)
-    ACCESS_CODES[code]={"created_at":None if is_adm else time.time(),"used":False,"is_adm":is_adm}
-    typ="Admin" if is_adm else "Itilizatè (1 mwa)"
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} kreye [{typ}]"})
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    code = d.get("code", "").strip().upper()
+    if not code or len(code) < 3: return jsonify({"ok": False, "error": "Kòd dwe gen 3+ karaktè"})
+    if code in ACCESS_CODES: return jsonify({"ok": False, "error": "Kòd sa deja egziste"})
+    is_adm = d.get("is_adm", False)
+    ACCESS_CODES[code] = {"created_at": None if is_adm else time.time(), "used": False, "is_adm": is_adm}
+    typ = "Admin" if is_adm else "Itilizatè (1 mwa)"
+    return jsonify({"ok": True, "msg": f"✓ Kòd {code} kreye [{typ}]"})
+
 
 @app.route("/api/admin/revoke_code", methods=["POST"])
 def admin_revoke_code():
-    d=request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    code=d.get("code","").strip().upper()
-    if not code or code not in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd pa jwenn"})
-    if code=="BONHEURWIIN": return jsonify({"ok":False,"error":"Pa ka revoke kòd ADM prensipal"})
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    code = d.get("code", "").strip().upper()
+    if not code or code not in ACCESS_CODES: return jsonify({"ok": False, "error": "Kòd pa jwenn"})
+    if code == "BONHEURWIIN": return jsonify({"ok": False, "error": "Pa ka revoke kòd ADM prensipal"})
     del ACCESS_CODES[code]
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} revoke"})
+    return jsonify({"ok": True, "msg": f"✓ Kòd {code} revoke"})
+
 
 @app.route("/api/admin/reset_code", methods=["POST"])
 def admin_reset_code():
-    d=request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    code=d.get("code","").strip().upper()
-    if code not in ACCESS_CODES: return jsonify({"ok":False,"error":"Kòd pa jwenn"})
-    ACCESS_CODES[code]["used"]=False
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    code = d.get("code", "").strip().upper()
+    if code not in ACCESS_CODES: return jsonify({"ok": False, "error": "Kòd pa jwenn"})
+    ACCESS_CODES[code]["used"] = False
     if not (ACCESS_CODES[code].get("is_adm") or ACCESS_CODES[code]["created_at"] is None):
-        ACCESS_CODES[code]["created_at"]=time.time()
-    return jsonify({"ok":True,"msg":f"✓ Kòd {code} reset"})
+        ACCESS_CODES[code]["created_at"] = time.time()
+    return jsonify({"ok": True, "msg": f"✓ Kòd {code} reset"})
+
 
 @app.route("/api/admin/users", methods=["POST"])
 def admin_get_users():
-    d=request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    users=[]
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    users = []
     with _user_lock:
-        for uid,st in _user_states.items():
-            users.append({"uid":uid[:8]+"...","connected":st.get("connected",False),
-                "running":st.get("running",False),
-                "balance":round(st.get("balance",0),2),"pnl":round(st.get("total_pnl",0),2),
-                "trades":len(st.get("trades",[])),"asset":st.get("config",{}).get("asset","—"),
-                "strategy":st.get("config",{}).get("strategy","—")})
-    return jsonify({"ok":True,"users":users,"total":len(users)})
+        for uid, st in _user_states.items():
+            users.append({
+                "uid":      uid[:8] + "...",
+                "connected": st.get("connected", False),
+                "running":   st.get("running", False),
+                "balance":   round(st.get("balance", 0), 2),
+                "pnl":       round(st.get("total_pnl", 0), 2),
+                "trades":    len(st.get("trades", [])),
+                "asset":     st.get("config", {}).get("asset", "—"),
+                "strategy":  st.get("config", {}).get("strategy", "—"),
+            })
+    return jsonify({"ok": True, "users": users, "total": len(users)})
+
 
 @app.route("/api/admin/stop_user", methods=["POST"])
 def admin_stop_user():
-    d=request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    uid_prefix=d.get("uid","").replace("...","")
-    stopped=0
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    uid_prefix = d.get("uid", "").replace("...", "")
+    stopped = 0
     with _user_lock:
-        for uid,st in _user_states.items():
+        for uid, st in _user_states.items():
             if uid.startswith(uid_prefix):
-                st["running"]=False; st["bot_id"]=None; stopped+=1
-    return jsonify({"ok":True,"msg":f"✓ {stopped} bot(s) kanpe"})
+                st["running"] = False; st["bot_id"] = None; stopped += 1
+    return jsonify({"ok": True, "msg": f"✓ {stopped} bot(s) kanpe"})
+
 
 @app.route("/api/admin/sessions", methods=["POST"])
 def admin_sessions():
-    d=request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    today=date.today(); sessions=[]
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    today = date.today(); sessions = []
     with _sess_lock:
-        for token,sess in _sessions.items():
-            exp=date.fromisoformat(sess["expire"])
-            sessions.append({"token":token[:8]+"...","expire":sess["expire"],
-                "days_left":(exp-today).days,"is_admin":sess.get("is_admin",False),
-                "active":(exp-today).days>0})
-    return jsonify({"ok":True,"sessions":sessions,"total":len(sessions)})
+        for token, sess in _sessions.items():
+            exp = date.fromisoformat(sess["expire"])
+            sessions.append({
+                "token":    token[:8] + "...",
+                "expire":   sess["expire"],
+                "days_left": (exp - today).days,
+                "is_admin": sess.get("is_admin", False),
+                "active":   (exp - today).days > 0,
+            })
+    return jsonify({"ok": True, "sessions": sessions, "total": len(sessions)})
+
 
 @app.route("/api/admin/clean_sessions", methods=["POST"])
 def admin_clean_sessions():
-    d=request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    today=date.today(); count=0
+    d = request.json or {}
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    today = date.today(); count = 0
     with _sess_lock:
-        expired=[t for t,s in _sessions.items() if date.fromisoformat(s["expire"])<=today]
-        for t in expired: del _sessions[t]; count+=1
+        expired = [t for t, s in _sessions.items() if date.fromisoformat(s["expire"]) <= today]
+        for t in expired: del _sessions[t]; count += 1
         if count: _save_sessions()
-    return jsonify({"ok":True,"msg":f"✓ {count} sesyon ekspire efase"})
+    return jsonify({"ok": True, "msg": f"✓ {count} sesyon ekspire efase"})
+
 
 @app.route("/api/admin/clear_user", methods=["POST"])
 def admin_clear_user():
     d = request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    uid_prefix = d.get("uid","").replace("...","")
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    uid_prefix = d.get("uid", "").replace("...", "")
     cleared = 0
     with _user_lock:
         for uid, st in _user_states.items():
             if uid.startswith(uid_prefix):
-                st["trades"]=[]; st["total_pnl"]=0.0; st["log"]=[]
-                cleared+=1
-    return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè efase"})
+                st["trades"] = []; st["total_pnl"] = 0.0; st["log"] = []
+                cleared += 1
+    return jsonify({"ok": True, "msg": f"✓ {cleared} itilizatè efase"})
+
 
 @app.route("/api/admin/clear_trades", methods=["POST"])
 def admin_clear_trades():
     d = request.json or {}
-    if not require_admin(d): return jsonify({"ok":False,"error":"Aksè refize — admin sèlman"})
-    uid_prefix = d.get("uid","").replace("...","")
+    if not require_admin(d): return jsonify({"ok": False, "error": "Aksè refize — admin sèlman"})
+    uid_prefix = d.get("uid", "").replace("...", "")
     cleared = 0
     with _user_lock:
         for uid, st in _user_states.items():
             if uid.startswith(uid_prefix):
                 st["trades"] = []
                 cleared += 1
-    return jsonify({"ok":True,"msg":f"✓ {cleared} itilizatè: trades efase (log + pnl konsève)"})
+    return jsonify({"ok": True, "msg": f"✓ {cleared} itilizatè: trades efase (log + pnl konsève)"})
+
 
 @app.route("/")
-def index(): return render_template_string(HTML)
+def index():
+    return render_template_string(HTML)
+
 
 # ═══════════════════════════════════════════════════════════
 # HTML INTERFACE
 # ═══════════════════════════════════════════════════════════
-HTML=r"""<!DOCTYPE html>
+HTML = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
@@ -1941,7 +2095,7 @@ function msg(id,txt,ok){document.getElementById(id).innerHTML=`<div class="al ${
 
 async function doConn(){
   const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
-  msg("cm","⏳ Ap konekte ak Quotex — tann 20-45 segonn...","ok");
+  msg("cm","⏳ Ap konekte ak Quotex — tann 30-60 segonn...","ok");
   const body={
     email:document.getElementById("q-email").value.trim(),
     password:document.getElementById("q-pass").value.trim(),
@@ -2155,18 +2309,14 @@ async function admClearUser(uid){
   if(!confirm(`Efase TOUT istorik ${uid}?`))return;
   const token=getStoredToken();
   const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();
-  alert(d.ok?d.msg:d.error);
-  if(d.ok)admRefresh();
+  const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();
 }
 
 async function admClearTrades(uid){
   if(!confirm(`Efase trades sèlman pou ${uid}?`))return;
   const token=getStoredToken();
   const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();
-  alert(d.ok?d.msg:d.error);
-  if(d.ok)admRefresh();
+  const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();
 }
 
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
@@ -2179,7 +2329,7 @@ checkLogin();
 
 HTML = HTML.replace("__SUB_PRICE__", str(SUB_PRICE)).replace("__WHATSAPP__", WHATSAPP)
 
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
     logger.info(f"BonheurBot Quotex Edition starting on port {port}")
-    app.run(host="0.0.0.0",port=port,debug=False,threaded=True)
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

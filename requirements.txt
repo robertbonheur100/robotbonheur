@@ -1,5 +1,3 @@
 flask
-websocket-client
-python-binance
-pandas
-numpy
+gunicorn
+pyquotex @ git+https://github.com/cleitonleonel/pyquotex.git

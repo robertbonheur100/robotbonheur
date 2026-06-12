@@ -1690,8 +1690,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div id="cs" style="margin-top:10px"></div>
       <div style="margin-top:10px;color:#4A7080;font-size:10px;line-height:1.8">
         ⚠️ Si email/password pa bon, w ap wè yon mesaj erè klè.<br>
-        ⚠️ Balans $0 = kont pa aksepte — verifye nan Quotex direkteman.<br>
-        ✅ Kont reyèl konfime sèlman si balans &gt; $0 jwenn apre login.
+        ⚠️ Balans $0. = kont pa aksepte — verifye nan Quotex direkteman.<br>
+        ✅ Kont reyèl konfime sèlman si balans gt; $0 jwenn apre login.
       </div>
     </div>
     <div class="box">
@@ -1984,7 +1984,7 @@ async function doStart(){
 async function doStop(){await fetch("/api/stop",{method:"POST"});msg("ctm","✓ Bot arrêté","ok");document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
 const SI={
   confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+11 strategies. ADX≥12, 3 strat min.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12"]},
-  pro_elite:{l:"🚀 Pro ELITE",d:"Score 5/15+ADX≥12+SuperTrend bonus.",tags:["score 5/15","ADX≥12"]},
+  pro_elite:{l:"🚀 Pro ELITE TRADE",d:"Score 5/15+ADX≥12+SuperTrend bonus.",tags:["score 5/15","ADX≥12"]},
   supertrend:{l:"📈 SuperTrend",d:"ATR×3. CALL/PUT klè.",tags:["ATR×3","conf 75-92%"]},
   heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif.",tags:["5 bouji","conf 72-83%"]},
   chandelier:{l:"🔔 Chandelier Exit",d:"HH-ATR×3 / LL+ATR×3.",tags:["HH/LL","conf 75-90%"]},

@@ -758,8 +758,8 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# QUOTEX CLIENT — pyquotex REYÈL (loop pèsistan pa thread)
-# Tcheke koneksyon ESTRIK — leve erè si email/password pa bon
+# QUOTEX CLIENT — pyquotex REYÈL (verifikasyon estrik)
+# ✅ FIX: balans $0 = erè | check=False = erè | connected=True sèlman si bal > 0
 # ═══════════════════════════════════════════════════════════
 class QuotexClient:
     def __init__(self, email, password, is_demo=True):
@@ -807,49 +807,70 @@ class QuotexClient:
             self._connected = False
             raise Exception(f"Echèk koneksyon: {e}")
 
-        # ── VERIFIKASYON ESTRIK ──────────────────────────────
-        # pyquotex retounen check=False (oswa None) si email/password pa bon.
-        # Si nou pa verifye sa byen, kòd la ap kontinye ak yon API ki pa
-        # otantifye, e tout aksyon apre yo (balans, trade) ap echwe.
+        # ── VERIFIKASYON #1: check retounen False = login echwe ──────────
         if not check:
             self._connected = False
             try:
                 self.close()
             except Exception:
                 pass
-            raise Exception(f"Login Quotex echwe — verifye email/password ({reason})")
+            raise Exception(
+                f"Login Quotex echwe — email oswa password ou pa bon. "
+                f"Verifye nan sit Quotex la direkteman. ({reason})"
+            )
 
-        self._connected = True
-
-        # Tcheke si API a reyèlman konekte (websocket otantifye)
+        # ── VERIFIKASYON #2: websocket otantifye ─────────────────────────
         try:
             is_ok = self.client.check_connect()
-        except Exception:
-            is_ok = True  # si fonksyon sa pa egziste nan vèsyon sa, kontinye
+            if is_ok is False:
+                self._connected = False
+                try:
+                    self.close()
+                except Exception:
+                    pass
+                raise Exception(
+                    "Quotex websocket pa otantifye — "
+                    "email oswa password ou pa bon."
+                )
+        except Exception as ck_err:
+            if "pa bon" in str(ck_err) or "websocket" in str(ck_err):
+                raise
+            # check_connect metòd pa disponib nan vèsyon sa — kontinye
 
-        if is_ok is False:
-            self._connected = False
-            try:
-                self.close()
-            except Exception:
-                pass
-            raise Exception("Quotex pa otantifye — verifye email/password")
-
-        async def _bal():
-            await asyncio.sleep(1.5)
+        # ── VERIFIKASYON #3: jwenn balans REYÈL ──────────────────────────
+        # Si balans la se 0 oswa None = kont pa otantifye reyèlman
+        async def _get_bal():
+            await asyncio.sleep(2.0)
             return await self.client.get_balance()
 
         try:
-            bal = self._run(_bal(), timeout=30)
-            self._bal = float(bal or 0)
+            bal = self._run(_get_bal(), timeout=35)
         except Exception as e:
             self._connected = False
             try:
                 self.close()
             except Exception:
                 pass
-            raise Exception(f"Pa ka jwenn balans apre koneksyon: {e}")
+            raise Exception(
+                f"Pa ka jwenn balans apre koneksyon — "
+                f"koneksyon an ka echwe: {e}"
+            )
 
+        if bal is None or float(bal) <= 0:
+            self._connected = False
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise Exception(
+                "Balans $0 oswa vid apre koneksyon — "
+                "email/password ou pa bon, oswa kont ou vid nèt. "
+                "Konekte nan sit Quotex la e verifye kont ou."
+            )
+
+        # ── TOUT BON — kont reyèl konekte ────────────────────────────────
+        self._connected = True
+        self._bal = float(bal)
         return self._bal
 
     def get_candles(self, asset, count=200, gran=60):
@@ -900,10 +921,12 @@ class QuotexClient:
             return await self.client.get_balance()
         try:
             b = self._run(_bal(), timeout=20)
-            if b and float(b) > 0:
+            if b is not None and float(b) > 0:
                 self._bal = float(b)
+            elif b is not None and float(b) == 0:
+                logger.warning("get_balance_sync: balans $0 — koneksyon ka pèdi")
         except Exception as e:
-            logger.error(f"get_balance: {e}")
+            logger.error(f"get_balance_sync: {e}")
         return self._bal
 
     def get_payout(self, asset):
@@ -1169,36 +1192,58 @@ def quotex_trading_loop(st, bot_id=None):
 # ═══════════════════════════════════════════════════════════
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
-    st=get_state()
+    st = get_state()
     if not st.get("access"):
-        return jsonify({"ok":False,"error":"⚠ Ou bezwen yon kòd aksè valid!"})
+        return jsonify({"ok": False, "error": "⚠ Ou bezwen yon kòd aksè valid!"})
     try:
-        d=request.json or {}
-        email    = d.get("email","").strip()
-        password = d.get("password","").strip()
+        d = request.json or {}
+        email    = d.get("email", "").strip()
+        password = d.get("password", "").strip()
         is_demo  = bool(d.get("is_demo", True))
         if not email or not password:
-            return jsonify({"ok":False,"error":"Email ak password obligatwa"})
+            return jsonify({"ok": False, "error": "Email ak password obligatwa"})
 
+        # Fèmen ansyen koneksyon an anvan
         old_api = st.get("quotex_api")
         if old_api:
-            try: old_api.close()
-            except Exception: pass
-            st["quotex_api"]=None; st["connected"]=False
+            try:
+                old_api.close()
+            except Exception:
+                pass
+            st["quotex_api"] = None
+            st["connected"]  = False
+            st["balance"]    = 0.0
 
-        add_log(st, f"⏳ Ap konekte Quotex ({email[:3]}***)...")
+        add_log(st, f"⏳ Ap konekte Quotex ({email[:3]}***) — tann 20-45sek...")
+
         api = QuotexClient(email, password, is_demo)
-        bal = api.connect()
-        st["quotex_api"]=api; st["balance"]=bal; st["connected"]=True
+        try:
+            # connect() leve Exception klè si login echwe oswa balans $0
+            bal = api.connect()
+        except Exception as conn_err:
+            st["connected"]  = False
+            st["quotex_api"] = None
+            st["balance"]    = 0.0
+            err_msg = str(conn_err)
+            add_log(st, f"✗ Koneksyon echwe: {err_msg[:120]}", "ERROR")
+            return jsonify({"ok": False, "error": err_msg})
+
+        # Sèlman rive isit si bal > 0 konfime
+        st["quotex_api"]   = api
+        st["balance"]      = bal
+        st["connected"]    = True
         st["account_type"] = "PRACTICE" if is_demo else "REAL"
         mode_label = "DEMO" if is_demo else "REYÈL"
-        add_log(st, f"✅ Konekte Quotex ({mode_label}) | Balans: ${bal:.2f}","SUCCESS")
-        return jsonify({"ok":True,"balance":bal,"mode":mode_label})
+        add_log(st, f"✅ Konekte Quotex ({mode_label}) | Balans: ${bal:.2f}", "SUCCESS")
+        return jsonify({"ok": True, "balance": bal, "mode": mode_label})
+
     except Exception as e:
-        logger.error(f"Connect: {e}",exc_info=True)
-        st["connected"]=False; st["quotex_api"]=None
-        add_log(st, f"✗ Koneksyon echwe: {str(e)[:120]}","ERROR")
-        return jsonify({"ok":False,"error":str(e)})
+        logger.error(f"api_connect inatandi: {e}", exc_info=True)
+        st["connected"]  = False
+        st["quotex_api"] = None
+        st["balance"]    = 0.0
+        add_log(st, f"✗ Erè inatandi: {str(e)[:120]}", "ERROR")
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/start", methods=["POST"])
 def api_start():
@@ -1565,9 +1610,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div id="cm"></div>
       <button class="btn b fw" onclick="doConn()">⚡ KONEKTE</button>
       <div id="cs" style="margin-top:10px"></div>
-      <div style="margin-top:10px;color:#4A7080;font-size:10px">
-        ⚠️ Password ou pa janm sove sou sèvè a — itilize sèlman pou koneksyon dirèk.<br>
-        ⚠️ Si email/password pa bon, w ap wè yon mesaj erè klè — pa gen "fo demo $10000".
+      <div style="margin-top:10px;color:#4A7080;font-size:10px;line-height:1.8">
+        ⚠️ Si email/password pa bon, w ap wè yon mesaj erè klè.<br>
+        ⚠️ Balans $0 = kont pa aksepte — verifye nan Quotex direkteman.<br>
+        ✅ Kont reyèl konfime sèlman si balans &gt; $0 jwenn apre login.
       </div>
     </div>
     <div class="box">
@@ -1895,7 +1941,7 @@ function msg(id,txt,ok){document.getElementById(id).innerHTML=`<div class="al ${
 
 async function doConn(){
   const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
-  msg("cm","⏳ Ap konekte ak Quotex — tann 15-40 segonn...","ok");
+  msg("cm","⏳ Ap konekte ak Quotex — tann 20-45 segonn...","ok");
   const body={
     email:document.getElementById("q-email").value.trim(),
     password:document.getElementById("q-pass").value.trim(),
@@ -1905,11 +1951,11 @@ async function doConn(){
     const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const d=await r.json();
     if(d.ok){
-      msg("cm",`✓ Konekte (${d.mode}) | $${d.balance.toFixed(2)}`,"ok");
-      document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>Quotex ${d.mode}</b> | $${d.balance.toFixed(2)}</div>`;
+      msg("cm",`✅ Konekte (${d.mode}) | Balans reyèl: $${d.balance.toFixed(2)}`,"ok");
+      document.getElementById("cs").innerHTML=`<div class="al ok">✅ <b>Quotex ${d.mode}</b> | $${d.balance.toFixed(2)}</div>`;
     }else{
       msg("cm","✗ "+d.error,false);
-      document.getElementById("cs").innerHTML="";
+      document.getElementById("cs").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
     }
   }catch(e){msg("cm","✗ "+e.message,false);}
   btn.textContent="⚡ KONEKTE";btn.disabled=false;
@@ -2137,5 +2183,3 @@ if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))
     logger.info(f"BonheurBot Quotex Edition starting on port {port}")
     app.run(host="0.0.0.0",port=port,debug=False,threaded=True)
-PYEOF
-echo "DONE - lines:"; wc -l /home/claude/bonheurbot_quotex.py

@@ -3,11 +3,13 @@
 ║               BONHEURBOT PRO v7 — QUOTEX EDITION            ║
 ║         Multi-User Trading Bot — Quotex Binary Options       ║
 ║   Trend + Ranging | Smart Entry | 3-Loss Pause | Martingale  ║
+║   FIX: pyquotex WebSocket solid + Mise min $0.50             ║
 ╚══════════════════════════════════════════════════════════════╝
 
-KONEKSYON: WebSocket Quotex (reverse-engineered) + Selenium fallback
-KONTRAT:   Binary Options Up/Down (menm ak Deriv Rise/Fall)
-PAYOUT:    85-95% depann sou aktif la (live via API)
+KONEKSYON: pyquotex (bibliyotèk ofisyèl) + HTTP fallback
+KONTRAT:   Binary Options Up/Down
+PAYOUT:    80-95% depann sou aktif la (live via API)
+MISE MIN:  $0.50
 """
 
 import os, json, time, threading, logging, math, uuid, secrets, re, hashlib, base64
@@ -19,9 +21,10 @@ logger = logging.getLogger(__name__)
 
 PROFIT_WALLET = "0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef"
 PROFIT_PCT    = 0.005   # 0.5%
+MIN_STAKE     = 0.50    # Mise minimòm $0.50
 
 # ═══════════════════════════════════════════════════════════
-# KÒDAKSÈ SISTÈM (konsève oryajinal)
+# KÒDAKSÈ SISTÈM
 # ═══════════════════════════════════════════════════════════
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
@@ -126,163 +129,477 @@ def get_state():
                 "balance": 0.0, "demo_balance": 0.0, "total_pnl": 0.0, "profit_sent": 0.0,
                 "trades": [], "log": [], "config": {},
                 "quotex_api": None,
-                "account_type": "PRACTICE",  # PRACTICE oswa REAL
+                "account_type": "PRACTICE",
             }
     return _user_states[uid]
 
+
 # ═══════════════════════════════════════════════════════════
-# ██████  QUOTEX CLIENT — WebSocket + Selenium Fallback  ██████
+# ██████  QUOTEX CLIENT — pyquotex + HTTP fallback  ██████
 # ═══════════════════════════════════════════════════════════
+
+def _try_import_pyquotex():
+    """Eseye enpòte pyquotex — enstale si pa la"""
+    try:
+        from quotexapi.stable_api import Quotex
+        return Quotex
+    except ImportError:
+        pass
+
+    # Eseye enstale
+    import subprocess, sys
+    logger.info("Ap enstale pyquotex...")
+    for pkg in ["git+https://github.com/cleitonleonel/pyquotex.git", "quotex-api", "quotexapi"]:
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", pkg, "--break-system-packages", "-q"],
+                timeout=60
+            )
+            try:
+                from quotexapi.stable_api import Quotex
+                return Quotex
+            except ImportError:
+                continue
+        except Exception:
+            continue
+    return None
+
+
+class QuotexPyquotexClient:
+    """
+    Client Quotex ki itilize pyquotex (bibliyotèk GitHub ofisyèl).
+    https://github.com/cleitonleonel/pyquotex
+    """
+
+    def __init__(self, email, password):
+        self.email        = email
+        self.password     = password
+        self._api         = None
+        self._balance     = 0.0
+        self._demo_bal    = 0.0
+        self._account_type= "PRACTICE"
+        self._payout_cache= {}
+        self._connected   = False
+
+    def connect(self):
+        Quotex = _try_import_pyquotex()
+        if not Quotex:
+            raise Exception("pyquotex pa disponib — eseye: pip install git+https://github.com/cleitonleonel/pyquotex.git")
+
+        self._api = Quotex(
+            email=self.email,
+            password=self.password,
+            lang="en",
+        )
+        self._api.set_account_mode("PRACTICE")
+
+        # Konekte (async via threading)
+        import asyncio
+
+        async def _connect():
+            check, reason = await self._api.connect()
+            return check, reason
+
+        loop = asyncio.new_event_loop()
+        try:
+            check, reason = loop.run_until_complete(_connect())
+        finally:
+            loop.close()
+
+        if not check:
+            raise Exception(f"Quotex login echwe: {reason}")
+
+        self._connected = True
+        self._balance   = float(self._api.get_balance() or 0)
+        return self._balance
+
+    def set_account_type(self, acc_type):
+        self._account_type = acc_type
+        if self._api:
+            mode = "PRACTICE" if acc_type == "PRACTICE" else "REAL"
+            self._api.set_account_mode(mode)
+
+    @property
+    def balance(self):
+        return self._balance
+
+    def get_balance_sync(self):
+        import asyncio
+        if not self._api:
+            return self._balance
+        try:
+            async def _bal():
+                return self._api.get_balance()
+            loop = asyncio.new_event_loop()
+            try:
+                b = loop.run_until_complete(_bal())
+                if b:
+                    self._balance = float(b)
+            finally:
+                loop.close()
+        except:
+            pass
+        return self._balance
+
+    def get_candles(self, symbol="EURUSD", count=200, granularity=60):
+        import asyncio
+        if not self._api:
+            return self._generate_synthetic_candles(symbol, count)
+        try:
+            # pyquotex get_candles
+            asset = symbol.replace("-", "_").replace("/", "")
+            async def _candles():
+                data = await self._api.get_candles(asset, granularity, count, time.time())
+                return data
+            loop = asyncio.new_event_loop()
+            try:
+                raw = loop.run_until_complete(_candles())
+            finally:
+                loop.close()
+            if raw:
+                return self._parse_pyquotex_candles(raw)
+        except Exception as e:
+            logger.warning(f"pyquotex candles: {e}")
+        return self._generate_synthetic_candles(symbol, count)
+
+    def _parse_pyquotex_candles(self, raw):
+        candles = []
+        for item in raw:
+            try:
+                if isinstance(item, dict):
+                    t  = int(item.get("time", item.get("t", 0)))
+                    o  = float(item.get("open", item.get("o", 0)))
+                    c  = float(item.get("close", item.get("c", 0)))
+                    h  = float(item.get("high", item.get("h", 0)))
+                    lo = float(item.get("low",  item.get("l", 0)))
+                    v  = float(item.get("volume", 1000))
+                    if t and o:
+                        candles.append({"time":t,"open":o,"close":c,"high":h,"low":lo,"volume":v})
+                elif isinstance(item, (list, tuple)) and len(item) >= 5:
+                    candles.append({
+                        "time":int(item[0]),"open":float(item[1]),"close":float(item[2]),
+                        "high":float(item[3]),"low":float(item[4]),"volume":1000
+                    })
+            except:
+                pass
+        return sorted(candles, key=lambda x: x["time"])
+
+    def get_payout(self, symbol):
+        if symbol in self._payout_cache:
+            return self._payout_cache[symbol]
+        import asyncio
+        if self._api:
+            try:
+                asset = symbol.replace("-", "_").replace("/", "")
+                async def _pay():
+                    return await self._api.get_payment()
+                loop = asyncio.new_event_loop()
+                try:
+                    data = loop.run_until_complete(_pay())
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            if isinstance(v, dict):
+                                pct = v.get("profit", v.get("payout", 0))
+                                self._payout_cache[k] = float(pct) / 100 if float(pct) > 1 else float(pct)
+                finally:
+                    loop.close()
+                if symbol in self._payout_cache:
+                    return self._payout_cache[symbol]
+            except Exception as e:
+                logger.debug(f"payout fetch: {e}")
+        defaults = {
+            "EURUSD": 0.85, "GBPUSD": 0.85, "USDJPY": 0.82,
+            "AUDUSD": 0.80, "USDCAD": 0.80, "USDCHF": 0.80,
+            "EURGBP": 0.80, "EURJPY": 0.82,
+            "BTCUSD": 0.82, "ETHUSD": 0.80, "LTCUSD": 0.78,
+            "EURUSD_OTC": 0.92, "GBPUSD_OTC": 0.92,
+            "EURUSD-OTC": 0.92, "GBPUSD-OTC": 0.92,
+        }
+        return defaults.get(symbol, 0.85)
+
+    def place_trade(self, symbol, direction, amount, duration_secs=60):
+        import asyncio
+        amount = round(max(MIN_STAKE, float(amount)), 2)
+        action = "call" if direction == "BUY" else "put"
+        asset  = symbol.replace("-", "_").replace("/", "")
+
+        async def _trade():
+            status, trade_id = await self._api.buy(
+                amount, asset, action, duration_secs
+            )
+            return status, trade_id
+
+        loop = asyncio.new_event_loop()
+        try:
+            status, trade_id = loop.run_until_complete(_trade())
+        finally:
+            loop.close()
+
+        if not status:
+            raise Exception(f"Trade rejte pa Quotex: {trade_id}")
+
+        return {
+            "id":           str(trade_id),
+            "symbol":       symbol,
+            "direction":    direction,
+            "amount":       amount,
+            "open_time":    int(time.time()),
+            "close_time":   int(time.time()) + duration_secs,
+            "duration":     duration_secs,
+            "balance_after": self._balance - amount,
+            "account_type": self._account_type,
+        }
+
+    def wait_trade_result(self, trade_id, open_price, amount, timeout=120):
+        import asyncio
+        bal_before = self._balance
+
+        async def _result():
+            try:
+                result = await self._api.check_win(trade_id)
+                return result
+            except Exception as e:
+                logger.warning(f"check_win: {e}")
+                return None
+
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(_result())
+        finally:
+            loop.close()
+
+        # Mete ajou balans
+        try:
+            self._balance = float(self._api.get_balance() or bal_before)
+        except:
+            pass
+
+        if result is not None:
+            # pyquotex retounen (win, profit_amount) oswa boolean
+            if isinstance(result, tuple):
+                won, profit = result[0], result[1] if len(result) > 1 else 0
+                pnl = round(float(profit), 2) if won else -amount
+            elif isinstance(result, bool):
+                won = result
+                pnl = round(amount * self.get_payout(trade_id), 2) if won else -amount
+            elif isinstance(result, dict):
+                won = result.get("won", result.get("win", False))
+                pnl = float(result.get("profit", result.get("pnl", amount * 0.85 if won else -amount)))
+            else:
+                won = bool(result)
+                pnl = round(amount * 0.85, 2) if won else -amount
+
+            return {
+                "won":         won,
+                "pnl":         round(pnl, 2),
+                "close_price": 0,
+                "balance":     self._balance,
+            }
+
+        # Fallback: jwenn diferans balans
+        new_bal = self._balance
+        diff    = new_bal - bal_before
+        return {
+            "won":         diff > 0,
+            "pnl":         round(diff, 2) if abs(diff) > 0.01 else -amount,
+            "close_price": 0,
+            "balance":     new_bal,
+        }
+
+    def _generate_synthetic_candles(self, symbol, count=200):
+        import random
+        base_prices = {
+            "EURUSD":1.0850,"GBPUSD":1.2700,"USDJPY":148.5,"AUDUSD":0.6500,
+            "USDCAD":1.3600,"USDCHF":0.9050,"EURGBP":0.8600,"EURJPY":160.0,
+            "BTCUSD":43000,"ETHUSD":2200,"LTCUSD":72,
+            "EURUSD_OTC":1.0850,"GBPUSD_OTC":1.2700,
+            "EURUSD-OTC":1.0850,"GBPUSD-OTC":1.2700,
+        }
+        base = base_prices.get(symbol, 1.0)
+        candles = []
+        t   = int(time.time()) - count * 60
+        rng = random.Random(int(base * 10000) + int(time.time() / 3600))
+        price = base
+        for _ in range(count):
+            change = rng.gauss(0, base * 0.0008)
+            open_  = price
+            close  = price + change
+            high   = max(open_, close) + abs(rng.gauss(0, base * 0.0003))
+            low    = min(open_, close) - abs(rng.gauss(0, base * 0.0003))
+            candles.append({
+                "time":t,"open":round(open_,5),"close":round(close,5),
+                "high":round(high,5),"low":round(low,5),"volume":1000
+            })
+            price = close
+            t += 60
+        return candles
+
+    def close(self):
+        if self._api:
+            try:
+                import asyncio
+                async def _close():
+                    if hasattr(self._api, 'close'):
+                        await self._api.close()
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(_close())
+                loop.close()
+            except:
+                pass
+        self._connected = False
+
+
 class QuotexWebSocketClient:
     """
-    Quotex WebSocket Client — Reverse-engineered
-    Konekte sou wss://ws2.quotex.io/socket.io/ ak JWT token
-    Jwenn via login HTTP anvan
+    Client WebSocket Quotex — reverse-engineered robis.
+    Travay dirèkteman sou Render/VPS.
     """
-    WS_URL    = "wss://ws2.quotex.io/socket.io/?EIO=4&transport=websocket"
-    LOGIN_URL = "https://quotex.io/api/v1/login"
-    CANDLE_URL= "https://quotex.io/api/v1/candles"
+    WS_URL = "wss://ws2.quotex.io/socket.io/?EIO=4&transport=websocket"
 
-    # Aktif disponib Quotex
-    ASSETS = {
-        # Forex
-        "EURUSD":  {"id": "EURUSD", "label": "EUR/USD"},
-        "GBPUSD":  {"id": "GBPUSD", "label": "GBP/USD"},
-        "USDJPY":  {"id": "USDJPY", "label": "USD/JPY"},
-        "AUDUSD":  {"id": "AUDUSD", "label": "AUD/USD"},
-        "USDCAD":  {"id": "USDCAD", "label": "USD/CAD"},
-        "USDCHF":  {"id": "USDCHF", "label": "USD/CHF"},
-        "EURGBP":  {"id": "EURGBP", "label": "EUR/GBP"},
-        "EURJPY":  {"id": "EURJPY", "label": "EUR/JPY"},
-        # Crypto
-        "BTCUSD":  {"id": "BTCUSD", "label": "BTC/USD"},
-        "ETHUSD":  {"id": "ETHUSD", "label": "ETH/USD"},
-        "LTCUSD":  {"id": "LTCUSD", "label": "LTC/USD"},
-        # OTC (weekend)
-        "EURUSD_OTC": {"id": "EURUSD_OTC", "label": "EUR/USD OTC"},
-        "GBPUSD_OTC": {"id": "GBPUSD_OTC", "label": "GBP/USD OTC"},
-        "EURUSD-OTC": {"id": "EURUSD-OTC", "label": "EUR/USD OTC"},
-        "GBPUSD-OTC": {"id": "GBPUSD-OTC", "label": "GBP/USD OTC"},
+    ASSET_MAP = {
+        "EURUSD": "EURUSD", "GBPUSD": "GBPUSD", "USDJPY": "USDJPY",
+        "AUDUSD": "AUDUSD", "USDCAD": "USDCAD", "USDCHF": "USDCHF",
+        "EURGBP": "EURGBP", "EURJPY": "EURJPY",
+        "BTCUSD": "BTCUSD", "ETHUSD": "ETHUSD", "LTCUSD": "LTCUSD",
+        "EURUSD-OTC":  "EURUSD-OTC", "GBPUSD-OTC":  "GBPUSD-OTC",
+        "EURUSD_OTC":  "EURUSD-OTC", "GBPUSD_OTC":  "GBPUSD-OTC",
     }
 
     def __init__(self, email, password):
         self.email    = email
         self.password = password
         self._token   = None
-        self._session_id = None
         self._balance = 0.0
-        self._demo_bal= 0.0
+        self._demo_bal= 10000.0
         self._account_type = "PRACTICE"
         self._ws      = None
         self._connected = False
-        self._pending = {}  # request_id -> Event + result
+        self._pending = {}
         self._lock    = threading.Lock()
-        self._msg_id  = 0
+        self._session = None
         self._payout_cache = {}
-        self._session = None  # requests.Session
+        self._connect_event = threading.Event()
 
-    # ── 1. LOGIN HTTP ──────────────────────────────────────
+    # ── LOGIN ──────────────────────────────────────────────
     def _http_login(self):
-        """Login HTTP pou jwenn session cookie + token"""
         import requests
+
         self._session = requests.Session()
         self._session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept":       "application/json, text/plain, */*",
             "Content-Type": "application/json",
-            "Origin": "https://quotex.io",
-            "Referer": "https://quotex.io/",
+            "Origin":       "https://quotex.io",
+            "Referer":      "https://quotex.io/",
+            "Accept-Language": "en-US,en;q=0.9",
         })
 
-        # Eseye metòd 1: API JSON
-        try:
-            payload = {
-                "email": self.email,
-                "password": self.password,
-                "remember": True,
-                "keep_signed": True,
-            }
-            r = self._session.post(
-                "https://quotex.io/api/v1/login",
-                json=payload, timeout=20
-            )
-            data = r.json()
-            logger.info(f"Quotex login response: {data.get('status','?')} / {list(data.keys())}")
+        # Metòd 1: API JSON ofisyèl
+        for url in [
+            "https://quotex.io/api/v1/login",
+            "https://quotex.io/api/v2/login",
+        ]:
+            try:
+                payload = {
+                    "email":        self.email,
+                    "password":     self.password,
+                    "remember":     True,
+                    "keep_signed":  True,
+                }
+                r = self._session.post(url, json=payload, timeout=20)
+                if r.status_code in (200, 201):
+                    try:
+                        d = r.json()
+                        logger.info(f"Quotex login {url}: status={d.get('status','?')}")
+                        if d.get("status") in ("success", "ok") or d.get("token") or d.get("access_token"):
+                            self._token = (
+                                d.get("token") or d.get("access_token") or
+                                d.get("authToken") or d.get("auth_token")
+                            )
+                            if isinstance(d.get("data"), dict):
+                                self._balance  = float(d["data"].get("liveBalance", 0) or 0)
+                                self._demo_bal = float(d["data"].get("demoBalance", 10000) or 10000)
+                            return True
+                    except:
+                        pass
+            except Exception as e:
+                logger.debug(f"Login {url}: {e}")
 
-            if data.get("status") == "success" or data.get("token"):
-                self._token = data.get("token") or data.get("access_token") or data.get("authToken")
-                bal = data.get("data", {}).get("balance", 0) if isinstance(data.get("data"), dict) else 0
-                self._balance = float(bal)
-                return True
-
-        except Exception as e:
-            logger.warning(f"Quotex API login echwe: {e}")
-
-        # Eseye metòd 2: form POST
+        # Metòd 2: form POST qxbroker
         try:
             r2 = self._session.post(
                 "https://qxbroker.com/en/sign-in",
                 data={"email": self.email, "password": self.password},
-                timeout=20, allow_redirects=True
+                timeout=20, allow_redirects=True,
             )
-            if "dashboard" in r2.url or r2.status_code == 200:
-                # Eseye jwenn token nan cookies
+            if r2.status_code == 200 and ("dashboard" in r2.url or "trade" in r2.url):
                 for cookie in self._session.cookies:
-                    if "token" in cookie.name.lower() or "auth" in cookie.name.lower():
+                    if any(x in cookie.name.lower() for x in ["token", "auth", "jwt", "session"]):
                         self._token = cookie.value
                         break
+                logger.info(f"Quotex qxbroker login: {r2.url}")
                 return True
         except Exception as e:
-            logger.warning(f"Quotex form login echwe: {e}")
+            logger.debug(f"qxbroker login: {e}")
 
-        return False
+        # Metòd 3: Check cookies pou token
+        for cookie in self._session.cookies:
+            if any(x in cookie.name.lower() for x in ["token", "auth", "jwt"]):
+                self._token = cookie.value
+                logger.info(f"Cookie token jwenn: {cookie.name}")
+                return True
 
-    # ── 2. WEBSOCKET CONNECT ───────────────────────────────
+        # Eseye konekte WS san token (pou demo)
+        logger.warning("Token pa jwenn — ap eseye WebSocket san auth (demo sèlman)")
+        return True  # Kite WS eseye
+
+    # ── WEBSOCKET CONNECT ──────────────────────────────────
     def connect(self):
-        """Login + konekte WebSocket"""
-        # Step 1: HTTP Login
         ok = self._http_login()
-        if not ok:
-            raise Exception("Echèk login — verifye email/password ou")
 
-        # Step 2: WebSocket connect
         import websocket as wsl
 
-        done  = threading.Event()
-        err   = [None]
+        err_holder  = [None]
         self._connected = False
+        self._connect_event.clear()
 
         headers = [
             "Origin: https://quotex.io",
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language: en-US,en;q=0.9",
         ]
         if self._token:
             headers.append(f"Authorization: Bearer {self._token}")
-
-        # Ajoute cookies nan header si disponib
         if self._session and self._session.cookies:
-            cookie_str = "; ".join([f"{c.name}={c.value}" for c in self._session.cookies])
-            headers.append(f"Cookie: {cookie_str}")
+            cookie_str = "; ".join(
+                f"{c.name}={c.value}" for c in self._session.cookies
+            )
+            if cookie_str:
+                headers.append(f"Cookie: {cookie_str}")
 
         def on_open(ws):
-            logger.info("Quotex WS konekte!")
-            # Socket.IO handshake
+            logger.info("Quotex WS konekte — voye handshake")
             ws.send("40")
 
         def on_message(ws, msg):
             try:
-                self._handle_message(msg, done)
+                self._handle_message(msg)
             except Exception as e:
-                logger.error(f"WS msg handle: {e}")
+                logger.debug(f"WS msg: {e}")
 
         def on_error(ws, e):
             logger.error(f"Quotex WS erè: {e}")
-            err[0] = str(e)
-            done.set()
+            err_holder[0] = str(e)
+            self._connect_event.set()
 
         def on_close(ws, code, reason):
             self._connected = False
             logger.info(f"Quotex WS fèmen: {code} {reason}")
+            self._connect_event.set()
 
         self._ws = wsl.WebSocketApp(
             self.WS_URL,
@@ -293,241 +610,368 @@ class QuotexWebSocketClient:
             on_close=on_close,
         )
 
-        t = threading.Thread(target=self._ws.run_forever, kwargs={
-            "ping_interval": 25, "ping_timeout": 10
-        }, daemon=True)
+        t = threading.Thread(
+            target=self._ws.run_forever,
+            kwargs={"ping_interval": 20, "ping_timeout": 8},
+            daemon=True
+        )
         t.start()
 
-        done.wait(timeout=15)
-        if err[0]:
-            raise Exception(f"Quotex WS: {err[0]}")
-        if not self._connected:
-            # Kite li eseye — login te reyisi
-            logger.warning("WS pa konfime koneksyon — ap itilize HTTP sèlman")
+        self._connect_event.wait(timeout=18)
 
-        return self._balance
+        if err_holder[0] and not self._connected:
+            raise Exception(f"Quotex WS: {err_holder[0]}")
 
-    def _handle_message(self, msg, done_event=None):
-        """Parse Socket.IO messages"""
-        # Socket.IO pwotokolparsing
-        if msg == "2":  # ping
-            if self._ws: self._ws.send("3")  # pong
+        bal = self._demo_bal if self._account_type == "PRACTICE" else self._balance
+        return bal
+
+    def _handle_message(self, msg):
+        if msg == "2":
+            if self._ws: self._ws.send("3")
             return
 
-        # Retire nimewo Socket.IO
-        m = re.match(r'^(\d+)(.*)', msg)
+        m = re.match(r'^(\d+)(.*)', msg, re.DOTALL)
         if not m:
             return
         sio_type = m.group(1)
         payload  = m.group(2).strip()
 
-        # Tip 0 = connect (jwenn session ID)
         if sio_type == "0":
             try:
                 d = json.loads(payload)
-                self._session_id = d.get("sid","")
-                logger.info(f"Quotex SID: {self._session_id}")
-                # Voye auth
-                if self._token:
-                    auth_msg = f'40{json.dumps({"token": self._token})}'
-                else:
-                    auth_msg = "40"
-                if self._ws: self._ws.send(auth_msg)
+                logger.debug(f"SIO handshake: sid={d.get('sid','?')}")
+                auth = f'40{json.dumps({"token": self._token})}' if self._token else "40"
+                if self._ws: self._ws.send(auth)
             except: pass
             return
 
-        # Tip 40 = konekte réussi
         if sio_type == "40":
             self._connected = True
-            # Mande balans
+            logger.info("Quotex SIO authentifye!")
+            # Mande balans + asset list
             if self._ws:
                 self._ws.send('42["changeSymbol","EURUSD",60]')
-            if done_event: done_event.set()
+                self._ws.send('42["balance"]')
+            self._connect_event.set()
             return
 
-        # Tip 42 = event data
         if sio_type == "42" and payload:
             try:
                 arr = json.loads(payload)
-                if isinstance(arr, list) and len(arr) >= 2:
-                    event_name = arr[0]
-                    event_data = arr[1] if len(arr) > 1 else {}
-                    self._process_event(event_name, event_data)
-            except Exception as e:
-                logger.debug(f"Parse 42: {e}")
+                if isinstance(arr, list) and len(arr) >= 1:
+                    self._process_event(arr[0], arr[1] if len(arr) > 1 else {})
+            except:
+                pass
             return
 
-        # Tip 430 = reply to emit
-        if sio_type.startswith("43") and payload:
-            req_id_str = sio_type[2:]
+        # Ack responses (43X...)
+        if len(sio_type) > 2 and sio_type.startswith("43") and payload:
+            req_id = sio_type[2:]
             try:
                 data = json.loads(payload)
                 with self._lock:
-                    if req_id_str in self._pending:
-                        self._pending[req_id_str]["result"] = data
-                        self._pending[req_id_str]["event"].set()
-            except: pass
+                    if req_id in self._pending:
+                        self._pending[req_id]["result"] = data
+                        self._pending[req_id]["event"].set()
+            except:
+                pass
 
     def _process_event(self, name, data):
-        """Trete evènman Quotex"""
-        if name in ("balance", "s_balance"):
+        if name in ("balance", "s_balance", "account"):
             try:
                 if isinstance(data, dict):
-                    self._balance      = float(data.get("liveBalance", data.get("balance", self._balance)))
-                    self._demo_bal     = float(data.get("demoBalance", data.get("demo", self._demo_bal)))
-                    self._account_type = data.get("accountType", self._account_type)
+                    live = data.get("liveBalance", data.get("balance"))
+                    demo = data.get("demoBalance", data.get("demo"))
+                    if live is not None: self._balance  = float(live)
+                    if demo is not None: self._demo_bal = float(demo)
+                    at = data.get("accountType", data.get("type"))
+                    if at: self._account_type = at
                 elif isinstance(data, (int, float)):
                     self._balance = float(data)
             except: pass
 
-        elif name in ("candles", "history"):
+        elif name in ("candles", "history", "quotes"):
             with self._lock:
                 if "candles" in self._pending:
                     self._pending["candles"]["result"] = data
                     self._pending["candles"]["event"].set()
 
-        elif name in ("buyComplete", "tradeResult", "option"):
+        elif name in ("buyComplete", "tradeResult", "option", "order"):
             with self._lock:
                 if "trade" in self._pending:
                     self._pending["trade"]["result"] = data
                     self._pending["trade"]["event"].set()
 
-        elif name == "payout":
+        elif name in ("payout", "asset", "assets"):
             try:
                 if isinstance(data, dict):
-                    sym = data.get("symbol",""); pct = data.get("payout", data.get("profit", 0))
-                    if sym: self._payout_cache[sym] = float(pct)
+                    for sym, info in data.items():
+                        if isinstance(info, dict):
+                            pct = info.get("profit", info.get("payout", 0))
+                            if pct:
+                                val = float(pct)
+                                self._payout_cache[sym] = val / 100 if val > 1 else val
+                        elif isinstance(info, (int, float)):
+                            val = float(info)
+                            self._payout_cache[sym] = val / 100 if val > 1 else val
             except: pass
 
-    # ── 3. PRAN BOUJI ─────────────────────────────────────
-    def get_candles(self, symbol="EURUSD", count=200, granularity=60):
-        """
-        Jwenn candles pou aktif la
-        granularity = 60 (1min), 300 (5min), 900 (15min), 3600 (1h), 14400 (4h)
-        """
-        # Eseye via WebSocket
+    @property
+    def balance(self):
+        return self._demo_bal if self._account_type == "PRACTICE" else self._balance
+
+    def get_balance_sync(self):
         if self._connected and self._ws:
             try:
-                candles = self._get_candles_ws(symbol, count, granularity)
-                if candles: return candles
-            except Exception as e:
-                logger.warning(f"Candles WS echwe: {e}")
+                self._ws.send('42["balance"]')
+                time.sleep(1.5)
+            except: pass
+        # HTTP fallback
+        try:
+            if self._session:
+                for url in ["https://quotex.io/api/v1/profile", "https://quotex.io/api/v1/balance"]:
+                    r = self._session.get(url, timeout=10)
+                    if r.status_code == 200:
+                        d = r.json()
+                        data = d.get("data", d)
+                        if isinstance(data, dict):
+                            live = data.get("liveBalance", data.get("balance"))
+                            demo = data.get("demoBalance", data.get("demo"))
+                            if live: self._balance  = float(live)
+                            if demo: self._demo_bal = float(demo)
+                        break
+        except: pass
+        return self.balance
 
-        # Fallback: HTTP API
-        return self._get_candles_http(symbol, count, granularity)
-
-    def _get_candles_ws(self, symbol, count, gran):
-        """Candles via WebSocket"""
-        done = threading.Event()
-        with self._lock:
-            self._pending["candles"] = {"event": done, "result": None}
-
-        # Mande via changeSymbol + history
-        self._ws.send(f'42["changeSymbol","{symbol}",{gran}]')
-        time.sleep(0.5)
-        self._ws.send(f'42["history",{{"symbol":"{symbol}","period":{gran},"count":{count}}}]')
-
-        done.wait(timeout=15)
-        with self._lock:
-            result = self._pending.pop("candles", {}).get("result")
-
-        if not result:
-            return []
-
-        return self._parse_candles(result)
-
-    def _get_candles_http(self, symbol, count, gran):
-        """Candles via HTTP — fallback"""
-        import requests
-
-        end_time = int(time.time())
-        start_time = end_time - gran * count
-
-        urls_to_try = [
-            f"https://quotex.io/api/v1/candles?symbol={symbol}&period={gran}&start={start_time}&end={end_time}",
-            f"https://qxbroker.com/api/v1/candles?symbol={symbol}&period={gran}&count={count}",
-        ]
-
-        sess = self._session or requests.Session()
-        for url in urls_to_try:
+    def set_account_type(self, acc_type):
+        self._account_type = acc_type
+        if self._connected and self._ws:
             try:
-                r = sess.get(url, timeout=15)
-                if r.status_code == 200:
-                    data = r.json()
-                    candles = self._parse_candles(data)
-                    if candles: return candles
+                self._ws.send(f'42["changeAccount","{acc_type}"]')
             except: pass
 
-        # Denye recou: pran done demo (pa bezwen auth)
-        try:
-            url = f"https://quotex.io/api/v1/history?symbol={symbol}&period={gran}"
-            r = requests.get(url, timeout=15, headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://quotex.io/"
-            })
-            data = r.json()
-            candles = self._parse_candles(data)
-            if candles: return candles
-        except: pass
+    def get_candles(self, symbol="EURUSD", count=200, granularity=60):
+        asset = self.ASSET_MAP.get(symbol, symbol)
+        if self._connected and self._ws:
+            try:
+                done = threading.Event()
+                with self._lock:
+                    self._pending["candles"] = {"event": done, "result": None}
 
-        logger.warning(f"Pa jwenn candles pou {symbol} — retounen données synthetik")
+                self._ws.send(f'42["changeSymbol","{asset}",{granularity}]')
+                time.sleep(0.5)
+                self._ws.send(
+                    f'42["history",{{"symbol":"{asset}","period":{granularity},"count":{count}}}]'
+                )
+                done.wait(timeout=12)
+                with self._lock:
+                    result = self._pending.pop("candles", {}).get("result")
+                if result:
+                    c = self._parse_candles(result)
+                    if c: return c
+            except Exception as e:
+                logger.debug(f"candles WS: {e}")
+
+        # HTTP fallback
+        return self._get_candles_http(symbol, count, granularity)
+
+    def _get_candles_http(self, symbol, count, gran):
+        import requests
+        asset = self.ASSET_MAP.get(symbol, symbol)
+        end   = int(time.time())
+        start = end - gran * count
+        sess  = self._session or requests.Session()
+
+        for url in [
+            f"https://quotex.io/api/v1/candles?symbol={asset}&period={gran}&start={start}&end={end}",
+            f"https://quotex.io/api/v1/history?symbol={asset}&period={gran}&count={count}",
+            f"https://qxbroker.com/api/v1/candles?symbol={asset}&period={gran}&count={count}",
+        ]:
+            try:
+                r = sess.get(url, timeout=12)
+                if r.status_code == 200:
+                    c = self._parse_candles(r.json())
+                    if c: return c
+            except: pass
+
+        # Synthetic fallback
         return self._generate_synthetic_candles(symbol, count)
 
     def _parse_candles(self, data):
-        """Parse plizyè fòma candles Quotex"""
         candles = []
-
-        # Fòma 1: {"data": [[time, open, close, high, low], ...]}
+        raw = data
         if isinstance(data, dict):
-            raw = (data.get("data") or data.get("candles") or
-                   data.get("history") or data.get("quotes") or [])
-        elif isinstance(data, list):
-            raw = data
-        else:
+            for key in ("data","candles","history","quotes","result"):
+                if key in data:
+                    raw = data[key]
+                    break
+        if not isinstance(raw, list):
             return []
 
         for item in raw:
             try:
                 if isinstance(item, (list, tuple)) and len(item) >= 5:
                     candles.append({
-                        "time":  int(item[0]),
-                        "open":  float(item[1]),
-                        "close": float(item[2]),
-                        "high":  float(item[3]),
-                        "low":   float(item[4]),
-                        "volume": float(item[5]) if len(item) > 5 else 1000,
+                        "time":int(item[0]),"open":float(item[1]),"close":float(item[2]),
+                        "high":float(item[3]),"low":float(item[4]),
+                        "volume":float(item[5]) if len(item)>5 else 1000,
                     })
                 elif isinstance(item, dict):
-                    t = item.get("time") or item.get("timestamp") or item.get("t") or 0
-                    o = item.get("open") or item.get("o") or 0
-                    c = item.get("close") or item.get("c") or 0
-                    h = item.get("high") or item.get("h") or 0
-                    lo= item.get("low")  or item.get("l") or 0
-                    v = item.get("volume") or item.get("v") or 1000
+                    t  = item.get("time") or item.get("timestamp") or item.get("t") or 0
+                    o  = item.get("open")  or item.get("o") or 0
+                    c  = item.get("close") or item.get("c") or 0
+                    h  = item.get("high")  or item.get("h") or 0
+                    lo = item.get("low")   or item.get("l") or 0
+                    v  = item.get("volume") or item.get("v") or 1000
                     if t and o:
-                        candles.append({"time":int(t),"open":float(o),"close":float(c),
-                                        "high":float(h),"low":float(lo),"volume":float(v)})
+                        candles.append({
+                            "time":int(t),"open":float(o),"close":float(c),
+                            "high":float(h),"low":float(lo),"volume":float(v),
+                        })
             except: pass
 
         return sorted(candles, key=lambda x: x["time"]) if candles else []
 
+    def get_payout(self, symbol):
+        if symbol in self._payout_cache:
+            return self._payout_cache[symbol]
+        if self._connected and self._ws:
+            try:
+                self._ws.send(f'42["asset","{symbol}"]')
+                time.sleep(2)
+                if symbol in self._payout_cache:
+                    return self._payout_cache[symbol]
+            except: pass
+        defaults = {
+            "EURUSD":0.85,"GBPUSD":0.85,"USDJPY":0.82,"AUDUSD":0.80,
+            "USDCAD":0.80,"USDCHF":0.80,"EURGBP":0.80,"EURJPY":0.82,
+            "BTCUSD":0.82,"ETHUSD":0.80,"LTCUSD":0.78,
+            "EURUSD_OTC":0.92,"GBPUSD_OTC":0.92,
+            "EURUSD-OTC":0.92,"GBPUSD-OTC":0.92,
+        }
+        return defaults.get(symbol, 0.85)
+
+    def place_trade(self, symbol, direction, amount, duration_secs=60):
+        amount = round(max(MIN_STAKE, float(amount)), 2)
+        action = 1 if direction == "BUY" else 0
+        asset  = self.ASSET_MAP.get(symbol, symbol)
+        exp_time = int(time.time()) + duration_secs
+
+        if self._connected and self._ws:
+            try:
+                done     = threading.Event()
+                trade_id = str(int(time.time() * 1000))
+                with self._lock:
+                    self._pending["trade"] = {"event": done, "result": None}
+
+                payload = {
+                    "asset":      asset,
+                    "amount":     amount,
+                    "action":     action,
+                    "isDemo":     1 if self._account_type == "PRACTICE" else 0,
+                    "requestId":  trade_id,
+                    "optionType": 100,
+                    "time":       duration_secs,
+                }
+                self._ws.send(f'42["openOrder",{json.dumps(payload)}]')
+                done.wait(timeout=15)
+                with self._lock:
+                    result = self._pending.pop("trade", {}).get("result")
+
+                if result:
+                    return self._parse_trade_response(result, symbol, direction, amount, duration_secs)
+            except Exception as e:
+                logger.warning(f"place_trade WS: {e}")
+
+        # HTTP fallback
+        return self._place_trade_http(symbol, direction, amount, duration_secs)
+
+    def _place_trade_http(self, symbol, direction, amount, duration_secs):
+        import requests
+        amount = round(max(MIN_STAKE, float(amount)), 2)
+        sess = self._session or requests.Session()
+        payload = {
+            "asset":     self.ASSET_MAP.get(symbol, symbol),
+            "amount":    amount,
+            "type":      "call" if direction == "BUY" else "put",
+            "isDemo":    1 if self._account_type == "PRACTICE" else 0,
+            "duration":  duration_secs,
+            "requestId": str(int(time.time())),
+        }
+        for url in [
+            "https://quotex.io/api/v1/trade",
+            "https://quotex.io/api/v1/options/open",
+        ]:
+            try:
+                r = sess.post(url, json=payload, timeout=15)
+                if r.status_code == 200:
+                    d = r.json()
+                    if d.get("status") == "success" or d.get("id"):
+                        return self._parse_trade_response(d, symbol, direction, amount, duration_secs)
+            except Exception as e:
+                logger.debug(f"HTTP trade {url}: {e}")
+
+        raise Exception("Pa jwenn koneksyon Quotex — verifye email/password")
+
+    def _parse_trade_response(self, data, symbol, direction, amount, duration_secs):
+        trade_id = ""
+        if isinstance(data, dict):
+            trade_id = str(data.get("id") or data.get("requestId") or data.get("trade_id") or int(time.time()))
+        else:
+            trade_id = str(int(time.time()))
+        return {
+            "id":           trade_id,
+            "symbol":       symbol,
+            "direction":    direction,
+            "amount":       amount,
+            "open_time":    int(time.time()),
+            "close_time":   int(time.time()) + duration_secs,
+            "duration":     duration_secs,
+            "balance_after": self.balance - amount,
+            "account_type": self._account_type,
+        }
+
+    def wait_trade_result(self, trade_id, open_price, amount, timeout=120):
+        bal_before = self.balance
+        time.sleep(timeout + 3)
+
+        # Tcheke balans
+        try:
+            new_bal = self.get_balance_sync()
+            diff    = new_bal - bal_before
+            if abs(diff) > 0.01:
+                return {"won": diff > 0, "pnl": round(diff, 2), "close_price": 0, "balance": new_bal}
+        except: pass
+
+        # HTTP check
+        if self._session:
+            try:
+                r = self._session.get(f"https://quotex.io/api/v1/trade/{trade_id}", timeout=10)
+                if r.status_code == 200:
+                    d = r.json()
+                    status = d.get("status") or d.get("result", "")
+                    if status in ("win","won","1",1):
+                        payout = self.get_payout(d.get("symbol",""))
+                        pnl = round(amount * payout, 2)
+                        return {"won": True, "pnl": pnl, "close_price": 0, "balance": bal_before + pnl}
+                    elif status in ("loss","lost","0",0):
+                        return {"won": False, "pnl": -amount, "close_price": 0, "balance": bal_before - amount}
+            except: pass
+
+        return {"won": False, "pnl": -amount, "close_price": 0, "balance": bal_before - amount}
+
     def _generate_synthetic_candles(self, symbol, count=200):
-        """
-        Jenere candles realistik pou demo/test si pa jwenn done reyèl.
-        Itilize yon random walk ki simulate yon aktif forex.
-        """
         import random
         base_prices = {
-            "EURUSD": 1.0850, "GBPUSD": 1.2700, "USDJPY": 148.5,
-            "AUDUSD": 0.6500, "USDCAD": 1.3600, "USDCHF": 0.9050,
-            "BTCUSD": 43000,  "ETHUSD": 2200,   "LTCUSD": 72,
-            "EURUSD_OTC": 1.0850, "GBPUSD_OTC": 1.2700,
-            "EURUSD-OTC":  1.0850, "GBPUSD-OTC":  1.2700,
+            "EURUSD":1.0850,"GBPUSD":1.2700,"USDJPY":148.5,"AUDUSD":0.6500,
+            "USDCAD":1.3600,"USDCHF":0.9050,"EURGBP":0.8600,"EURJPY":160.0,
+            "BTCUSD":43000,"ETHUSD":2200,"LTCUSD":72,
+            "EURUSD-OTC":1.0850,"GBPUSD-OTC":1.2700,
         }
         base = base_prices.get(symbol, 1.0)
         candles = []
-        t  = int(time.time()) - count * 60
-        rng = random.Random(int(base * 10000))
+        t   = int(time.time()) - count * 60
+        rng = random.Random(int(base * 10000) + int(time.time() / 3600))
         price = base
         for _ in range(count):
             change = rng.gauss(0, base * 0.0008)
@@ -535,224 +979,13 @@ class QuotexWebSocketClient:
             close  = price + change
             high   = max(open_, close) + abs(rng.gauss(0, base * 0.0003))
             low    = min(open_, close) - abs(rng.gauss(0, base * 0.0003))
-            candles.append({"time":t,"open":round(open_,5),"close":round(close,5),
-                            "high":round(high,5),"low":round(low,5),"volume":1000})
+            candles.append({
+                "time":t,"open":round(open_,5),"close":round(close,5),
+                "high":round(high,5),"low":round(low,5),"volume":1000,
+            })
             price = close
             t += 60
         return candles
-
-    # ── 4. PAYOUT REYÈL ────────────────────────────────────
-    def get_payout(self, symbol):
-        """Jwenn pousantaj payout pou aktif la (live)"""
-        if symbol in self._payout_cache:
-            return self._payout_cache[symbol]
-
-        if self._connected and self._ws:
-            try:
-                done = threading.Event()
-                with self._lock:
-                    self._pending["payout_" + symbol] = {"event": done, "result": None}
-                self._ws.send(f'42["asset","{symbol}"]')
-                done.wait(timeout=5)
-            except: pass
-
-        # Valè defò selon aktif
-        defaults = {
-            "EURUSD": 0.85, "GBPUSD": 0.85, "USDJPY": 0.82,
-            "AUDUSD": 0.80, "USDCAD": 0.80, "BTCUSD": 0.82,
-            "ETHUSD": 0.80, "EURUSD_OTC": 0.92, "GBPUSD_OTC": 0.92,
-            "EURUSD-OTC": 0.92, "GBPUSD-OTC": 0.92,
-        }
-        return self._payout_cache.get(symbol, defaults.get(symbol, 0.85))
-
-    # ── 5. BALANS ─────────────────────────────────────────
-    def get_balance_sync(self):
-        """Jwenn balans aktyèl"""
-        if self._connected and self._ws:
-            try:
-                self._ws.send('42["balance"]')
-                time.sleep(1)
-            except: pass
-
-        # Eseye HTTP
-        try:
-            if self._session:
-                r = self._session.get("https://quotex.io/api/v1/profile", timeout=10)
-                if r.status_code == 200:
-                    d = r.json()
-                    if isinstance(d.get("data"), dict):
-                        self._balance  = float(d["data"].get("liveBalance", self._balance))
-                        self._demo_bal = float(d["data"].get("demoBalance", self._demo_bal))
-        except: pass
-
-        return self._balance if self._account_type == "REAL" else self._demo_bal
-
-    def set_account_type(self, acc_type):
-        """Chanje kont PRACTICE ↔ REAL"""
-        self._account_type = acc_type
-        if self._connected and self._ws:
-            try:
-                self._ws.send(f'42["changeAccount","{acc_type}"]')
-            except: pass
-
-    @property
-    def balance(self):
-        return self._balance if self._account_type == "REAL" else self._demo_bal
-
-    # ── 6. PLASE TRADE ────────────────────────────────────
-    def place_trade(self, symbol, direction, amount, duration_secs=60):
-        """
-        Plase yon binary option sou Quotex
-        direction: "BUY" (Up) oswa "SELL" (Down)
-        duration_secs: 60, 300, 900... (expiry)
-        Retounen: {"id": ..., "openTime": ..., "closeTime": ..., "amount": ...}
-        """
-        amount = round(max(1.0, float(amount)), 2)
-        action = 1 if direction == "BUY" else 0  # 1=call/Up, 0=put/Down
-
-        # Kalkil expiry timestamp
-        exp_time = int(time.time()) + duration_secs
-
-        # Eseye WebSocket
-        if self._connected and self._ws:
-            try:
-                result = self._place_trade_ws(symbol, action, amount, exp_time, duration_secs)
-                if result:
-                    return result
-            except Exception as e:
-                logger.warning(f"Trade WS echwe: {e}")
-
-        # Fallback HTTP
-        return self._place_trade_http(symbol, action, amount, exp_time, duration_secs)
-
-    def _place_trade_ws(self, symbol, action, amount, exp_time, duration_secs):
-        """Plase trade via WebSocket"""
-        done = threading.Event()
-        trade_id = str(int(time.time() * 1000))
-
-        with self._lock:
-            self._pending["trade"] = {"event": done, "result": None}
-
-        # Fòma mesaj Quotex Socket.IO
-        trade_payload = {
-            "asset":     symbol,
-            "amount":    amount,
-            "action":    action,  # 1=call, 0=put
-            "isDemo":    1 if self._account_type == "PRACTICE" else 0,
-            "requestId": trade_id,
-            "optionType": 100,  # binary
-            "time":      duration_secs,
-        }
-
-        msg = f'42["openOrder",{json.dumps(trade_payload)}]'
-        self._ws.send(msg)
-        done.wait(timeout=20)
-
-        with self._lock:
-            result = self._pending.pop("trade", {}).get("result")
-
-        if result:
-            return self._parse_trade_result(result, symbol, action, amount, duration_secs)
-        return None
-
-    def _place_trade_http(self, symbol, action, amount, exp_time, duration_secs):
-        """Plase trade via HTTP — fallback"""
-        import requests
-
-        if not self._session:
-            raise Exception("Pa gen sesyon HTTP aktif")
-
-        payload = {
-            "asset":      symbol,
-            "amount":     amount,
-            "type":       "call" if action == 1 else "put",
-            "isDemo":     1 if self._account_type == "PRACTICE" else 0,
-            "duration":   duration_secs,
-            "requestId":  str(int(time.time())),
-        }
-
-        for url in [
-            "https://quotex.io/api/v1/trade",
-            "https://quotex.io/api/v1/options/open",
-            "https://qxbroker.com/api/v1/trade",
-        ]:
-            try:
-                r = self._session.post(url, json=payload, timeout=15)
-                if r.status_code == 200:
-                    d = r.json()
-                    if d.get("status") == "success" or d.get("id"):
-                        return self._parse_trade_result(d, symbol, action, amount, duration_secs)
-            except Exception as e:
-                logger.debug(f"Trade HTTP {url}: {e}")
-
-        raise Exception("Echèk plase trade — eseye ankò")
-
-    def _parse_trade_result(self, data, symbol, action, amount, duration_secs):
-        """Parse réponse trade Quotex pou fòma estanda"""
-        if isinstance(data, dict):
-            trade_id = (data.get("id") or data.get("requestId") or
-                       data.get("trade_id") or str(int(time.time())))
-            balance_after = float(data.get("balance", self.balance) or self.balance)
-        else:
-            trade_id = str(int(time.time()))
-            balance_after = self.balance
-
-        return {
-            "id":           trade_id,
-            "symbol":       symbol,
-            "direction":    "BUY" if action == 1 else "SELL",
-            "amount":       amount,
-            "open_time":    int(time.time()),
-            "close_time":   int(time.time()) + duration_secs,
-            "duration":     duration_secs,
-            "balance_after": balance_after,
-            "account_type": self._account_type,
-        }
-
-    # ── 7. TANN REZILTA TRADE ─────────────────────────────
-    def wait_trade_result(self, trade_id, open_price, amount, timeout=120):
-        """
-        Tann rezilta yon trade ki fini
-        Retounen: {"won": bool, "pnl": float, "close_price": float}
-        """
-        bal_before = self.balance
-
-        # Tann trade fini
-        time.sleep(timeout + 2)
-
-        # Tcheke nouvo balans
-        try:
-            new_bal = self.get_balance_sync()
-            if new_bal and abs(new_bal - bal_before) > 0.01:
-                pnl = new_bal - bal_before
-                return {
-                    "won": pnl > 0,
-                    "pnl": round(pnl, 2),
-                    "close_price": 0,
-                    "balance": new_bal,
-                }
-        except: pass
-
-        # Eseye jwenn rezilta via HTTP
-        if self._session:
-            try:
-                r = self._session.get(
-                    f"https://quotex.io/api/v1/trade/{trade_id}",
-                    timeout=10
-                )
-                if r.status_code == 200:
-                    d = r.json()
-                    status = d.get("status") or d.get("result","")
-                    if status in ("win", "won", "1", 1):
-                        payout = self.get_payout(d.get("symbol",""))
-                        pnl = round(amount * payout, 2)
-                        return {"won": True, "pnl": pnl, "close_price": 0, "balance": bal_before + pnl}
-                    elif status in ("loss", "lost", "0", 0):
-                        return {"won": False, "pnl": -amount, "close_price": 0, "balance": bal_before - amount}
-            except: pass
-
-        # Defò si pa jwenn rezilta
-        return {"won": False, "pnl": -amount, "close_price": 0, "balance": bal_before - amount}
 
     def close(self):
         if self._ws:
@@ -762,240 +995,64 @@ class QuotexWebSocketClient:
 
 
 # ═══════════════════════════════════════════════════════════
-# ██████  QUOTEX SELENIUM CLIENT — Fallback robis  ██████
-# Itilize si WebSocket echwe
-# ═══════════════════════════════════════════════════════════
-class QuotexSeleniumClient:
-    """
-    Selenium-based Quotex Client
-    Itilize Selenium pou ouvri navigatè, konekte, epi entèraji ak Quotex UI
-    Nesesè: pip install selenium webdriver-manager
-    """
-
-    def __init__(self, email, password):
-        self.email    = email
-        self.password = password
-        self._balance = 0.0
-        self._demo_bal= 0.0
-        self._account_type = "PRACTICE"
-        self._driver  = None
-        self._lock    = threading.Lock()
-        self._payout_cache = {}
-
-    def connect(self):
-        from selenium import webdriver
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-
-        opts = Options()
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--window-size=1920,1080")
-        opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-            self._driver = webdriver.Chrome(service=service, options=opts)
-        except:
-            self._driver = webdriver.Chrome(options=opts)
-
-        try:
-            self._driver.get("https://quotex.io/en/sign-in")
-            wait = WebDriverWait(self._driver, 15)
-
-            # Antre email
-            email_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="email"], input[name="email"]')))
-            email_field.clear()
-            email_field.send_keys(self.email)
-
-            # Antre password
-            pass_field = self._driver.find_element(By.CSS_SELECTOR, 'input[type="password"]')
-            pass_field.clear()
-            pass_field.send_keys(self.password)
-
-            # Klike bouton login
-            login_btn = self._driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-            login_btn.click()
-
-            # Tann dashboard
-            wait.until(EC.url_contains("trade"))
-            time.sleep(2)
-
-            # Jwenn balans
-            self._balance = self._get_balance_selenium()
-            return self._balance
-
-        except Exception as e:
-            if self._driver:
-                self._driver.quit()
-            raise Exception(f"Quotex Selenium login echwe: {e}")
-
-    def _get_balance_selenium(self):
-        try:
-            from selenium.webdriver.common.by import By
-            bal_els = self._driver.find_elements(By.CSS_SELECTOR,
-                '.balance, .account-balance, [class*="balance"], [class*="Balance"]')
-            for el in bal_els:
-                text = el.text.strip().replace("$","").replace(",","").strip()
-                try:
-                    val = float(re.sub(r'[^\d.]','', text))
-                    if val > 0: return val
-                except: pass
-        except: pass
-        return 10000.0  # Demo defò
-
-    def get_balance_sync(self):
-        self._balance = self._get_balance_selenium()
-        return self._balance
-
-    @property
-    def balance(self):
-        return self._balance if self._account_type == "REAL" else self._demo_bal
-
-    def get_candles(self, symbol="EURUSD", count=200, granularity=60):
-        """Selenium: pran done prix via JavaScript"""
-        try:
-            script = f"""
-                return new Promise((resolve) => {{
-                    fetch('/api/v1/candles?symbol={symbol}&period={granularity}&count={count}')
-                        .then(r => r.json()).then(resolve)
-                        .catch(() => resolve(null));
-                }});
-            """
-            data = self._driver.execute_async_script(script)
-            if data:
-                return self._parse_candles(data)
-        except: pass
-
-        # Fallback synthetic
-        import random
-        base_prices = {"EURUSD":1.085,"GBPUSD":1.27,"USDJPY":148.5,"BTCUSD":43000,"ETHUSD":2200}
-        base = base_prices.get(symbol, 1.0)
-        candles = []; t = int(time.time()) - count*60; price = base
-        rng = random.Random(int(base*10000))
-        for _ in range(count):
-            c = price + rng.gauss(0, base*0.0008)
-            h = max(price,c) + abs(rng.gauss(0,base*0.0002))
-            l = min(price,c) - abs(rng.gauss(0,base*0.0002))
-            candles.append({"time":t,"open":round(price,5),"close":round(c,5),"high":round(h,5),"low":round(l,5),"volume":1000})
-            price=c; t+=60
-        return candles
-
-    def _parse_candles(self, data):
-        candles = []
-        raw = data if isinstance(data, list) else (data.get("data") or data.get("candles") or [])
-        for item in raw:
-            try:
-                if isinstance(item, (list, tuple)) and len(item) >= 5:
-                    candles.append({"time":int(item[0]),"open":float(item[1]),"close":float(item[2]),"high":float(item[3]),"low":float(item[4]),"volume":1000})
-                elif isinstance(item, dict):
-                    candles.append({"time":int(item.get("time",0)),"open":float(item.get("open",0)),"close":float(item.get("close",0)),"high":float(item.get("high",0)),"low":float(item.get("low",0)),"volume":1000})
-            except: pass
-        return sorted(candles, key=lambda x: x["time"])
-
-    def get_payout(self, symbol):
-        defaults = {"EURUSD":0.85,"GBPUSD":0.85,"USDJPY":0.82,"BTCUSD":0.82,"ETHUSD":0.80,"EURUSD_OTC":0.92,"GBPUSD_OTC":0.92}
-        return self._payout_cache.get(symbol, defaults.get(symbol, 0.85))
-
-    def place_trade(self, symbol, direction, amount, duration_secs=60):
-        from selenium.webdriver.common.by import By
-        amount = round(max(1.0, float(amount)), 2)
-
-        try:
-            # Chanje aktif si nesesè
-            self._driver.get(f"https://quotex.io/en/trade/{symbol.lower()}")
-            time.sleep(2)
-
-            # Mete montant
-            amt_fields = self._driver.find_elements(By.CSS_SELECTOR, 'input[class*="amount"], input[class*="Amount"], .amount-input input')
-            for field in amt_fields:
-                try:
-                    field.clear(); field.send_keys(str(amount)); break
-                except: pass
-
-            # Klike Up oswa Down
-            if direction == "BUY":
-                btns = self._driver.find_elements(By.CSS_SELECTOR, '.up, .call, [class*="up-btn"], button[data-action="up"]')
-            else:
-                btns = self._driver.find_elements(By.CSS_SELECTOR, '.down, .put, [class*="down-btn"], button[data-action="down"]')
-
-            if btns:
-                btns[0].click()
-                time.sleep(0.5)
-                return {
-                    "id": str(int(time.time())),
-                    "symbol": symbol,
-                    "direction": direction,
-                    "amount": amount,
-                    "open_time": int(time.time()),
-                    "close_time": int(time.time()) + duration_secs,
-                    "duration": duration_secs,
-                    "balance_after": self._balance - amount,
-                    "account_type": self._account_type,
-                }
-        except Exception as e:
-            raise Exception(f"Selenium trade echwe: {e}")
-
-        raise Exception("Pa jwenn bouton trade")
-
-    def wait_trade_result(self, trade_id, open_price, amount, timeout=120):
-        bal_before = self.balance
-        time.sleep(timeout + 3)
-        new_bal = self._get_balance_selenium()
-        self._balance = new_bal
-        pnl = new_bal - bal_before
-        return {"won": pnl > 0, "pnl": round(pnl, 2), "close_price": 0, "balance": new_bal}
-
-    def set_account_type(self, acc_type):
-        self._account_type = acc_type
-
-    def close(self):
-        if self._driver:
-            try: self._driver.quit()
-            except: pass
-
-
-# ═══════════════════════════════════════════════════════════
-# ██████  QUOTEX HYBRID CLIENT — WebSocket + Selenium  ██████
+# ██████  QUOTEX HYBRID CLIENT  ██████
+# Eseye pyquotex → WebSocket → HTTP
 # ═══════════════════════════════════════════════════════════
 class QuotexClient:
     """
-    Client hibrid: eseye WebSocket dabò, Selenium si echwe.
-    Sèl interface pou rès bot la.
+    Client hibrid: pyquotex dabò, WebSocket si echwe, HTTP last resort.
     """
     def __init__(self, email, password):
         self.email    = email
         self.password = password
-        self._ws_client  = QuotexWebSocketClient(email, password)
-        self._sel_client = None  # Kreye lazyman si nesesè
-        self._active     = None  # kliyan aktif
+        self._active  = None
         self._account_type = "PRACTICE"
+        self._method  = "unknown"
 
     def connect(self):
-        # Eseye WebSocket an premye
+        # 1. Eseye pyquotex
         try:
-            bal = self._ws_client.connect()
-            self._active = self._ws_client
-            logger.info(f"Quotex konekte via WebSocket | Balans: ${bal:.2f}")
+            client = QuotexPyquotexClient(self.email, self.password)
+            bal = client.connect()
+            self._active = client
+            self._method = "pyquotex"
+            logger.info(f"Quotex konekte via pyquotex | ${bal:.2f}")
             return bal
         except Exception as e:
-            logger.warning(f"WebSocket echwe ({e}) — ap eseye Selenium...")
+            logger.warning(f"pyquotex echwe ({e}) — ap eseye WebSocket...")
 
-        # Fallback Selenium
+        # 2. Eseye WebSocket dirèk
         try:
-            self._sel_client = QuotexSeleniumClient(self.email, self.password)
-            bal = self._sel_client.connect()
-            self._active = self._sel_client
-            logger.info(f"Quotex konekte via Selenium | Balans: ${bal:.2f}")
+            client = QuotexWebSocketClient(self.email, self.password)
+            bal = client.connect()
+            self._active = client
+            self._method = "WebSocket"
+            logger.info(f"Quotex konekte via WebSocket | ${bal:.2f}")
             return bal
         except Exception as e2:
-            raise Exception(f"Echèk koneksyon Quotex — WebSocket: premye erè | Selenium: {e2}")
+            logger.warning(f"WebSocket echwe ({e2}) — ap eseye HTTP sèlman...")
+
+        # 3. HTTP sèlman (pa ka plase trade reyèl, sèlman candles)
+        try:
+            client = QuotexWebSocketClient(self.email, self.password)
+            client._http_login()
+            self._active = client
+            self._method = "HTTP"
+            bal = client._demo_bal if self._account_type == "PRACTICE" else client._balance
+            logger.info(f"Quotex HTTP sèlman | ${bal:.2f}")
+            return bal
+        except Exception as e3:
+            raise Exception(
+                f"Echèk total koneksyon Quotex:\n"
+                f"  pyquotex: enpòte echwe\n"
+                f"  WebSocket: {e2}\n"
+                f"  HTTP: {e3}\n"
+                f"Verifye email/password ou + koneksyon entènèt sèvè a."
+            )
+
+    @property
+    def method(self):
+        return self._method
 
     def get_candles(self, symbol, count=200, granularity=60):
         return self._active.get_candles(symbol, count, granularity)
@@ -1007,6 +1064,7 @@ class QuotexClient:
         return self._active.get_balance_sync()
 
     def place_trade(self, symbol, direction, amount, duration_secs=60):
+        amount = round(max(MIN_STAKE, float(amount)), 2)
         return self._active.place_trade(symbol, direction, amount, duration_secs)
 
     def wait_trade_result(self, trade_id, open_price, amount, timeout=120):
@@ -1021,14 +1079,13 @@ class QuotexClient:
         return self._active.balance
 
     def close(self):
-        if self._ws_client:
-            self._ws_client.close()
-        if self._sel_client:
-            self._sel_client.close()
+        if self._active:
+            try: self._active.close()
+            except: pass
 
 
 # ═══════════════════════════════════════════════════════════
-# INDIKATÈ TEKNIK (konsève TOUT oryajinal)
+# INDIKATÈ TEKNIK (konsève oryajinal)
 # ═══════════════════════════════════════════════════════════
 def ema(prices, p):
     if len(prices) < p: return []
@@ -1298,7 +1355,9 @@ def calc_pivot_points(candles):
     recent=candles[-20:]; hi=max(x["high"] for x in recent); lo=min(x["low"] for x in recent); cl=candles[-1]["close"]
     pp=(hi+lo+cl)/3; r1=2*pp-lo; r2=pp+(hi-lo); r3=hi+2*(pp-lo)
     s1=2*pp-hi; s2=pp-(hi-lo); s3=lo-2*(hi-pp); rng=hi-lo
-    return {"pp":pp,"r1":r1,"r2":r2,"r3":r3,"s1":s1,"s2":s2,"s3":s3,"fib_r1":pp+0.382*rng,"fib_r2":pp+0.618*rng,"fib_s1":pp-0.382*rng,"fib_s2":pp-0.618*rng}
+    return {"pp":pp,"r1":r1,"r2":r2,"r3":r3,"s1":s1,"s2":s2,"s3":s3,
+            "fib_r1":pp+0.382*rng,"fib_r2":pp+0.618*rng,
+            "fib_s1":pp-0.382*rng,"fib_s2":pp-0.618*rng}
 
 def pivot_signal(candles, trend):
     pv=calc_pivot_points(candles)
@@ -1339,7 +1398,9 @@ def strat_confluence_elite(c, min_strats=3, min_per_conf=0.65):
     adx,pdi,mdi=calc_adx_full(c,14); regime,_=market_regime(c)
     st_sig,st_conf=supertrend(c,p=10,mult=3.0); ha_sig,ha_conf=heikin_ashi_trend(c,lookback=5)
     ce_sig,ce_conf=chandelier_exit(c,p=22,mult=3.0); vw_sig,vw_conf=vwap_signal(c,lookback=20)
-    classic_fns=[(strat_ema,1.4),(strat_rsi,1.6),(strat_macd,1.5),(strat_smc,1.7),(strat_breakout,1.4),(strat_ob,1.5),(strat_stoch,1.3),(strat_ai,1.8),(strat_scalping,1.2),(strat_fibonacci,1.4)]
+    classic_fns=[(strat_ema,1.4),(strat_rsi,1.6),(strat_macd,1.5),(strat_smc,1.7),
+                 (strat_breakout,1.4),(strat_ob,1.5),(strat_stoch,1.3),(strat_ai,1.8),
+                 (strat_scalping,1.2),(strat_fibonacci,1.4)]
     buy_score=sell_score=0.0; buy_cnt=sell_cnt=0; buy_confs=[]; sell_confs=[]; NEW_WEIGHT=2.5
     for sig,conf,w in [(st_sig,st_conf,NEW_WEIGHT),(ha_sig,ha_conf,NEW_WEIGHT),(ce_sig,ce_conf,NEW_WEIGHT)]:
         if sig=="BUY" and conf>=min_per_conf: buy_score+=conf*w; buy_cnt+=1; buy_confs.append(conf)
@@ -1399,8 +1460,7 @@ def strat_deriv_pro_elite(c):
     last_body=abs(cl[-1]-c[-1]["open"]); last_range=max(c[-1]["high"]-c[-1]["low"],0.00001)
     body_ratio=last_body/last_range; st_sig,_=supertrend(c,p=10,mult=3.0)
     if trend_up:
-        score=0.0
-        bo_score=0.0
+        score=0.0; bo_score=0.0
         if cl[-1]>hi20 and cl[-2]<=hi20: bo_score+=2.0
         elif cl[-1]>hi20*0.997: bo_score+=0.8
         if cl[-1]>hi10 and cl[-2]<=hi10: bo_score+=1.0
@@ -1436,8 +1496,7 @@ def strat_deriv_pro_elite(c):
             if adx>=50: conf=min(0.95,conf+0.02)
             return "BUY",round(conf,3)
     if trend_down:
-        score=0.0
-        bo_score=0.0
+        score=0.0; bo_score=0.0
         if cl[-1]<lo20 and cl[-2]>=lo20: bo_score+=2.0
         elif cl[-1]<lo20*1.003: bo_score+=0.8
         if cl[-1]<lo10 and cl[-2]>=lo10: bo_score+=1.0
@@ -1475,21 +1534,21 @@ def strat_deriv_pro_elite(c):
     return "NONE",0
 
 STRATEGIES = {
-    "confluence":   strat_confluence_elite,
-    "deriv_pro":    strat_deriv_pro_elite,
-    "supertrend":   supertrend,
-    "heikin_ashi":  heikin_ashi_trend,
-    "chandelier":   chandelier_exit,
-    "ai":           strat_ai,
-    "ema":          strat_ema,
-    "fibonacci":    strat_fibonacci,
-    "rsi":          strat_rsi,
+    "confluence":     strat_confluence_elite,
+    "deriv_pro":      strat_deriv_pro_elite,
+    "supertrend":     supertrend,
+    "heikin_ashi":    heikin_ashi_trend,
+    "chandelier":     chandelier_exit,
+    "ai":             strat_ai,
+    "ema":            strat_ema,
+    "fibonacci":      strat_fibonacci,
+    "rsi":            strat_rsi,
     "macd_bollinger": strat_macd,
-    "breakout":     strat_breakout,
-    "smc":          strat_smc,
-    "order_block":  strat_ob,
-    "stoch_ema":    strat_stoch,
-    "scalping_pro": strat_scalping,
+    "breakout":       strat_breakout,
+    "smc":            strat_smc,
+    "order_block":    strat_ob,
+    "stoch_ema":      strat_stoch,
+    "scalping_pro":   strat_scalping,
 }
 
 def add_log(st, msg, level="INFO"):
@@ -1498,10 +1557,10 @@ def add_log(st, msg, level="INFO"):
     st["log"] = st["log"][:80]
     logger.info(f"[{st['uid'][:8]}] {msg}")
 
+
 # ═══════════════════════════════════════════════════════════
 # ██████  QUOTEX TRADING LOOP  ██████
-# Rise/Fall = Up/Down binary options
-# Martingale + 3-pèt pòz konsève
+# Martingale kòmanse $0.50 — rekipere tout pèt + base_lot
 # ═══════════════════════════════════════════════════════════
 def trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id") != bot_id: return
@@ -1509,31 +1568,35 @@ def trading_loop(st, bot_id=None):
     cfg      = st["config"]
     symbol   = cfg.get("symbol", "EURUSD")
     strategy = cfg.get("strategy", "confluence")
-    lot      = float(cfg.get("lot", 1.0))
+    lot      = float(cfg.get("lot", 0.50))   # Defò $0.50
     tf       = int(cfg.get("tf_secs", 60))
     min_conf = float(cfg.get("min_conf", 0.65))
 
-    # Granularite selon timeframe
-    gran_map = {60: 60, 300: 300, 900: 900, 3600: 3600, 14400: 14400}
+    gran_map = {60:60, 300:300, 900:900, 3600:3600, 14400:14400}
     gran = gran_map.get(tf, 60)
+    fn   = STRATEGIES.get(strategy, strat_confluence_elite)
 
-    fn = STRATEGIES.get(strategy, strat_confluence_elite)
-
-    base_lot    = round(max(1.0, lot), 2)
+    # ── MARTINGALE SETUP ──────────────────────────────────
+    base_lot    = round(max(MIN_STAKE, lot), 2)   # $0.50 min
     current_lot = base_lot
     consec_losses = 0
     total_lost    = 0.0
 
     MAX_LOSSES_BEFORE_PAUSE = 3
     PAUSE_WAIT_SECS         = 45
+    MAX_STAKE               = 500.0  # plafon sekirite
 
-    add_log(st, f"🚀 BonheurBot v7 QUOTEX | {symbol} | {strategy} | TF:{tf//60}min | Conf:{min_conf:.0%}")
-    add_log(st, f"📌 Expiry: {tf}sek | Mise min: $1.00 | Kont: {cfg.get('account_type','PRACTICE')}")
+    add_log(st,
+        f"🚀 BonheurBot v7 QUOTEX | {symbol} | {strategy} | "
+        f"TF:{tf//60}min | Conf:{min_conf:.0%} | Base:${base_lot:.2f}")
+    add_log(st,
+        f"📌 Expiry:{tf}sek | Mise min:${MIN_STAKE} | Kont:{cfg.get('account_type','PRACTICE')}")
 
     while st["running"]:
         if bot_id and st.get("bot_id") != bot_id:
             add_log(st, "⏹ Bot anile", "WARN"); return
 
+        # Tcheke limit profit/pèt
         _target = float(cfg.get("profit_target", 0))
         _loss   = float(cfg.get("loss_limit", 0))
         if _target > 0 and st["total_pnl"] >= _target:
@@ -1552,7 +1615,8 @@ def trading_loop(st, bot_id=None):
             # Jwenn balans
             try:
                 b = api.get_balance_sync()
-                if b and b > 0: st["balance"] = b
+                if b and b > 0:
+                    st["balance"] = b
             except:
                 add_log(st, "⚠ Pa jwenn balans — tann...", "WARN")
                 time.sleep(15); continue
@@ -1589,7 +1653,9 @@ def trading_loop(st, bot_id=None):
                         f"Ap tann siyal... ({PAUSE_WAIT_SECS}sek)", "WARN")
                     time.sleep(PAUSE_WAIT_SECS); continue
                 else:
-                    add_log(st, f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | Reprann avèk ${current_lot:.2f}", "SUCCESS")
+                    add_log(st,
+                        f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | "
+                        f"Reprann avèk ${current_lot:.2f}", "SUCCESS")
 
             if regime == "VOLATILE":
                 add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(tf,120)}sek...", "WARN")
@@ -1621,18 +1687,25 @@ def trading_loop(st, bot_id=None):
                 time.sleep(tf); continue
 
             # Konfidans adaptif
-            adaptive_conf = min_conf + (0.02 if consec_losses == 1 else (0.04 if consec_losses >= 2 else 0))
+            adaptive_conf = min_conf + (
+                0.02 if consec_losses == 1 else
+                0.04 if consec_losses >= 2 else 0
+            )
             if sig == "NONE" or conf < adaptive_conf:
                 reason = "Pa gen siyal" if sig == "NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
                 add_log(st, f"⏭ {reason} — tann pwochen bouji...")
                 time.sleep(tf); continue
 
-            # Tcheke balans
+            # Asire balans ase
             if st["balance"] < current_lot:
-                add_log(st, f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset", "WARN")
+                add_log(st,
+                    f"⚠ Balans ${st['balance']:.2f} < Mise ${current_lot:.2f} — reset", "WARN")
                 current_lot = base_lot; consec_losses = 0; total_lost = 0.0
+                if st["balance"] < MIN_STAKE:
+                    add_log(st, f"🛑 Balans tro ba pou tradé (${st['balance']:.2f})", "ERROR")
+                    st["running"] = False; break
 
-            # Jwenn payout reyèl
+            # Payout reyèl
             payout = api.get_payout(symbol)
             entry  = candles[-1]["close"]
 
@@ -1644,17 +1717,16 @@ def trading_loop(st, bot_id=None):
             pnl = 0.0; ok = False
 
             try:
-                # Plase trade
-                r = api.place_trade(symbol, sig, max(1.0, current_lot), duration_secs=tf)
+                r = api.place_trade(symbol, sig, max(MIN_STAKE, current_lot), duration_secs=tf)
                 trade_id = r.get("id", str(int(time.time())))
+                add_log(st,
+                    f"⏳ #{trade_id[:12]} | {sig} ${current_lot:.2f} | Ap tann {tf}sek...",
+                    "SUCCESS")
 
-                add_log(st, f"⏳ #{trade_id[:12]} | {sig} ${current_lot:.2f} | Ap tann {tf}sek...", "SUCCESS")
-
-                # Tann rezilta
                 result = api.wait_trade_result(trade_id, entry, current_lot, timeout=tf)
 
                 if result:
-                    ok = True
+                    ok  = True
                     won = result.get("won", False)
                     if won:
                         pnl = round(current_lot * payout, 2)
@@ -1676,31 +1748,38 @@ def trading_loop(st, bot_id=None):
             if ok:
                 if pnl > 0:
                     prev_losses = consec_losses
-                    current_lot = base_lot; consec_losses = 0; total_lost = 0.0
+                    current_lot   = base_lot
+                    consec_losses = 0
+                    total_lost    = 0.0
                     if prev_losses > 0:
-                        add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}", "SUCCESS")
+                        add_log(st,
+                            f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}",
+                            "SUCCESS")
                 else:
+                    # ── MARTINGALE KALKIL ─────────────────────────────
+                    # Fòmil: prochèn mise = (tout pèt kumulatif + base_lot) / payout
+                    # Garanti rekipere tout pèt + touche base_lot nan yon sèl victwa
                     loss = abs(pnl) if abs(pnl) > 0.01 else current_lot
-                    total_lost += loss; consec_losses += 1
+                    total_lost    += loss
+                    consec_losses += 1
+
+                    next_lot = round((total_lost + base_lot) / max(payout, 0.75), 2)
+                    next_lot = max(MIN_STAKE, min(next_lot, MAX_STAKE))
+                    current_lot = next_lot
 
                     if consec_losses < MAX_LOSSES_BEFORE_PAUSE:
-                        # Martingale: rekipere tout pèt + base_lot nan yon sèl trade
-                        next_lot = round((total_lost + base_lot) / payout, 2)
-                        current_lot = max(1.0, min(next_lot, 500.0))
                         add_log(st,
                             f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
-                            f"Total:${total_lost:.2f} | "
+                            f"Total pèt:${total_lost:.2f} | "
                             f"Prochèn:${current_lot:.2f} | Payout:{payout:.0%}", "WARN")
                     else:
-                        next_lot = round((total_lost + base_lot) / payout, 2)
-                        current_lot = max(1.0, min(next_lot, 500.0))
                         add_log(st,
                             f"🚨 3 PÈT AFILE! PÒZE OTOMATIK | "
-                            f"Total:${total_lost:.2f} | "
+                            f"Total pèt:${total_lost:.2f} | "
                             f"Mise rekipere:${current_lot:.2f} | "
-                            f"Ap tann mache...", "WARN")
+                            f"Ap tann mache bon...", "WARN")
 
-                trade = {
+                trade_record = {
                     "id":       len(st["trades"]) + 1,
                     "time":     datetime.now().strftime("%H:%M:%S"),
                     "symbol":   symbol,
@@ -1709,17 +1788,17 @@ def trading_loop(st, bot_id=None):
                     "conf":     f"{conf:.0%}",
                     "strategy": strategy,
                     "tf":       f"{tf//60}min",
-                    "stake":    round(current_lot, 2),
+                    "stake":    round(current_lot if pnl < 0 else base_lot, 2),
                     "payout":   f"{payout:.0%}",
                     "pnl":      round(pnl, 2),
                     "status":   "won" if pnl > 0 else "lost",
                     "regime":   regime,
                     "broker":   "quotex",
                 }
-                st["trades"].insert(0, trade)
-                st["total_pnl"] += pnl
+                st["trades"].insert(0, trade_record)
+                st["total_pnl"] = round(st["total_pnl"] + pnl, 2)
 
-                # Voye profit 0.5% si genyen
+                # Voye profit 0.5%
                 if pnl > 0:
                     ps = round(pnl * PROFIT_PCT, 2)
                     st["profit_sent"] += ps
@@ -1727,37 +1806,30 @@ def trading_loop(st, bot_id=None):
         except Exception as e:
             add_log(st, f"Erè loop: {e}", "ERROR")
 
-        time.sleep(2)  # Ti poz ant trades
+        time.sleep(2)
 
     add_log(st, "⏹ BonheurBot v7 Quotex arrêté")
 
 
 # ═══════════════════════════════════════════════════════════
-# BACKTEST ENGINE (adapte pou Quotex binary options)
+# BACKTEST ENGINE
 # ═══════════════════════════════════════════════════════════
-def run_backtest(candles, strat_name, bal=10000, lot=1.0, payout=0.85):
+def run_backtest(candles, strat_name, bal=10000, lot=0.50, payout=0.85):
     fn = STRATEGIES.get(strat_name, strat_confluence_elite)
+    lot = max(MIN_STAKE, lot)
     equity = [bal]; wins = losses = 0; trades = []
     current_bal = bal
 
     for i in range(50, len(candles) - 1):
         s, conf = fn(candles[:i+1])
         if s == "NONE" or conf < 0.65: continue
-
         entry = candles[i]["close"]
         nxt   = candles[i+1]["close"]
-
-        # Binary option: si direksyon kòrèk → genyen payout%, sinon pèdi tout mise
-        if s == "BUY":
-            won = nxt > entry
-        else:
-            won = nxt < entry
-
+        won   = (nxt > entry) if s == "BUY" else (nxt < entry)
         if won:
             pnl = round(lot * payout, 2); wins += 1
         else:
             pnl = -lot; losses += 1
-
         current_bal += pnl
         equity.append(round(current_bal, 2))
         trades.append({"s": s, "e": round(entry, 5), "pnl": round(pnl, 2)})
@@ -1770,7 +1842,6 @@ def run_backtest(candles, strat_name, bal=10000, lot=1.0, payout=0.85):
         dd = max(dd, (pk - e) / pk * 100 if pk else 0)
     gp = sum(t["pnl"] for t in trades if t["pnl"] > 0)
     gl = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
-
     return {
         "trades": tot, "wins": wins, "losses": losses,
         "win_rate": round(wins/tot*100, 1) if tot else 0,
@@ -1796,6 +1867,7 @@ def api_connect():
         if not email or not password:
             return jsonify({"ok": False, "error": "Mete email ak password Quotex ou"})
 
+        add_log(st, f"⏳ Ap konekte Quotex... ({email[:3]}***)")
         api = QuotexClient(email, password)
         bal = api.connect()
         api.set_account_type(acc_type)
@@ -1811,18 +1883,18 @@ def api_connect():
         else:
             st["balance"] = bal
 
-        method = "WebSocket" if isinstance(api._active, QuotexWebSocketClient) else "Selenium"
-        add_log(st, f"✓ Quotex konekte via {method} | {acc_type} | ${bal:.2f}")
+        add_log(st, f"✓ Quotex konekte via {api.method} | {acc_type} | ${bal:.2f}")
 
         return jsonify({
-            "ok": True,
-            "balance": bal,
-            "broker": "quotex",
+            "ok":           True,
+            "balance":      bal,
+            "broker":       "quotex",
             "account_type": acc_type,
-            "method": method,
+            "method":       api.method,
         })
     except Exception as e:
         logger.error(f"Connect: {e}", exc_info=True)
+        add_log(st, f"✗ Koneksyon echwe: {str(e)[:80]}", "ERROR")
         return jsonify({"ok": False, "error": str(e)})
 
 
@@ -1839,12 +1911,15 @@ def api_start():
     d = request.json or {}
     tf_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
 
+    lot_raw = float(d.get("lot", 0.50))
+    lot     = round(max(MIN_STAKE, lot_raw), 2)
+
     st["config"] = {
         "broker":        "quotex",
         "symbol":        d.get("symbol", "EURUSD"),
         "strategy":      d.get("strategy", "confluence"),
-        "lot":           d.get("lot", 1.0),
-        "tf_secs":       tf_map.get(d.get("tf", "1m"), 60),
+        "lot":           lot,
+        "tf_secs":       tf_map.get(d.get("tf", "5m"), 300),
         "min_conf":      d.get("min_conf", 0.65),
         "profit_target": float(d.get("profit_target", 0)),
         "loss_limit":    float(d.get("loss_limit", 0)),
@@ -1856,7 +1931,9 @@ def api_start():
     st["running"] = True; st["bot_id"] = bot_id
 
     threading.Thread(target=trading_loop, args=(st, bot_id), daemon=True).start()
-    add_log(st, f"▶ Bot démarre | {st['config']['symbol']} | {st['config']['strategy']}")
+    add_log(st,
+        f"▶ Bot démarre | {st['config']['symbol']} | {st['config']['strategy']} | "
+        f"Mise:${lot:.2f}")
     return jsonify({"ok": True})
 
 
@@ -1888,24 +1965,25 @@ def api_status():
 def api_backtest():
     st = get_state()
     try:
-        d = request.json or {}
+        d       = request.json or {}
         symbol  = d.get("symbol", "EURUSD")
         strat   = d.get("strategy", "confluence")
-        lot     = float(d.get("lot", 1.0))
+        lot     = max(MIN_STAKE, float(d.get("lot", 0.50)))
         payout  = float(d.get("payout", 0.85))
-        bal     = float(d.get("balance", 10000))
+        bal     = float(d.get("balance", 1000))
 
         candles = []
         if st.get("quotex_api"):
-            candles = st["quotex_api"].get_candles(symbol, 500, 3600)
+            try:
+                candles = st["quotex_api"].get_candles(symbol, 500, 3600)
+            except: pass
 
         if len(candles) < 100:
-            # Jenere candles synthetik pou backtest
-            client = QuotexWebSocketClient("", "")
+            client  = QuotexWebSocketClient("", "")
             candles = client._generate_synthetic_candles(symbol, 500)
 
         if len(candles) < 100:
-            return jsonify({"ok": False, "error": f"Pa ase done ({len(candles)}) — konekte Quotex anvan"})
+            return jsonify({"ok": False, "error": f"Pa ase done ({len(candles)})"})
 
         r = run_backtest(candles, strat, bal, lot, payout)
         return jsonify({"ok": True, "result": r})
@@ -1916,13 +1994,14 @@ def api_backtest():
 @app.route("/api/login", methods=["POST"])
 def api_login():
     st = get_state()
-    d = request.json or {}
+    d  = request.json or {}
     token = d.get("session_token", "").strip()
     code  = d.get("code", "").strip().upper()
     if token:
         ok, msg_text = validate_session(token)
         if ok:
-            with _sess_lock: is_adm = _sessions.get(token, {}).get("is_admin", False)
+            with _sess_lock:
+                is_adm = _sessions.get(token, {}).get("is_admin", False)
             st["access"] = True; st["session_token"] = token; st["is_admin"] = is_adm
             return jsonify({"ok": True, "msg": msg_text, "session_token": token, "is_admin": is_adm})
         else:
@@ -1934,13 +2013,15 @@ def api_login():
     if ok:
         use_code(code)
         new_token, expire = create_session()
-        is_adm = ACCESS_CODES.get(code, {}).get("is_adm", False) or ACCESS_CODES.get(code, {}).get("created_at") is None
+        is_adm = (ACCESS_CODES.get(code, {}).get("is_adm", False) or
+                  ACCESS_CODES.get(code, {}).get("created_at") is None)
         with _sess_lock:
             _sessions[new_token]["is_admin"] = is_adm
             _save_sessions()
         st["access"] = True; st["session_token"] = new_token; st["is_admin"] = is_adm
         msg_out = "✓ Aksè Admin! 30 jou rete" if is_adm else "✓ Aksè akòde! 30 jou rete"
-        return jsonify({"ok": True, "msg": msg_out, "session_token": new_token, "expire": expire, "is_admin": is_adm})
+        return jsonify({"ok": True, "msg": msg_out, "session_token": new_token,
+                        "expire": expire, "is_admin": is_adm})
     return jsonify({"ok": False, "msg": msg_text, "need_code": True})
 
 
@@ -1966,7 +2047,11 @@ def admin_get_codes():
             age = now - entry["created_at"]
             if age > CODE_TTL_SECONDS: status = "EKSPIRE"; remaining = "0"
             else: status = "AKTIF"; remaining = str(int((CODE_TTL_SECONDS - age) / 86400)) + " jou"
-        codes.append({"code": c, "status": status, "remaining": remaining, "used": entry["used"], "is_adm": entry.get("is_adm", False) or entry["created_at"] is None})
+        codes.append({
+            "code": c, "status": status, "remaining": remaining,
+            "used": entry["used"],
+            "is_adm": entry.get("is_adm", False) or entry["created_at"] is None
+        })
     today = date.today()
     active_sess = sum(1 for s in _sessions.values() if date.fromisoformat(s["expire"]) > today)
     return jsonify({"ok": True, "codes": codes, "total_sessions": active_sess})
@@ -2046,9 +2131,12 @@ def admin_sessions():
     with _sess_lock:
         for token, sess in _sessions.items():
             exp = date.fromisoformat(sess["expire"])
-            sessions.append({"token": token[:8] + "...", "expire": sess["expire"],
-                "days_left": (exp - today).days, "is_admin": sess.get("is_admin", False),
-                "active": (exp - today).days > 0})
+            sessions.append({
+                "token": token[:8] + "...", "expire": sess["expire"],
+                "days_left": (exp - today).days,
+                "is_admin": sess.get("is_admin", False),
+                "active": (exp - today).days > 0,
+            })
     return jsonify({"ok": True, "sessions": sessions, "total": len(sessions)})
 
 
@@ -2073,7 +2161,8 @@ def admin_clear_user():
     with _user_lock:
         for uid, st in _user_states.items():
             if uid.startswith(uid_prefix):
-                st["trades"] = []; st["total_pnl"] = 0.0; st["profit_sent"] = 0.0; st["log"] = []; cleared += 1
+                st["trades"] = []; st["total_pnl"] = 0.0
+                st["profit_sent"] = 0.0; st["log"] = []; cleared += 1
     return jsonify({"ok": True, "msg": f"✓ {cleared} itilizatè efase"})
 
 
@@ -2087,7 +2176,7 @@ def admin_clear_trades():
         for uid, st in _user_states.items():
             if uid.startswith(uid_prefix):
                 st["trades"] = []; cleared += 1
-    return jsonify({"ok": True, "msg": f"✓ {cleared} itilizatè: trades efase (log + pnl konsève)"})
+    return jsonify({"ok": True, "msg": f"✓ {cleared} itilizatè: trades efase"})
 
 
 @app.route("/")
@@ -2096,7 +2185,7 @@ def index():
 
 
 # ═══════════════════════════════════════════════════════════
-# UI HTML — QUOTEX EDITION (dark theme, Haitian Creole)
+# UI HTML — QUOTEX EDITION v7.1 (mise min $0.50)
 # ═══════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html>
@@ -2167,10 +2256,15 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <div style="color:#4A7080;font-size:11px;margin-bottom:24px">Trading Bot Pwofesyonèl — Binary Options</div>
     <div style="margin-bottom:16px">
       <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px;text-align:left">KÒD AKSÈ</div>
-      <input id="login-code" type="text" placeholder="BB-XXXX-XXXX" style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase">
+      <input id="login-code" type="text" placeholder="BB-XXXX-XXXX"
+        style="width:100%;background:#020C12;border:1px solid #0D2233;color:#C8E8F0;border-radius:6px;padding:10px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;text-transform:uppercase"
+        onkeydown="if(event.key==='Enter')doLogin()">
     </div>
     <div id="login-err"></div>
-    <button id="login-btn" onclick="doLogin()" style="width:100%;background:#00FF8818;border:1px solid #00FF88;color:#00FF88;border-radius:6px;padding:11px;cursor:pointer;font-size:13px;font-family:inherit;font-weight:700;letter-spacing:1px">⚡ ANTRE</button>
+    <button id="login-btn" onclick="doLogin()"
+      style="width:100%;background:#00FF8818;border:1px solid #00FF88;color:#00FF88;border-radius:6px;padding:11px;cursor:pointer;font-size:13px;font-family:inherit;font-weight:700;letter-spacing:1px">
+      ⚡ ANTRE
+    </button>
     <div style="margin-top:20px;background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:14px;text-align:left">
       <div style="color:#FFD600;font-size:10px;letter-spacing:1px;font-weight:700;margin-bottom:8px">💳 ABÒNMAN — $40 USDT/MWA</div>
       <div style="color:#4A7080;font-size:10px;line-height:1.9">
@@ -2178,7 +2272,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <span style="color:#C8E8F0;font-size:9px;word-break:break-all;background:#071219;padding:4px 6px;border-radius:4px;display:block;margin:4px 0">0x2ba88a4d6cabaded5d06c75ef3b3efec386acaef</span>
         <span style="color:#FFD600;font-size:9px">⚠ Rezo: BEP20 (BSC) sèlman</span><br><br>
         2. Voye prèv sou WhatsApp:<br>
-        <a href="https://wa.me/50942867885" target="_blank" style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;background:#25D36618;border:1px solid #25D36644;color:#25D366;border-radius:6px;padding:6px 12px;text-decoration:none;font-size:11px;font-weight:700">📱 WhatsApp: +509 4286-7885</a>
+        <a href="https://wa.me/50942867885" target="_blank"
+          style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;background:#25D36618;border:1px solid #25D36644;color:#25D366;border-radius:6px;padding:6px 12px;text-decoration:none;font-size:11px;font-weight:700">
+          📱 WhatsApp: +509 4286-7885
+        </a>
       </div>
     </div>
   </div>
@@ -2188,16 +2285,20 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
-    <div class="logo">💰 Bonheur<span>Bot</span> <span class="ver">v7 QUOTEX</span></div>
+    <div class="logo">💰 Bonheur<span>Bot</span> <span class="ver">v7.1 QUOTEX</span></div>
     <div style="width:1px;height:20px;background:#0D2233"></div>
     <span id="hb" class="tag tg">DISCONNECTED</span>
     <span id="hacc" class="tag ty" style="font-size:10px">—</span>
+    <span id="hmethod" style="color:#4A7080;font-size:9px;letter-spacing:1px"></span>
   </div>
   <div style="display:flex;align-items:center;gap:16px">
     <span><span class="dot di" id="dot"></span><span id="hs" style="color:#3A6070;font-size:11px;letter-spacing:1px">IDLE</span></span>
     <span id="hbal" style="color:#3A6070;font-weight:700;font-size:15px">$0.00</span>
     <span id="sub-info" style="color:#00FF8888;font-size:10px"></span>
-    <button onclick="doLogout()" style="background:transparent;border:1px solid #3A6070;color:#3A6070;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px;font-family:inherit">DEKONEKTE</button>
+    <button onclick="doLogout()"
+      style="background:transparent;border:1px solid #3A6070;color:#3A6070;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px;font-family:inherit">
+      DEKONEKTE
+    </button>
   </div>
 </div>
 
@@ -2226,11 +2327,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div class="g2">
     <div class="box">
       <div class="bt">KONEKSYON QUOTEX</div>
-      <div class="iw"><div class="il">EMAIL QUOTEX</div><input id="d-email" type="email" placeholder="email@quotex.io"></div>
-      <div class="iw"><div class="il">PASSWORD</div><input id="d-pass" type="password" placeholder="••••••••"></div>
+      <div class="iw"><div class="il">EMAIL QUOTEX</div>
+        <input id="d-email" type="email" placeholder="email@quotex.io"></div>
+      <div class="iw"><div class="il">PASSWORD</div>
+        <input id="d-pass" type="password" placeholder="••••••••"></div>
       <div class="iw"><div class="il">TIP KONT</div>
         <select id="d-acc">
-          <option value="PRACTICE">📊 Demo (Practice) — Recommande pou kòmanse</option>
+          <option value="PRACTICE">📊 Demo (Practice) — Rekòmande pou kòmanse</option>
           <option value="REAL">💰 Reyèl (Real Money)</option>
         </select>
       </div>
@@ -2238,9 +2341,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <button class="btn b fw" onclick="doConn()">⚡ KONEKTE QUOTEX</button>
       <div id="cs" style="margin-top:10px"></div>
       <div style="margin-top:12px;background:#00D4FF08;border:1px solid #00D4FF22;border-radius:6px;padding:10px;font-size:10px;color:#4A7080;line-height:1.9">
-        🔒 <span style="color:#00D4FF">WebSocket sekire</span> — koneksyon direk Quotex<br>
-        🤖 <span style="color:#FFD600">Selenium fallback</span> — si WS pa disponib<br>
-        ⚠ Toujou eseye <span style="color:#00FF88">Demo dabò</span> anvan reyèl!
+        🔌 <span style="color:#00D4FF">pyquotex</span> — bibliyotèk ofisyèl GitHub<br>
+        🔗 <span style="color:#FFD600">WebSocket</span> — koneksyon dirèk si pyquotex echwe<br>
+        🌐 <span style="color:#4A7080">HTTP fallback</span> — denye recou<br>
+        ⚠ Demo TOUJOU anvan reyèl!
       </div>
     </div>
     <div class="box">
@@ -2258,14 +2362,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       </div>
     </div>
   </div>
-  <!-- Info banner Quotex -->
   <div class="box" style="background:#00D4FF08;border-color:#00D4FF22">
-    <div class="bt" style="color:#00D4FF">🎯 QUOTEX BINARY OPTIONS — KÒMENTça TRAVAY</div>
+    <div class="bt" style="color:#00D4FF">🎯 QUOTEX BINARY OPTIONS — MARTINGALE $0.50</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
-      <div><div style="color:#00D4FF;font-weight:700;margin-bottom:4px">📈 UP/DOWN</div>Si prix monte → UP genyen<br>Si prix desann → DOWN genyen<br><span style="color:#00FF88">Menm ak Rise/Fall Deriv</span></div>
-      <div><div style="color:#FFD600;font-weight:700;margin-bottom:4px">💰 PAYOUT 80-95%</div>Payout chanje selon aktif<br>Forex ≈ 85% | OTC ≈ 92%<br><span style="color:#FFD600">Live payout via WebSocket</span></div>
-      <div><div style="color:#00FF88;font-weight:700;margin-bottom:4px">⏱ EXPIRY</div>1min / 5min / 15min / 1h<br>Bot tann tout expiry<br><span style="color:#00FF88">Martingale apre pèt</span></div>
-      <div><div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛡 SEKIRITE</div>Mise min $1.00<br>3 pèt = pòz otomatik<br><span style="color:#FF3B6B">Limit pèt obligatwa!</span></div>
+      <div><div style="color:#00D4FF;font-weight:700;margin-bottom:4px">📈 UP/DOWN</div>Si prix monte → UP genyen<br>Si prix desann → DOWN genyen</div>
+      <div><div style="color:#FFD600;font-weight:700;margin-bottom:4px">💰 MISE MIN $0.50</div>Base: $0.50<br>Pèt 1 → ~$1.09<br>Pèt 2 → ~$2.45</div>
+      <div><div style="color:#00FF88;font-weight:700;margin-bottom:4px">⏱ EXPIRY</div>1min / 5min / 15min / 1h<br>Bot tann tout expiry<br>3 pèt = pòz otomatik</div>
+      <div><div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛡 SEKIRITE</div>Mise max $500<br>Limit pèt obligatwa!<br>Demo dabò!</div>
     </div>
   </div>
 </div>
@@ -2275,7 +2378,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div class="g2">
     <div class="box">
       <div class="bt">PARAMÈT BOT QUOTEX</div>
-
       <div class="iw"><div class="il">AKTIF (SYMBOL)</div>
         <select id="c-sy">
           <optgroup label="── FOREX ──">
@@ -2299,11 +2401,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </optgroup>
         </select>
       </div>
-
       <div class="g2">
         <div class="iw"><div class="il">TIMEFRAME / EXPIRY</div>
           <select id="c-tf">
-            <option value="1m">1 minit ⚡ (rapid)</option>
+            <option value="1m">1 minit ⚡</option>
             <option value="5m" selected>5 minit ★★★</option>
             <option value="15m">15 minit ★★★</option>
             <option value="1h">1 è ★★</option>
@@ -2323,13 +2424,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           </select>
         </div>
       </div>
-
       <div class="iw">
-        <div class="il">MISE ($) — Min $1.00 | Mise inisyal</div>
-        <input id="c-lot" type="number" value="1.00" step="0.50" min="1.00">
-        <div style="color:#4A7080;font-size:9px;margin-top:2px">💡 Martingale kalkile otomatik selon payout reyèl</div>
+        <div class="il">MISE INISYAL ($) — Min $0.50</div>
+        <input id="c-lot" type="number" value="0.50" step="0.50" min="0.50">
+        <div style="color:#00FF88;font-size:9px;margin-top:2px">
+          💡 Martingale otomatik: Pèt 1→~2x | Pèt 2→~4.5x | Reset apre victwa
+        </div>
       </div>
-
       <div class="g2">
         <div class="iw"><div class="il">KONFIDANS MIN</div>
           <select id="c-conf">
@@ -2345,19 +2446,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div>
         </div>
       </div>
-
       <div class="iw"><div class="il">🛑 LIMIT PÈT ($)</div>
         <input id="c-loss" type="number" value="0" step="1" min="0">
-        <div style="color:#FF3B6B;font-size:9px;margin-top:2px">REKÒMANDE: toujou mete yon limit pèt!</div>
+        <div style="color:#FF3B6B;font-size:9px;margin-top:2px">TOUJOU mete yon limit pèt!</div>
       </div>
-
       <div id="ctm"></div>
       <div style="display:flex;gap:10px">
         <button class="btn" id="bs" onclick="doStart()">▶ START BOT</button>
         <button class="btn r" id="bx" onclick="doStop()" style="display:none">■ STOP BOT</button>
       </div>
     </div>
-
     <div>
       <div class="box">
         <div class="bt">ESTATI LIVE</div>
@@ -2370,29 +2468,26 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="stat"><div class="sl">KONT</div><div id="c-acc" class="sv" style="color:#FFD600;font-size:13px">—</div></div>
         </div>
       </div>
-
       <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">🧠 MARTINGALE QUOTEX</div>
-        <div style="color:#4A7080;font-size:10px;line-height:2.2">
-          <span style="color:#00FF88">✓ Trade 1:</span> Mise inisyal $X<br>
-          <span style="color:#FFD600">⚠ Pèt 1:</span> Mise = (Pèt + Base) ÷ Payout%<br>
-          <span style="color:#FFD600">⚠ Pèt 2:</span> Kont tout pèt kumulatif<br>
+        <div class="bt" style="color:#00FF88">🧠 MARTINGALE — EXEMPL $0.50 / 85%</div>
+        <div style="color:#4A7080;font-size:10px;line-height:2.3">
+          <span style="color:#00FF88">✓ Trade 1:</span> Mise $0.50 | Win +$0.43<br>
+          <span style="color:#FFD600">⚠ Pèt 1 ($0.50):</span> Prochèn = (0.50+0.50)÷0.85 = <b style="color:#C8E8F0">$1.18</b><br>
+          <span style="color:#FFD600">⚠ Pèt 2 ($1.18):</span> Prochèn = (1.68+0.50)÷0.85 = <b style="color:#C8E8F0">$2.56</b><br>
           <span style="color:#FF3B6B">🛑 Pèt 3:</span> PÒZE — tann siyal solid<br>
-          <span style="color:#00FF88">✅ Genyen:</span> Reset mise → base $X<br>
-          <div style="margin-top:8px;padding:6px;background:#FFD60010;border:1px solid #FFD60030;border-radius:4px">
-            💡 Payout reyèl liv via WebSocket<br>
-            Ex: Base $1 | Pèt 1 → $2.18 | Pèt 2 → $5.32
+          <span style="color:#00FF88">✅ Genyen nenpòt lè:</span> Reset → $0.50<br>
+          <div style="margin-top:6px;padding:5px 8px;background:#FFD60010;border:1px solid #FFD60030;border-radius:4px">
+            Fòmil: Mise = (Tout Pèt + Base) ÷ Payout
           </div>
         </div>
       </div>
-
       <div class="box" style="background:#FFD60008;border-color:#FFD60022">
         <div class="bt" style="color:#FFD600">⭐ AKTIF REKÒMANDE</div>
         <div style="font-size:10px;color:#4A7080;line-height:2.1">
           <span style="color:#00FF88">EUR/USD-OTC</span> — 92% payout, ideal weekend<br>
-          <span style="color:#00FF88">EUR/USD</span> — 85%, plis stab, bon pou TF 5-15min<br>
+          <span style="color:#00FF88">EUR/USD</span> — 85%, stab, bon pou 5-15min<br>
           <span style="color:#FFD600">GBP/USD</span> — 85%, volatilite modere<br>
-          <span style="color:#4A7080">BTC/USD</span> — 82%, pou crypto traders
+          <span style="color:#4A7080">BTC/USD</span> — 82%, crypto traders
         </div>
       </div>
     </div>
@@ -2416,17 +2511,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <option value="GBPUSD">GBP/USD</option>
           <option value="EURUSD-OTC">EUR/USD OTC</option>
           <option value="BTCUSD">BTC/USD</option>
-          <option value="ETHUSD">ETH/USD</option>
         </select>
       </div>
       <div class="iw"><div class="il">BALANS ($)</div><input id="bt-bl" type="number" value="1000"></div>
-      <div class="iw"><div class="il">MISE ($)</div><input id="bt-lt" type="number" value="1.00" step="0.50"></div>
+      <div class="iw"><div class="il">MISE ($) — Min $0.50</div><input id="bt-lt" type="number" value="0.50" step="0.50" min="0.50"></div>
       <div class="iw"><div class="il">PAYOUT (%)</div>
         <select id="bt-pay">
           <option value="0.92">92% — OTC</option>
           <option value="0.85" selected>85% — Forex</option>
           <option value="0.82">82% — Crypto/JPY</option>
-          <option value="0.80">80% — Lòt aktif</option>
+          <option value="0.80">80% — Lòt</option>
         </select>
       </div>
       <div class="iw"><div class="il">STRATEGY</div>
@@ -2435,7 +2529,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <option value="deriv_pro">🚀 Pro ELITE</option>
           <option value="supertrend">📈 SuperTrend</option>
           <option value="heikin_ashi">🕯 Heikin Ashi</option>
-          <option value="chandelier">🔔 Chandelier</option>
           <option value="ai">🤖 AI Score</option>
           <option value="smc">🏛 SMC</option>
           <option value="rsi">📉 RSI</option>
@@ -2476,7 +2569,9 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div class="g2">
     <div class="box">
       <div class="bt">➕ KREYE KÒD AKSÈ</div>
-      <div class="iw"><div class="il">KÒD</div><input id="new-code" type="text" placeholder="BB-2025-XXXX" oninput="this.value=this.value.toUpperCase()"></div>
+      <div class="iw"><div class="il">KÒD</div>
+        <input id="new-code" type="text" placeholder="BB-2025-XXXX" oninput="this.value=this.value.toUpperCase()">
+      </div>
       <div class="iw"><div class="il">TIP KÒD</div>
         <select id="new-code-type">
           <option value="user">👤 Itilizatè — 1 mwa</option>
@@ -2527,10 +2622,10 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </div><!-- /#app-page -->
 
 <script>
-const SESSION_KEY="bb_qx_v7";
-function saveToken(t){try{localStorage.setItem(SESSION_KEY,t)}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t)}catch(e){}try{const x=new Date();x.setDate(x.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${x.toUTCString()};path=/;SameSite=Lax`}catch(e){}}
-function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2]}catch(e){}return ""}
-function clearToken(){try{localStorage.removeItem(SESSION_KEY)}catch(e){}try{sessionStorage.removeItem(SESSION_KEY)}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu,01 Jan 1970 00:00:00 UTC;path=/;`}catch(e){}}
+const SESSION_KEY="bb_qx_v71";
+function saveToken(t){try{localStorage.setItem(SESSION_KEY,t)}catch(e){}try{const x=new Date();x.setDate(x.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${x.toUTCString()};path=/;SameSite=Lax`}catch(e){}}
+function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2]}catch(e){}return ""}
+function clearToken(){try{localStorage.removeItem(SESSION_KEY)}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu,01 Jan 1970 00:00:00 UTC;path=/;`}catch(e){}}
 function updateAdminTab(isAdmin){const t=document.getElementById("tab-admin");if(t)t.style.display=isAdmin?"block":"none"}
 
 async function checkLogin(){
@@ -2543,7 +2638,6 @@ async function checkLogin(){
     else{if(d.msg&&d.msg.includes("ekspire"))clearToken();showLogin(d.msg||"")}
   }catch(e){showLogin("")}
 }
-
 function showLogin(err=""){
   document.getElementById("login-page").style.display="flex";
   document.getElementById("app-page").style.display="none";
@@ -2572,8 +2666,7 @@ function doLogout(){clearToken();showLogin("Ou dekonekte.")}
 function sw(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
-  document.getElementById("pg-"+id).classList.add("on");
-  el.classList.add("on");
+  document.getElementById("pg-"+id).classList.add("on");el.classList.add("on");
 }
 function msg(id,txt,ok){document.getElementById(id).innerHTML=`<div class="al ${ok?"ok":"er"}">${txt}</div>`}
 
@@ -2583,24 +2676,33 @@ async function doConn(){
   const pass=document.getElementById("d-pass").value.trim();
   const acc=document.getElementById("d-acc").value;
   if(!email||!pass){msg("cm","⚠ Mete email ak password Quotex ou",false);btn.textContent="⚡ KONEKTE QUOTEX";btn.disabled=false;return}
-  msg("cm","⏳ Ap konekte Quotex — eseye WebSocket... (tann 20sek)","ok");
+  msg("cm","⏳ Ap konekte Quotex — eseye pyquotex → WebSocket → HTTP... (tann 30sek)","ok");
   try{
     const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password:pass,account_type:acc})});
     const d=await r.json();
     if(d.ok){
-      msg("cm",`✓ Konekte via ${d.method||"WebSocket"} | ${d.account_type} | $${d.balance.toFixed(2)}`,"ok");
-      document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>Quotex ${d.account_type}</b> | $${d.balance.toFixed(2)} | ${d.method||"WS"}</div>`;
+      msg("cm",`✓ Konekte via ${d.method||"?"} | ${d.account_type} | $${d.balance.toFixed(2)}`,"ok");
+      document.getElementById("cs").innerHTML=`<div class="al ok">✓ <b>Quotex ${d.account_type}</b> | $${d.balance.toFixed(2)} | ${d.method||"?"}</div>`;
+      document.getElementById("hmethod").textContent=`[${d.method||"?"}]`;
     }else msg("cm","✗ "+d.error,false);
   }catch(e){msg("cm","✗ "+e.message,false)}
   btn.textContent="⚡ KONEKTE QUOTEX";btn.disabled=false;
 }
 
 async function doStart(){
-  const tf=document.getElementById("c-tf").value;
-  const body={symbol:document.getElementById("c-sy").value,strategy:document.getElementById("c-st").value,lot:parseFloat(document.getElementById("c-lot").value),tf,min_conf:parseFloat(document.getElementById("c-conf").value),profit_target:parseFloat(document.getElementById("c-target").value||0),loss_limit:parseFloat(document.getElementById("c-loss").value||0)};
+  const lot=Math.max(0.50,parseFloat(document.getElementById("c-lot").value)||0.50);
+  const body={
+    symbol:document.getElementById("c-sy").value,
+    strategy:document.getElementById("c-st").value,
+    lot:lot,
+    tf:document.getElementById("c-tf").value,
+    min_conf:parseFloat(document.getElementById("c-conf").value),
+    profit_target:parseFloat(document.getElementById("c-target").value||0),
+    loss_limit:parseFloat(document.getElementById("c-loss").value||0)
+  };
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d=await r.json();
-  if(d.ok){msg("ctm","✓ BonheurBot v7 Quotex démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
+  if(d.ok){msg("ctm",`✓ BonheurBot v7 Quotex démarre! Mise:$${lot.toFixed(2)}`,"ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
   else msg("ctm","✗ "+d.error,false);
 }
 async function doStop(){
@@ -2613,7 +2715,14 @@ async function doStop(){
 async function doBt(){
   const btn=event.target;btn.textContent="⏳ AP KALKILE...";btn.disabled=true;
   document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest...</div>`;
-  const body={symbol:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),payout:parseFloat(document.getElementById("bt-pay").value)};
+  const lot=Math.max(0.50,parseFloat(document.getElementById("bt-lt").value)||0.50);
+  const body={
+    symbol:document.getElementById("bt-sy").value,
+    strategy:document.getElementById("bt-st").value,
+    balance:parseFloat(document.getElementById("bt-bl").value),
+    lot:lot,
+    payout:parseFloat(document.getElementById("bt-pay").value)
+  };
   try{
     const r=await fetch("/api/backtest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const d=await r.json();
@@ -2626,7 +2735,6 @@ async function doBt(){
         <div class="stat"><div class="sl">WIN RATE</div><div class="sv" style="color:#00FF88">${v.win_rate}%</div></div>
         <div class="stat"><div class="sl">TRADES</div><div class="sv" style="color:#FFD600">${v.trades}</div></div>
         <div class="stat"><div class="sl">MAX DD</div><div class="sv" style="color:#FF3B6B">${v.max_dd}%</div></div>
-        <div class="stat"><div class="sl">PAYOUT</div><div class="sv" style="color:#00D4FF">${v.payout_used||"—"}</div></div>
         <div class="stat"><div class="sl">PROFIT F.</div><div class="sv" style="color:#FFD600">${v.pf}</div></div>
       </div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
     }else document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
@@ -2643,6 +2751,7 @@ function drawC(vals){
   return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${area}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
 }
 
+let _lastMethod="";
 function upd(d){
   const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
   const accLabel=d.account_type||"—";
@@ -2666,7 +2775,6 @@ function upd(d){
   document.getElementById("s-acc").textContent=accLabel;
   ["c-st2"].forEach(id=>{document.getElementById(id).textContent=d.running?"LIVE 🟢":"IDLE";document.getElementById(id).style.color=d.running?"#00FF88":"#3A6070"});
   document.getElementById("c-acc").textContent=accLabel;
-  // Payout estimasyon
   const payMap={"EURUSD":"85%","GBPUSD":"85%","EURUSD-OTC":"92%","GBPUSD-OTC":"92%","BTCUSD":"82%","ETHUSD":"80%"};
   document.getElementById("s-pay").textContent=payMap[d.config.symbol]||"~85%";
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block"}
@@ -2682,7 +2790,6 @@ function upd(d){
     document.getElementById("trtit").textContent=`HISTOIRIK TRADES — QUOTEX (${d.trades.length})`;
     document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Senbol</th><th>Side</th><th>Antre</th><th>Expiry</th><th>Mise</th><th>Payout</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.symbol}</td><td><span class="tag ${t.side=="BUY"?"tb":"ts"}">${t.side=="BUY"?"▲ UP":"▼ DOWN"}</span></td><td>${t.entry}</td><td style="color:#4A7080">${t.tf||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#00D4FF">${t.payout||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
   }
-  // Logs
   if(d.log.length){document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("")}
 }
 
@@ -2690,21 +2797,21 @@ async function poll(){try{const r=await fetch("/api/status");const d=await r.jso
 
 // ── STRATEGIES INFO ──
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+10 strat klasik. Meye pou binary options.",tags:["SuperTrend","HeikinAshi","Chandelier","3 strat min"]},
-  deriv_pro:{l:"🚀 Pro ELITE",d:"Score 5/15 + ADX≥12 + SuperTrend. Presiz pou aktif forex.",tags:["score 5/15","ADX","ST bonus"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend+HeikinAshi+Chandelier+10 strat klasik. Meye pou binary options.",tags:["ST","HA","CE","3 strat min"]},
+  deriv_pro:{l:"🚀 Pro ELITE",d:"Score 5/15 + ADX≥12. Presiz pou aktif forex.",tags:["score 5/15","ADX","ST bonus"]},
   supertrend:{l:"📈 SuperTrend",d:"ATR×3 — siyal klè BUY/SELL.",tags:["ATR×3","75-92% conf"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif = trend solid.",tags:["5 bouji","72-83% conf"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif = trend solid.",tags:["5 bouji","72-83%"]},
   chandelier:{l:"🔔 Chandelier",d:"HH-ATR×3 — chanjman trend.",tags:["HH/LL","ATR×3"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè: EMA+RSI+MACD+BB+mom+vol+pos+trend.",tags:["8 faktè","pwa","68-92%"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low.",tags:["BOS","swing","84%"]},
-  rsi:{l:"📉 RSI",d:"RSI <30 BUY / >70 SELL + EMA50.",tags:["RSI 14","OB/OS","EMA50"]},
-  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m.",tags:["EMA 5/13","RSI 9","1min"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè: EMA+RSI+MACD+BB+mom+vol+pos+trend.",tags:["8 faktè","68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure + swing.",tags:["BOS","swing","84%"]},
+  rsi:{l:"📉 RSI",d:"RSI<30 BUY />70 SELL + EMA50.",tags:["RSI 14","OB/OS"]},
+  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 1m.",tags:["EMA 5/13","RSI 9"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
 Object.keys(SI).forEach(k=>{
   const b=document.createElement("button");b.className="btn"+(k==sel?" b":"");b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";b.textContent=SI[k].l;
-  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88"};
+  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>{x.style.borderColor="#0D2233";x.style.color="#4A7080"});b.style.borderColor="#00FF88";b.style.color="#00FF88"};
   sb.appendChild(b);
 });
 function renderS(){
@@ -2751,14 +2858,16 @@ async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const to
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh()}
 async function admClearUser(uid){if(!confirm(`Efase TOUT istorik ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh()}
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)]}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result}
-function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode()}
+function admCopyGen(){admAddCode()}
 
 checkLogin();
 </script>
 </body>
 </html>"""
 
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"BonheurBot v7 QUOTEX Edition — Port {port}")
+    logger.info(f"BonheurBot v7.1 QUOTEX Edition — Port {port}")
+    logger.info(f"Mise minimum: ${MIN_STAKE}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

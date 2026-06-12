@@ -3,11 +3,12 @@
 ║              BONHEURBOT PRO — QUOTEX EDITION                 ║
 ║         Multi-User Trading Bot — Quotex (Binary)             ║
 ║   Confluence Strategies | Martingale | 3-Loss Pause          ║
-║   FIX: pyquotex 1.1.0 API kòrèk + verifikasyon estrik        ║
+║   FIX: 403 Forbidden — user_data_dir + cache clear           ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
 import os, json, time, threading, logging, math, uuid, secrets, asyncio
+import tempfile, shutil
 from datetime import datetime, timedelta, date
 from flask import Flask, request, jsonify, render_template_string, session
 
@@ -623,8 +624,7 @@ def strat_pro_elite(c):
     body_ratio=last_body/last_range
     st_sig, _ = supertrend(c, p=10, mult=3.0)
     if trend_up:
-        score=0.0
-        bo_score=0.0
+        score=0.0; bo_score=0.0
         if cl[-1]>hi20 and cl[-2]<=hi20:  bo_score+=2.0
         elif cl[-1]>hi20*0.997:            bo_score+=0.8
         if cl[-1]>hi10 and cl[-2]<=hi10:  bo_score+=1.0
@@ -661,8 +661,7 @@ def strat_pro_elite(c):
             if adx>=50: conf=min(0.95,conf+0.02)
             return "BUY", round(conf, 3)
     if trend_down:
-        score=0.0
-        bo_score=0.0
+        score=0.0; bo_score=0.0
         if cl[-1]<lo20 and cl[-2]>=lo20:  bo_score+=2.0
         elif cl[-1]<lo20*1.003:            bo_score+=0.8
         if cl[-1]<lo10 and cl[-2]>=lo10:  bo_score+=1.0
@@ -758,13 +757,13 @@ def run_backtest(candles, strat_name, bal=10000, lot=0.01, sl=20, tp=40):
     }
 
 # ═══════════════════════════════════════════════════════════
-# QUOTEX CLIENT — pyquotex 1.1.0 API KÒRÈK
-# ✅ connect() retounen (bool, str) — pa tuple unpack erè
-# ✅ get_balance() retounen float dirèkteman (pa need float())
-# ✅ get_payout_by_asset(asset, timeframe="1") — signature kòrèk
+# QUOTEX CLIENT — FIX 403 FORBIDDEN
+# ✅ user_data_dir pou evite Cloudflare 403
+# ✅ Cache clear anvan chak koneksyon
+# ✅ connect() retounen (bool, str)
+# ✅ get_balance() retounen float
 # ✅ buy(amount, asset, direction, duration) — "call"/"put"
 # ✅ check_win(order_id, duration) — retounen (str, float)
-# ✅ set_account_mode("PRACTICE" | "REAL")
 # ═══════════════════════════════════════════════════════════
 class QuotexClient:
     def __init__(self, email, password, is_demo=True):
@@ -793,11 +792,6 @@ class QuotexClient:
         return fut.result(timeout=timeout)
 
     def connect(self):
-        """
-        Konekte ak Quotex epi verifye balans.
-        Leve Exception si: login echwe, websocket echwe, balans <= 0
-        Retounen balans (float) si koneksyon reyèl.
-        """
         try:
             from pyquotex.stable_api import Quotex
         except ImportError as e:
@@ -806,17 +800,36 @@ class QuotexClient:
         self._start_loop()
 
         async def _do_connect():
-            # Kreye kliyan
-            self.client = Quotex(
-                email=self.email,
-                password=self.password,
-                lang="pt"
-            )
-            # Mete mode kont (PRACTICE oswa REAL)
+            # ── FIX 403: Efase cache ansyen ────────────────────────────
+            cache_dir = os.path.join(tempfile.gettempdir(), "quotex_session")
+            try:
+                if os.path.exists(cache_dir):
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                os.makedirs(cache_dir, exist_ok=True)
+            except Exception:
+                pass
+
+            # ── Kreye kliyan ak user_data_dir ──────────────────────────
+            try:
+                self.client = Quotex(
+                    email=self.email,
+                    password=self.password,
+                    lang="pt",
+                    user_data_dir=cache_dir,
+                )
+            except TypeError:
+                # Si vèsyon an pa sipòte user_data_dir
+                self.client = Quotex(
+                    email=self.email,
+                    password=self.password,
+                    lang="pt",
+                )
+
+            # ── Mete mode kont ─────────────────────────────────────────
             mode = "PRACTICE" if self.is_demo else "REAL"
             self.client.set_account_mode(mode)
 
-            # ── connect() retounen (bool, str) ──────────────────────────
+            # ── Konekte ────────────────────────────────────────────────
             check, reason = await self.client.connect()
             if not check:
                 raise Exception(
@@ -824,7 +837,7 @@ class QuotexClient:
                     f"Verifye nan sit Quotex la direkteman. (raison: {reason})"
                 )
 
-            # ── verifye websocket ────────────────────────────────────────
+            # ── Verifye websocket ──────────────────────────────────────
             try:
                 is_ok = await self.client.check_connect()
                 if is_ok is False:
@@ -836,18 +849,14 @@ class QuotexClient:
                 err_str = str(ck_err)
                 if "pa bon" in err_str or "websocket" in err_str or "otantifye" in err_str:
                     raise
-                # Metòd pa disponib nan vèsyon sa — kontinye
 
-            # ── jwenn balans reyèl ───────────────────────────────────────
+            # ── Jwenn balans ───────────────────────────────────────────
             await asyncio.sleep(2.0)
-            # get_balance() nan 1.1.0 retounen float dirèkteman
             bal = await self.client.get_balance()
-
             if bal is None or float(bal) <= 0:
                 raise Exception(
                     "Balans $0 oswa vid apre koneksyon — "
-                    "email/password ou pa bon, oswa kont ou vid nèt. "
-                    "Konekte nan sit Quotex la e verifye kont ou."
+                    "email/password ou pa bon, oswa kont ou vid nèt."
                 )
             return float(bal)
 
@@ -868,16 +877,11 @@ class QuotexClient:
         return bal
 
     def get_candles(self, asset, count=200, gran=60):
-        """
-        Jwenn chandèl yo depi Quotex.
-        Retounen lis dict: {open, high, low, close, volume}
-        """
         if not self._connected:
             raise Exception("Pa konekte ak Quotex")
 
         async def _get():
             try:
-                # get_candle_v2(asset, period, timeout=30)
                 candles = await self.client.get_candle_v2(asset, gran, timeout=25)
             except Exception as e:
                 logger.error(f"get_candle_v2 erè: {e}")
@@ -903,17 +907,11 @@ class QuotexClient:
         return out
 
     def place_trade(self, asset, direction, amount=1.0, duration_secs=60):
-        """
-        Pase yon trade binary options sou Quotex.
-        direction: "BUY" → "call" | "SELL" → "put"
-        Retounen (status: bool, info: Any)
-        """
         if not self._connected:
             raise Exception("Pa konekte ak Quotex — rekonekte epi eseye ankò")
 
         async def _buy():
             d = "call" if direction == "BUY" else "put"
-            # buy(amount, asset, direction, duration) — duration an segonn
             status, info = await self.client.buy(
                 float(amount), asset, d, int(duration_secs)
             )
@@ -922,28 +920,16 @@ class QuotexClient:
         return self._run(_buy(), timeout=duration_secs + 20)
 
     def check_win(self, order_id, duration_secs=60):
-        """
-        Verifye rezilta yon trade.
-        Retounen (status: str, profit: float)
-        status: "win" | "loss" | "equal"
-        """
         async def _check():
-            # check_win(order_id, duration=0) — retounen (str, float)
             status, profit = await self.client.check_win(order_id, int(duration_secs))
             return status, profit
-
         return self._run(_check(), timeout=duration_secs + 35)
 
     def get_balance_sync(self):
-        """
-        Jwenn balans aktyèl la.
-        Retounen float — $0 oswa erè = koneksyon pèdi.
-        """
         if not self._connected:
             return self._bal
 
         async def _bal():
-            # get_balance(timeout=30) — retounen float
             return await self.client.get_balance(timeout=20)
 
         try:
@@ -952,49 +938,28 @@ class QuotexClient:
                 b = float(b)
                 if b > 0:
                     self._bal = b
-                else:
-                    logger.warning("get_balance_sync: balans $0 — koneksyon ka pèdi")
         except Exception as e:
             logger.error(f"get_balance_sync: {e}")
         return self._bal
 
     def get_payout(self, asset):
-        """
-        Jwenn pousantaj payout pou aktif la.
-        Retounen float (ex: 0.85 = 85%)
-        """
         if not self._connected:
             return 0.85
-
         try:
-            # get_payout_by_asset(asset_name, timeframe="1")
-            # retounen float | dict | None
-            # timeframe "1" = 1 minit, "5" = 5 minit, "24H" = 24h
             data = self.client.get_payout_by_asset(asset, timeframe="1")
-
             if data is None:
-                # eseye san timeframe
                 data = self.client.get_payout_by_asset(asset)
-
             if isinstance(data, (int, float)) and data is not None:
                 pct = float(data)
-                # Si valè a se 85 (pousantaj) oswa 0.85 (desimal)
-                if pct > 1:
-                    return pct / 100.0
-                return pct
-
+                return pct / 100.0 if pct > 1 else pct
             if isinstance(data, dict):
-                # ka retounen {"turbo_payment": 85, "payment": 80, ...}
                 pct = data.get("turbo_payment") or data.get("payment") or 85
                 return float(pct) / 100.0 if float(pct) > 1 else float(pct)
-
         except Exception as e:
             logger.error(f"get_payout: {e}")
-
-        return 0.85  # valè defo si echwe
+        return 0.85
 
     def close(self):
-        """Fèmen koneksyon an pwòpman."""
         self._connected = False
         try:
             if self.client:
@@ -1029,7 +994,7 @@ def add_log(st, msg, level="INFO"):
 
 
 # ═══════════════════════════════════════════════════════════
-# QUOTEX TRADING LOOP — Binary Options + Martingale
+# QUOTEX TRADING LOOP
 # ═══════════════════════════════════════════════════════════
 def quotex_trading_loop(st, bot_id=None):
     if bot_id and st.get("bot_id") != bot_id:
@@ -1060,7 +1025,6 @@ def quotex_trading_loop(st, bot_id=None):
             add_log(st, "⏹ Bot anile", "WARN")
             return
 
-        # ── Verifye objektif/limit ───────────────────────────────────────
         _target = float(cfg.get("profit_target", 0))
         _loss   = float(cfg.get("loss_limit", 0))
         if _target > 0 and st["total_pnl"] >= _target:
@@ -1076,7 +1040,6 @@ def quotex_trading_loop(st, bot_id=None):
                 add_log(st, "Quotex pa konekte — STOP", "ERROR")
                 st["running"] = False; break
 
-            # ── Aktyalize balans ─────────────────────────────────────────
             try:
                 b = api.get_balance_sync()
                 if b and b > 0:
@@ -1090,13 +1053,11 @@ def quotex_trading_loop(st, bot_id=None):
                 current_lot = base_lot; consec_losses = 0; total_lost = 0.0
                 time.sleep(10); continue
 
-            # ── Jwenn chandèl yo ─────────────────────────────────────────
             candles = api.get_candles(asset, 200, 60)
             if len(candles) < 30:
                 add_log(st, f"Pa ase done ({len(candles)}) — tann...", "WARN")
                 time.sleep(15); continue
 
-            # ── Analiz mache ─────────────────────────────────────────────
             regime, regime_score = market_regime(candles)
             adx_val, pdi_val, mdi_val = calc_adx_full(candles, 14)
             st_sig, st_c = supertrend(candles)
@@ -1106,7 +1067,6 @@ def quotex_trading_loop(st, bot_id=None):
                 f"📡 {len(candles)} bouji | {asset} | {regime} | ADX:{adx_val:.0f} | "
                 f"ST:{st_sig}({st_c:.0%}) | HA:{ha_sig}({ha_c:.0%})")
 
-            # ── Pause si 3 pèt konsekitif ────────────────────────────────
             if consec_losses >= MAX_LOSSES_BEFORE_PAUSE:
                 mache_bon = regime in ("TRENDING_UP", "TRENDING_DN", "RANGING") and adx_val >= 12
                 if regime == "RANGING":
@@ -1119,12 +1079,10 @@ def quotex_trading_loop(st, bot_id=None):
                 else:
                     add_log(st, f"✅ MACHE BON ANKÒ! {regime} ADX:{adx_val:.0f} | Reprann ${current_lot:.2f}", "SUCCESS")
 
-            # ── Evite mache VOLATILE ─────────────────────────────────────
             if regime == "VOLATILE":
                 add_log(st, f"⏸ Mache VOLATILE — pa trade. Tann {min(duration,120)}sek...", "WARN")
                 time.sleep(min(duration, 120)); continue
 
-            # ── Kalkile siyal ────────────────────────────────────────────
             if strategy == "confluence":
                 req_strats = 3 if consec_losses == 0 else (4 if consec_losses <= 2 else 5)
                 sig, conf = strat_confluence_elite(candles, min_strats=req_strats, min_per_conf=0.65)
@@ -1133,7 +1091,6 @@ def quotex_trading_loop(st, bot_id=None):
                 sig, conf = fn(candles)
                 add_log(st, f"📊 {asset} | {sig} | Conf:{conf:.0%} | {strategy}")
 
-            # ── Filtre kontra-trend ──────────────────────────────────────
             if sig == "BUY" and regime == "TRENDING_DN":
                 add_log(st, f"⛔ REJTE BUY — Mache ap DESANN. {st_sig}/{ha_sig}", "WARN")
                 time.sleep(duration); continue
@@ -1141,19 +1098,16 @@ def quotex_trading_loop(st, bot_id=None):
                 add_log(st, f"⛔ REJTE SELL — Mache ap MONTE. {st_sig}/{ha_sig}", "WARN")
                 time.sleep(duration); continue
 
-            # ── Konfidans adaptif ────────────────────────────────────────
             adaptive_conf = min_conf + (0.02 if consec_losses == 1 else (0.04 if consec_losses >= 2 else 0))
             if sig == "NONE" or conf < adaptive_conf:
                 reason = "Pa gen siyal" if sig == "NONE" else f"Conf {conf:.0%} < {adaptive_conf:.0%}"
                 add_log(st, f"⏭ {reason} — tann pwochen bouji...")
                 time.sleep(duration); continue
 
-            # ── Pivot info ───────────────────────────────────────────────
             pv_sig_dir = "TRENDING_UP" if sig == "BUY" else "TRENDING_DN"
             in_pivot, _ = pivot_signal(candles, pv_sig_dir)
             pivot_info = " 🎯+PIVOT" if in_pivot else ""
 
-            # ── Payout ───────────────────────────────────────────────────
             payout = api.get_payout(asset)
             entry  = candles[-1]["close"]
 
@@ -1161,7 +1115,6 @@ def quotex_trading_loop(st, bot_id=None):
                 f"⚡ {sig} @ {entry:.5f} | Conf:{conf:.0%} | ADX:{adx_val:.0f} | "
                 f"Payout:{payout:.0%} | Mise:${current_lot:.2f}{pivot_info}")
 
-            # ── Pase trade ───────────────────────────────────────────────
             try:
                 status, info = api.place_trade(asset, sig, current_lot, duration)
             except Exception as e:
@@ -1172,7 +1125,6 @@ def quotex_trading_loop(st, bot_id=None):
                 add_log(st, f"❌ Trade echwe: {info}", "ERROR")
                 time.sleep(10); continue
 
-            # Ekstrè trade ID
             trade_id = None
             if isinstance(info, dict):
                 trade_id = info.get("id") or info.get("order_id")
@@ -1182,76 +1134,58 @@ def quotex_trading_loop(st, bot_id=None):
             add_log(st, f"⏳ #{trade_id} ouvri | Ap tann {duration}s...", "SUCCESS")
             time.sleep(duration + 3)
 
-            # ── Verifye rezilta ──────────────────────────────────────────
             pnl = 0.0; won = False
             if trade_id:
                 try:
-                    # check_win retounen (str, float): ("win"|"loss"|"equal", profit)
                     result, profit = api.check_win(trade_id, duration)
                     profit = float(profit) if profit is not None else 0.0
                     if result in ("win", "won"):
                         pnl = round(profit, 2) if profit > 0 else round(current_lot * payout, 2)
                         won = True
                     elif result in ("loss", "loose", "lost"):
-                        pnl = -current_lot
-                        won = False
+                        pnl = -current_lot; won = False
                     elif result == "equal":
-                        pnl = 0.0
-                        won = False
+                        pnl = 0.0; won = False
                     else:
-                        # rezilta enkoni — itilize balans
                         nb = api.get_balance_sync()
                         pnl = round(nb - st["balance"], 2)
-                        won = pnl > 0
-                        st["balance"] = nb
+                        won = pnl > 0; st["balance"] = nb
                 except Exception as e:
                     add_log(st, f"check_win erè: {e}", "WARN")
                     nb = api.get_balance_sync()
                     pnl = round(nb - st["balance"], 2)
-                    won = pnl > 0
-                    st["balance"] = nb
+                    won = pnl > 0; st["balance"] = nb
             else:
-                # Pa gen ID — kalkile depi balans
                 nb = api.get_balance_sync()
                 pnl = round(nb - st["balance"], 2)
-                won = pnl > 0
-                st["balance"] = nb
+                won = pnl > 0; st["balance"] = nb
 
-            # ── Afiche rezilta ───────────────────────────────────────────
             if won:
-                if pnl <= 0:
-                    pnl = round(current_lot * payout, 2)
+                if pnl <= 0: pnl = round(current_lot * payout, 2)
                 add_log(st, f"✅ GENYEN! +${pnl:.2f}", "SUCCESS")
             else:
-                if pnl >= 0 and not won:
-                    pnl = -current_lot
+                if pnl >= 0 and not won: pnl = -current_lot
                 add_log(st, f"❌ PÈDI ${abs(pnl):.2f}", "WARN")
 
             st["total_pnl"] += pnl
 
-            # Aktyalize balans apre trade
             try:
                 nb = api.get_balance_sync()
-                if nb and nb > 0:
-                    st["balance"] = nb
+                if nb and nb > 0: st["balance"] = nb
             except Exception:
                 pass
 
             stake_used = current_lot
 
-            # ── Martingale / Reset ───────────────────────────────────────
             if won:
                 prev_losses = consec_losses
-                current_lot   = base_lot
-                consec_losses = 0
-                total_lost    = 0.0
+                current_lot = base_lot; consec_losses = 0; total_lost = 0.0
                 if prev_losses > 0:
                     add_log(st, f"🏆 REKIPERE! (te gen {prev_losses} pèt) ← Reset ${base_lot:.2f}", "SUCCESS")
             else:
-                total_lost    += current_lot
-                consec_losses += 1
-                next_lot       = round(current_lot * mart_mult, 2)
-                current_lot    = max(base_lot, min(next_lot, 500.0))
+                total_lost += current_lot; consec_losses += 1
+                next_lot = round(current_lot * mart_mult, 2)
+                current_lot = max(base_lot, min(next_lot, 500.0))
                 if consec_losses < MAX_LOSSES_BEFORE_PAUSE:
                     add_log(st,
                         f"⚠ PÈT #{consec_losses}/{MAX_LOSSES_BEFORE_PAUSE-1} | "
@@ -1261,7 +1195,6 @@ def quotex_trading_loop(st, bot_id=None):
                         f"🚨 {consec_losses} PÈT AFILE! PÒZE OTOMATIK | "
                         f"Total:${total_lost:.2f} | Mise rekipere:${current_lot:.2f} | Ap tann mache...", "WARN")
 
-            # ── Anrejistre trade ─────────────────────────────────────────
             trade = {
                 "id":       len(st["trades"]) + 1,
                 "time":     datetime.now().strftime("%H:%M:%S"),
@@ -1302,13 +1235,10 @@ def api_connect():
         if not email or not password:
             return jsonify({"ok": False, "error": "Email ak password obligatwa"})
 
-        # Fèmen ansyen koneksyon an
         old_api = st.get("quotex_api")
         if old_api:
-            try:
-                old_api.close()
-            except Exception:
-                pass
+            try: old_api.close()
+            except Exception: pass
             st["quotex_api"] = None
             st["connected"]  = False
             st["balance"]    = 0.0
@@ -1326,7 +1256,6 @@ def api_connect():
             add_log(st, f"✗ Koneksyon echwe: {err_msg[:150]}", "ERROR")
             return jsonify({"ok": False, "error": err_msg})
 
-        # Sèlman rive isit si bal > 0
         st["quotex_api"]   = api
         st["balance"]      = bal
         st["connected"]    = True
@@ -1370,9 +1299,9 @@ def api_start():
 
     import random, string
     bot_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    st["running"]    = True
-    st["bot_id"]     = bot_id
-    st["total_pnl"]  = 0.0
+    st["running"]   = True
+    st["bot_id"]    = bot_id
+    st["total_pnl"] = 0.0
 
     threading.Thread(target=quotex_trading_loop, args=(st, bot_id), daemon=True).start()
     return jsonify({"ok": True})
@@ -1541,7 +1470,7 @@ def admin_get_users():
     with _user_lock:
         for uid, st in _user_states.items():
             users.append({
-                "uid":      uid[:8] + "...",
+                "uid":       uid[:8] + "...",
                 "connected": st.get("connected", False),
                 "running":   st.get("running", False),
                 "balance":   round(st.get("balance", 0), 2),
@@ -1575,11 +1504,11 @@ def admin_sessions():
         for token, sess in _sessions.items():
             exp = date.fromisoformat(sess["expire"])
             sessions.append({
-                "token":    token[:8] + "...",
-                "expire":   sess["expire"],
+                "token":     token[:8] + "...",
+                "expire":    sess["expire"],
                 "days_left": (exp - today).days,
-                "is_admin": sess.get("is_admin", False),
-                "active":   (exp - today).days > 0,
+                "is_admin":  sess.get("is_admin", False),
+                "active":    (exp - today).days > 0,
             })
     return jsonify({"ok": True, "sessions": sessions, "total": len(sessions)})
 
@@ -1690,7 +1619,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
 </style>
 </head>
 <body>
-
 <div id="login-page" style="display:none;min-height:100vh;background:#040A0F;align-items:center;justify-content:center;flex-direction:column">
   <div style="background:#071219;border:1px solid #0D2233;border-radius:12px;padding:40px;max-width:420px;width:90%;text-align:center">
     <div style="font-size:32px;margin-bottom:8px">💰</div>
@@ -1714,7 +1642,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
   </div>
 </div>
-
 <div id="app-page" style="display:none">
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:12px">
@@ -1730,7 +1657,6 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     <button onclick="doLogout()" style="background:transparent;border:1px solid #3A6070;color:#3A6070;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:10px;font-family:inherit">DEKONEKTE</button>
   </div>
 </div>
-
 <div class="tabs">
   <button class="tab on" onclick="sw('dashboard',this)">DASHBOARD</button>
   <button class="tab" onclick="sw('control',this)">KONTWÒL</button>
@@ -1740,9 +1666,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <button class="tab" onclick="sw('log',this)">LOGS</button>
   <button class="tab" id="tab-admin" style="display:none;color:#FFD600" onclick="sw('admin',this)">⚙ ADMIN</button>
 </div>
-
 <div class="wrap">
-
 <div id="pg-dashboard" class="pg on">
   <div class="stats">
     <div class="stat"><div class="sl">BALANS</div><div class="sv" id="s-bal" style="color:#00D4FF">$0.00</div></div>
@@ -1788,35 +1712,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div class="box" style="background:#00FF8808;border-color:#00FF8822">
     <div class="bt" style="color:#00FF88">🚀 SISTÈM ELITE — QUOTEX BINARY</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:11px;color:#4A7080;line-height:1.9">
-      <div>
-        <div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 SuperTrend</div>
-        ATR x3.0 multiplier<br>
-        Siyal klè BUY/SELL (CALL/PUT)<br>
-        <span style="color:#00FF88">Pwa: 2.5x (pi wo)</span>
-      </div>
-      <div>
-        <div style="color:#FFD600;font-weight:700;margin-bottom:4px">🕯 Heikin Ashi</div>
-        5 bouji konsekitif<br>
-        Filtre bwi mache<br>
-        <span style="color:#FFD600">Pwa: 2.5x (pi wo)</span>
-      </div>
-      <div>
-        <div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🔔 Chandelier Exit</div>
-        Highest high/lowest low<br>
-        Chanjman trend detekte<br>
-        <span style="color:#00D4FF">Pwa: 2.5x (pi wo)</span>
-      </div>
-      <div>
-        <div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛡 Martingale + Pause</div>
-        ADX sèyil: 12<br>
-        3 strategies dakò minimòm<br>
-        Pause 3 pèt konsekitif<br>
-        <span style="color:#FF3B6B">→ Mise rekipere otomatik</span>
-      </div>
+      <div><div style="color:#00FF88;font-weight:700;margin-bottom:4px">📈 SuperTrend</div>ATR x3.0 multiplier<br>Siyal klè BUY/SELL<br><span style="color:#00FF88">Pwa: 2.5x</span></div>
+      <div><div style="color:#FFD600;font-weight:700;margin-bottom:4px">🕯 Heikin Ashi</div>5 bouji konsekitif<br>Filtre bwi mache<br><span style="color:#FFD600">Pwa: 2.5x</span></div>
+      <div><div style="color:#00D4FF;font-weight:700;margin-bottom:4px">🔔 Chandelier Exit</div>Highest high/lowest low<br>Chanjman trend<br><span style="color:#00D4FF">Pwa: 2.5x</span></div>
+      <div><div style="color:#FF3B6B;font-weight:700;margin-bottom:4px">🛡 Martingale+Pause</div>ADX sèyil: 12<br>3 strategies min<br><span style="color:#FF3B6B">Pause 3 pèt konsekitif</span></div>
     </div>
   </div>
 </div>
-
 <div id="pg-control" class="pg">
   <div class="g2">
     <div class="box">
@@ -1851,8 +1753,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <div class="iw"><div class="il">MISE DEPA ($) — Min $1</div><input id="c-lot" type="number" value="1" step="0.5" min="1"></div>
         <div class="iw"><div class="il">STRATEGY</div>
           <select id="c-strat">
-            <option value="confluence">🔥 Confluence ELITE (ST+HA+CE)</option>
-            <option value="pro_elite">🚀 Pro ELITE (score+ST)</option>
+            <option value="confluence">🔥 Confluence ELITE</option>
+            <option value="pro_elite">🚀 Pro ELITE</option>
             <option value="supertrend">📈 SuperTrend Sèl</option>
             <option value="heikin_ashi">🕯 Heikin Ashi Sèl</option>
             <option value="chandelier">🔔 Chandelier Exit Sèl</option>
@@ -1867,16 +1769,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <div class="g2">
         <div class="iw"><div class="il">KONFIDANS MIN</div>
           <select id="c-conf">
-            <option value="0.60">60% (maksimòm siyal)</option>
-            <option value="0.65" selected>65% (rekòmande ★)</option>
-            <option value="0.70">70% (balans)</option>
-            <option value="0.75">75% (konsèvatif)</option>
-            <option value="0.80">80% (presiz)</option>
+            <option value="0.60">60%</option>
+            <option value="0.65" selected>65% ★</option>
+            <option value="0.70">70%</option>
+            <option value="0.75">75%</option>
+            <option value="0.80">80%</option>
           </select>
         </div>
         <div class="iw"><div class="il">MARTINGALE x</div>
           <select id="c-mart">
-            <option value="2" selected>x2 (Klasik)</option>
+            <option value="2" selected>x2</option>
             <option value="2.2">x2.2</option>
             <option value="2.5">x2.5</option>
             <option value="3">x3</option>
@@ -1884,8 +1786,8 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         </div>
       </div>
       <div class="g2">
-        <div class="iw"><div class="il">🎯 STOP PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"><div style="color:#00FF88;font-size:9px;margin-top:2px">0 = pa gen limit</div></div>
-        <div class="iw"><div class="il">🛑 STOP LOSS ($)</div><input id="c-loss" type="number" value="0" step="1" min="0"><div style="color:#FF3B6B;font-size:9px;margin-top:2px">REKÒMANDE: toujou mete!</div></div>
+        <div class="iw"><div class="il">🎯 STOP PROFIT ($)</div><input id="c-target" type="number" value="0" step="1" min="0"></div>
+        <div class="iw"><div class="il">🛑 STOP LOSS ($)</div><input id="c-loss" type="number" value="0" step="1" min="0"></div>
       </div>
       <div id="ctm"></div>
       <div style="display:flex;gap:10px">
@@ -1904,29 +1806,16 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
           <div class="stat"><div class="sl">P&L NET</div><div id="c-pnl" class="sv">+$0.00</div></div>
         </div>
       </div>
-      <div class="box" style="background:#00FF8808;border-color:#00FF8822">
-        <div class="bt" style="color:#00FF88">🧠 LOJIK SIYAL</div>
-        <div style="color:#4A7080;font-size:10px;line-height:2.1">
-          <span style="color:#00FF88">✓ SuperTrend:</span> ATR×3 — CALL/PUT klè<br>
-          <span style="color:#00FF88">✓ Heikin Ashi:</span> 5 bouji — trend konfime<br>
-          <span style="color:#00FF88">✓ Chandelier:</span> HH/LL — chanjman detekte<br>
-          <span style="color:#FFD600">⚠ 1-2 pèt:</span> Conf+2-4%, mise monte (martingale)<br>
-          <span style="color:#FF3B6B">🛑 3 pèt:</span> PÒZE — tann siyal bon, reset mise<br>
-          <span style="color:#00D4FF">✓ RANGING:</span> Trade si ST+HA dakò
-        </div>
-      </div>
     </div>
   </div>
 </div>
-
 <div id="pg-strategies" class="pg">
   <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px" id="sbts"></div>
   <div class="box" id="sdet"></div>
 </div>
-
 <div id="pg-backtest" class="pg">
   <div class="box">
-    <div class="bt">BACKTEST ENGINE (sou done Quotex)</div>
+    <div class="bt">BACKTEST ENGINE</div>
     <div class="g3">
       <div class="iw"><div class="il">AKTIF</div><input id="bt-sy" value="EURUSD_otc"></div>
       <div class="iw"><div class="il">BALANS ($)</div><input id="bt-bl" type="number" value="10000"></div>
@@ -1947,29 +1836,23 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
         <option value="rsi">📉 RSI</option>
       </select>
     </div>
-    <div style="color:#4A7080;font-size:10px;margin-bottom:10px">
-      ⚠️ Konekte kont Quotex ou nan Dashboard anvan ou fè backtest — bezwen done bouji.
-    </div>
     <div id="btm"></div>
     <button class="btn y" onclick="doBt()">▶ KÒMANSE BACKTEST</button>
     <div id="btr" style="margin-top:16px"></div>
   </div>
 </div>
-
 <div id="pg-trades" class="pg">
   <div class="box">
     <div class="bt" id="trtit">HISTOIRIK TRADES</div>
     <div id="trtbl"><div style="color:#3A6070;text-align:center;padding:40px">Pa gen trades ankò</div></div>
   </div>
 </div>
-
 <div id="pg-log" class="pg">
   <div class="box">
     <div class="bt">LOGS SISTEM</div>
     <div id="logs"></div>
   </div>
 </div>
-
 <div id="pg-admin" class="pg">
   <div class="stats">
     <div class="stat"><div class="sl">KÒD TOTAL</div><div class="sv" id="adm-total" style="color:#FFD600">—</div></div>
@@ -1980,7 +1863,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   </div>
   <div class="g2">
     <div class="box">
-      <div class="bt">➕ KREYE KÒD AKSÈ ($__SUB_PRICE__/mwa)</div>
+      <div class="bt">➕ KREYE KÒD AKSÈ</div>
       <div class="iw"><div class="il">KÒD</div>
         <input id="new-code" type="text" placeholder="BB-2026-XXXX" oninput="this.value=this.value.toUpperCase()">
       </div>
@@ -2028,26 +1911,15 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
     </div>
     <div id="adm-users-list"><div style="color:#3A6070;text-align:center;padding:20px">Klike REFRESH</div></div>
   </div>
-  <div class="box" style="background:#FFD60008;border-color:#FFD60022">
-    <div class="bt" style="color:#FFD600">📊 LEJANN BOUTON AKSYON ITILIZATÈ</div>
-    <div style="font-size:11px;color:#4A7080;line-height:2.0">
-      <span style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 8px">📊🗑</span> — Efase <b style="color:#FFD600">trades sèlman</b> (log konsève)<br>
-      <span style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 8px">🗑</span> — Efase <b style="color:#C8E8F0">TOUT</b> (trades + log + pnl reset)<br>
-      <span style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 8px">■ STOP</span> — Kanpe bot itilizatè a
-    </div>
-  </div>
-</div>
-
 </div>
 </div>
-
+</div>
 <script>
 const SESSION_KEY="bb_session_quotex_v2";
 function saveToken(t){try{localStorage.setItem(SESSION_KEY,t);}catch(e){}try{sessionStorage.setItem(SESSION_KEY,t);}catch(e){}try{const exp=new Date();exp.setDate(exp.getDate()+30);document.cookie=`${SESSION_KEY}=${t};expires=${exp.toUTCString()};path=/;SameSite=Lax`;}catch(e){}}
 function getStoredToken(){try{const t=localStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const t=sessionStorage.getItem(SESSION_KEY);if(t)return t;}catch(e){}try{const m=document.cookie.match(new RegExp("(^| )"+SESSION_KEY+"=([^;]+)"));if(m)return m[2];}catch(e){}return "";}
 function clearToken(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}try{sessionStorage.removeItem(SESSION_KEY);}catch(e){}try{document.cookie=`${SESSION_KEY}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;}catch(e){}}
 function updateAdminTab(isAdmin){const tab=document.getElementById("tab-admin");if(tab)tab.style.display=isAdmin?"block":"none";}
-
 async function checkLogin(){
   const token=getStoredToken();
   if(!token){showLogin("");return;}
@@ -2058,7 +1930,6 @@ async function checkLogin(){
     else{if(d.msg&&d.msg.includes("ekspire"))clearToken();showLogin(d.msg||"");}
   }catch(e){showLogin("");}
 }
-
 function showLogin(err=""){
   document.getElementById("login-page").style.display="flex";
   document.getElementById("app-page").style.display="none";
@@ -2070,7 +1941,6 @@ function showApp(msg){
   document.getElementById("app-page").style.display="block";
   document.getElementById("sub-info").textContent=msg||"";
 }
-
 async function doLogin(){
   const code=document.getElementById("login-code").value.trim().toUpperCase();
   if(!code){document.getElementById("login-err").innerHTML='<div class="al er">⚠ Mete kòd aksè ou</div>';return;}
@@ -2084,7 +1954,6 @@ async function doLogin(){
   btn.textContent="⚡ ANTRE";btn.disabled=false;
 }
 function doLogout(){clearToken();showLogin("Ou dekonekte.");}
-
 function sw(id,el){
   document.querySelectorAll(".pg").forEach(p=>p.classList.remove("on"));
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
@@ -2092,42 +1961,19 @@ function sw(id,el){
   el.classList.add("on");
 }
 function msg(id,txt,ok){document.getElementById(id).innerHTML=`<div class="al ${ok?"ok":"er"}">${txt}</div>`;}
-
 async function doConn(){
   const btn=event.target;btn.textContent="AP KONEKTE...";btn.disabled=true;
   msg("cm","⏳ Ap konekte ak Quotex — tann 30-60 segonn...","ok");
-  const body={
-    email:document.getElementById("q-email").value.trim(),
-    password:document.getElementById("q-pass").value.trim(),
-    is_demo:document.getElementById("q-demo").value==="true"
-  };
+  const body={email:document.getElementById("q-email").value.trim(),password:document.getElementById("q-pass").value.trim(),is_demo:document.getElementById("q-demo").value==="true"};
   try{
     const r=await fetch("/api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const d=await r.json();
-    if(d.ok){
-      msg("cm",`✅ Konekte (${d.mode}) | Balans reyèl: $${d.balance.toFixed(2)}`,"ok");
-      document.getElementById("cs").innerHTML=`<div class="al ok">✅ <b>Quotex ${d.mode}</b> | $${d.balance.toFixed(2)}</div>`;
-    }else{
-      msg("cm","✗ "+d.error,false);
-      document.getElementById("cs").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
-    }
+    if(d.ok){msg("cm",`✅ Konekte (${d.mode}) | Balans: $${d.balance.toFixed(2)}`,"ok");document.getElementById("cs").innerHTML=`<div class="al ok">✅ <b>Quotex ${d.mode}</b> | $${d.balance.toFixed(2)}</div>`;}
+    else{msg("cm","✗ "+d.error,false);document.getElementById("cs").innerHTML=`<div class="al er">✗ ${d.error}</div>`;}
   }catch(e){msg("cm","✗ "+e.message,false);}
   btn.textContent="⚡ KONEKTE";btn.disabled=false;
 }
-
-function getStartParams(){
-  return{
-    asset:document.getElementById("c-asset").value,
-    strategy:document.getElementById("c-strat").value,
-    lot:parseFloat(document.getElementById("c-lot").value),
-    duration:document.getElementById("c-duration").value,
-    min_conf:parseFloat(document.getElementById("c-conf").value),
-    martingale:parseFloat(document.getElementById("c-mart").value),
-    profit_target:parseFloat(document.getElementById("c-target").value||0),
-    loss_limit:parseFloat(document.getElementById("c-loss").value||0),
-  };
-}
-
+function getStartParams(){return{asset:document.getElementById("c-asset").value,strategy:document.getElementById("c-strat").value,lot:parseFloat(document.getElementById("c-lot").value),duration:document.getElementById("c-duration").value,min_conf:parseFloat(document.getElementById("c-conf").value),martingale:parseFloat(document.getElementById("c-mart").value),profit_target:parseFloat(document.getElementById("c-target").value||0),loss_limit:parseFloat(document.getElementById("c-loss").value||0)};}
 async function doStart(){
   const body=getStartParams();
   const r=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -2135,74 +1981,38 @@ async function doStart(){
   if(d.ok){msg("ctm","✓ BonheurBot Quotex démarre!","ok");document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else msg("ctm","✗ "+d.error,false);
 }
-async function doStop(){
-  await fetch("/api/stop",{method:"POST"});
-  msg("ctm","✓ Bot arrêté","ok");
-  document.getElementById("bs").style.display="inline-block";
-  document.getElementById("bx").style.display="none";
-}
-
+async function doStop(){await fetch("/api/stop",{method:"POST"});msg("ctm","✓ Bot arrêté","ok");document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
 const SI={
-  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(pwa 2.5x) + HeikinAshi(pwa 2.5x) + Chandelier(pwa 2.5x) + 11 strategies klasik. ADX≥12, 3 strat minimòm, RANGING oke si ST+HA dakò.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12","3 strat"]},
-  pro_elite:{l:"🚀 Pro ELITE",d:"Score 5.0/15 + ADX≥12 + SuperTrend bonus 2.0pts. Plis siyal, menm presizyon.",tags:["score 5/15","ADX≥12","ST bonus"]},
-  supertrend:{l:"📈 SuperTrend",d:"ATR × 3.0 multiplier. Siyal klè CALL/PUT. Travèse bann = siyal solid.",tags:["ATR×3","travèse=BUY","conf 75-92%"]},
-  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif menm direksyon = trend solid. Filtre bwi mache.",tags:["5 bouji","filtre bwi","conf 72-83%"]},
-  chandelier:{l:"🔔 Chandelier Exit",d:"Highest High - ATR×3 (long). Lowest Low + ATR×3 (short). Chanjman trend an tan reyèl.",tags:["HH-ATR×3","LL+ATR×3","conf 75-90%"]},
-  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa: EMA+RSI+MACD+BB+momentum+volatilite+position+trend.",tags:["8 faktè","score nòm","conf 68-92%"]},
-  smc:{l:"🏛 SMC",d:"Break of Structure + swing high/low + EMA50 filtre.",tags:["BOS","swing","EMA50","conf 84%"]},
-  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13 + RSI 9. Rapid pou 30s/1m.",tags:["EMA 5/13","RSI 9","rapid"]},
-  rsi:{l:"📉 RSI",d:"RSI <30/>70 + EMA50 filtre.",tags:["RSI 14","OB 70","OS 30","EMA50"]},
-  ema:{l:"📊 EMA Classic",d:"EMA 9/21 crossover + RSI filtre.",tags:["EMA 9/21","RSI"]},
+  confluence:{l:"🔥 Confluence ELITE",d:"SuperTrend(2.5x)+HeikinAshi(2.5x)+Chandelier(2.5x)+11 strategies. ADX≥12, 3 strat min.",tags:["SuperTrend","HeikinAshi","Chandelier","ADX≥12"]},
+  pro_elite:{l:"🚀 Pro ELITE",d:"Score 5/15+ADX≥12+SuperTrend bonus.",tags:["score 5/15","ADX≥12"]},
+  supertrend:{l:"📈 SuperTrend",d:"ATR×3. CALL/PUT klè.",tags:["ATR×3","conf 75-92%"]},
+  heikin_ashi:{l:"🕯 Heikin Ashi",d:"5 bouji konsekitif.",tags:["5 bouji","conf 72-83%"]},
+  chandelier:{l:"🔔 Chandelier Exit",d:"HH-ATR×3 / LL+ATR×3.",tags:["HH/LL","conf 75-90%"]},
+  ai:{l:"🤖 AI Score",d:"8 faktè ak pwa.",tags:["8 faktè","conf 68-92%"]},
+  smc:{l:"🏛 SMC",d:"Break of Structure+swing+EMA50.",tags:["BOS","swing","EMA50"]},
+  scalping_pro:{l:"⚡ Scalping",d:"EMA 5/13+RSI 9.",tags:["EMA 5/13","RSI 9"]},
+  rsi:{l:"📉 RSI",d:"RSI <30/>70+EMA50.",tags:["RSI 14","EMA50"]},
+  ema:{l:"📊 EMA Classic",d:"EMA 9/21 crossover.",tags:["EMA 9/21"]},
 };
 let sel="confluence";
 const sb=document.getElementById("sbts");
-Object.keys(SI).forEach(k=>{
-  const b=document.createElement("button");
-  b.className="btn"+(k==sel?" b":"");
-  b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";
-  b.textContent=SI[k].l;
-  b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88";};
-  sb.appendChild(b);
-});
-function renderS(){
-  const s=SI[sel];
-  document.getElementById("sdet").innerHTML=`<div class="bt">${s.l}</div><div style="color:#C8E8F0;line-height:1.8;margin-bottom:12px">${s.d}</div><div style="display:flex;gap:8px;flex-wrap:wrap">${s.tags.map(t=>`<span class="tag" style="border-color:#FFD60044;color:#FFD600">${t}</span>`).join("")}</div>`;
-}
+Object.keys(SI).forEach(k=>{const b=document.createElement("button");b.className="btn"+(k==sel?" b":"");b.style.cssText="padding:5px 12px;font-size:11px;margin-bottom:4px";b.textContent=SI[k].l;b.onclick=()=>{sel=k;renderS();sb.querySelectorAll("button").forEach(x=>x.style.borderColor="#0D2233");b.style.borderColor="#00FF88";};sb.appendChild(b);});
+function renderS(){const s=SI[sel];document.getElementById("sdet").innerHTML=`<div class="bt">${s.l}</div><div style="color:#C8E8F0;line-height:1.8;margin-bottom:12px">${s.d}</div><div style="display:flex;gap:8px;flex-wrap:wrap">${s.tags.map(t=>`<span class="tag" style="border-color:#FFD60044;color:#FFD600">${t}</span>`).join("")}</div>`;}
 renderS();
-
 async function doBt(){
   const btn=event.target;btn.textContent="⏳ AP KALKILE...";btn.disabled=true;
-  document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest — tann 15-30 segonn...</div>`;
+  document.getElementById("btm").innerHTML=`<div class="al in">⏳ Ap fè backtest...</div>`;
   const body={asset:document.getElementById("bt-sy").value,strategy:document.getElementById("bt-st").value,balance:parseFloat(document.getElementById("bt-bl").value),lot:parseFloat(document.getElementById("bt-lt").value),sl:parseFloat(document.getElementById("bt-sl").value),tp:parseFloat(document.getElementById("bt-tp").value)};
   try{
     const r=await fetch("/api/backtest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const d=await r.json();
     document.getElementById("btm").innerHTML="";
-    if(d.ok){
-      const v=d.result;const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";
-      document.getElementById("btr").innerHTML=`<div class="stats">
-        <div class="stat"><div class="sl">NET P&L</div><div class="sv" style="color:${c}">$${v.net_pnl}</div></div>
-        <div class="stat"><div class="sl">RETOU</div><div class="sv" style="color:${c}">${v.return_pct}%</div></div>
-        <div class="stat"><div class="sl">WIN RATE</div><div class="sv" style="color:#00FF88">${v.win_rate}%</div></div>
-        <div class="stat"><div class="sl">TRADES</div><div class="sv" style="color:#FFD600">${v.trades}</div></div>
-        <div class="stat"><div class="sl">MAX DD</div><div class="sv" style="color:#FF3B6B">${v.max_dd}%</div></div>
-        <div class="stat"><div class="sl">SHARPE</div><div class="sv" style="color:#00D4FF">${v.sharpe}</div></div>
-        <div class="stat"><div class="sl">PROFIT FACTOR</div><div class="sv" style="color:#FFD600">${v.pf}</div></div>
-      </div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;
-    }else document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
+    if(d.ok){const v=d.result;const c=v.net_pnl>=0?"#00FF88":"#FF3B6B";document.getElementById("btr").innerHTML=`<div class="stats"><div class="stat"><div class="sl">NET P&L</div><div class="sv" style="color:${c}">$${v.net_pnl}</div></div><div class="stat"><div class="sl">WIN RATE</div><div class="sv" style="color:#00FF88">${v.win_rate}%</div></div><div class="stat"><div class="sl">TRADES</div><div class="sv" style="color:#FFD600">${v.trades}</div></div><div class="stat"><div class="sl">MAX DD</div><div class="sv" style="color:#FF3B6B">${v.max_dd}%</div></div><div class="stat"><div class="sl">SHARPE</div><div class="sv" style="color:#00D4FF">${v.sharpe}</div></div><div class="stat"><div class="sl">P.FACTOR</div><div class="sv" style="color:#FFD600">${v.pf}</div></div></div>${v.equity&&v.equity.length>2?drawC(v.equity):""}`;}
+    else document.getElementById("btm").innerHTML=`<div class="al er">✗ ${d.error}</div>`;
   }catch(e){document.getElementById("btm").innerHTML=`<div class="al er">✗ ${e.message}</div>`;}
   btn.textContent="▶ KÒMANSE BACKTEST";btn.disabled=false;
 }
-
-function drawC(vals){
-  const W=500,H=110,p=8;
-  const mn=Math.min(...vals),mx=Math.max(...vals),rng=mx-mn||1;
-  const pts=vals.map((v,i)=>`${p+(i/(vals.length-1))*(W-p*2)},${H-p-((v-mn)/rng)*(H-p*2)}`).join(" ");
-  const area=`${p},${H} ${pts} ${W-p},${H}`;
-  const col=vals[vals.length-1]>=vals[0]?"#00FF88":"#FF3B6B";
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${area}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;
-}
-
+function drawC(vals){const W=500,H=110,p=8;const mn=Math.min(...vals),mx=Math.max(...vals),rng=mx-mn||1;const pts=vals.map((v,i)=>`${p+(i/(vals.length-1))*(W-p*2)},${H-p-((v-mn)/rng)*(H-p*2)}`).join(" ");const area=`${p},${H} ${pts} ${W-p},${H}`;const col=vals[vals.length-1]>=vals[0]?"#00FF88":"#FF3B6B";return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;margin-top:12px"><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity=".3"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs><polygon points="${area}" fill="url(#cg)"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5"/></svg>`;}
 function upd(d){
   const col=d.pnl>=0?"#00FF88":"#FF3B6B";const sign=d.pnl>=0?"+":"";
   document.getElementById("hbal").textContent="$"+d.balance.toFixed(2);
@@ -2232,96 +2042,26 @@ function upd(d){
   document.getElementById("c-pnl").style.color=col;
   if(d.running){document.getElementById("bs").style.display="none";document.getElementById("bx").style.display="inline-block";}
   else{document.getElementById("bs").style.display="inline-block";document.getElementById("bx").style.display="none";}
-  if(d.trades.length>1){
-    let cum=0;
-    const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});
-    const svg=document.getElementById("chart");
-    const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;
-    const ns=tmp.firstChild;while(svg.firstChild)svg.removeChild(svg.firstChild);while(ns.firstChild)svg.appendChild(ns.firstChild);
-  }
-  if(d.trades.length){
-    document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;
-    document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Aktif</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.asset}</td><td><span class="tag ${t.side=="BUY"?"tb":"ts"}">${t.side=="BUY"?"CALL":"PUT"}</span></td><td>${t.entry}</td><td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;
-  }
+  if(d.trades.length>1){let cum=0;const eq=d.trades.slice().reverse().map(t=>{cum+=t.pnl||0;return cum;});const svg=document.getElementById("chart");const ch=drawC(eq);const tmp=document.createElement("div");tmp.innerHTML=ch;const ns=tmp.firstChild;while(svg.firstChild)svg.removeChild(svg.firstChild);while(ns.firstChild)svg.appendChild(ns.firstChild);}
+  if(d.trades.length){document.getElementById("trtit").textContent=`HISTOIRIK TRADES (${d.trades.length})`;document.getElementById("trtbl").innerHTML=`<table><tr><th>#</th><th>Lè</th><th>Aktif</th><th>Side</th><th>Antre</th><th>Regime</th><th>Mise</th><th>Conf</th><th>P&L</th><th>Estati</th></tr>${d.trades.map(t=>`<tr><td style="color:#4A7080">${t.id}</td><td style="color:#4A7080">${t.time}</td><td style="font-weight:700">${t.asset}</td><td><span class="tag ${t.side=="BUY"?"tb":"ts"}">${t.side=="BUY"?"CALL":"PUT"}</span></td><td>${t.entry}</td><td style="color:#4A7080;font-size:10px">${t.regime||"—"}</td><td style="color:#FFD600">$${t.stake||"—"}</td><td style="color:#FFD600">${t.conf}</td><td style="color:${t.pnl>=0?"#00FF88":"#FF3B6B"};font-weight:700">${t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td><td><span class="tag ${t.status=="won"?"tb":"ts"}">${t.status||"—"}</span></td></tr>`).join("")}</table>`;}
   if(d.log.length){document.getElementById("logs").innerHTML=d.log.map(l=>`<div class="le"><span class="lt">${l.time}</span><span class="l${l.level[0]}">${l.msg}</span></div>`).join("");}
 }
-
 async function poll(){try{const r=await fetch("/api/status");const d=await r.json();upd(d);}catch(e){}setTimeout(poll,3000);}
-
 async function admRefresh(){
   const token=getStoredToken();if(!token){alert("Pa konekte!");return;}
-  try{
-    const r=await fetch("/api/admin/codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
-    const d=await r.json();
-    if(d.ok){
-      const sc={"ADM":"#00D4FF","AKTIF":"#00FF88","ITILIZE":"#FF3B6B","EKSPIRE":"#4A7080"};
-      document.getElementById("adm-total").textContent=d.codes.length;
-      document.getElementById("adm-aktif").textContent=d.codes.filter(c=>c.status==="AKTIF").length;
-      document.getElementById("adm-used").textContent=d.codes.filter(c=>c.status==="ITILIZE").length;
-      document.getElementById("adm-sess").textContent=d.total_sessions;
-      document.getElementById("adm-codes-list").innerHTML=`<table><tr><th>KÒD</th><th>STATUS</th><th>RETE</th><th>TIP</th><th>AKSYON</th></tr>${d.codes.map(c=>`<tr><td style="font-weight:700">${c.code}</td><td><span class="tag" style="color:${sc[c.status]||"#4A7080"};border-color:${sc[c.status]||"#4A7080"}44">${c.status}</span></td><td style="color:#4A7080">${c.remaining}</td><td>${c.is_adm?"👑":"👤"}</td><td style="display:flex;gap:4px">${c.status!=="ADM"?`<button onclick="admReset('${c.code}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">↺</button>`:""} ${c.code!=="BONHEURWIIN"?`<button onclick="admRevoke('${c.code}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕</button>`:""}</td></tr>`).join("")}</table>`;
-    }
-  }catch(e){console.error(e);}
-  try{
-    const r2=await fetch("/api/admin/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
-    const d2=await r2.json();
-    if(d2.ok){
-      document.getElementById("adm-users-count").textContent=d2.total;
-      document.getElementById("adm-users-list").innerHTML=d2.total===0
-        ?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>'
-        :`<table><tr><th>UID</th><th>AKTIF</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr>
-          <td style="color:#4A7080;font-size:10px">${u.uid}</td>
-          <td style="font-weight:700">${u.asset||"—"}</td>
-          <td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td>
-          <td style="color:#00D4FF">$${u.balance}</td>
-          <td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td>
-          <td>${u.trades}</td>
-          <td style="display:flex;gap:4px;align-items:center">
-            ${u.running?`<button onclick="admStopUser('${u.uid}')" title="Kanpe bot" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}
-            <button onclick="admClearTrades('${u.uid}')" title="Efase trades sèlman" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button>
-            <button onclick="admClearUser('${u.uid}')" title="Efase tout" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button>
-          </td>
-        </tr>`).join("")}</table>`;
-    }
-  }catch(e){}
-  try{
-    const r3=await fetch("/api/admin/sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});
-    const d3=await r3.json();
-    if(d3.ok){document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>':d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between"><span style="color:#4A7080">${s.token}</span><span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span><span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span></div>`).join("");}
-  }catch(e){}
+  try{const r=await fetch("/api/admin/codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();if(d.ok){const sc={"ADM":"#00D4FF","AKTIF":"#00FF88","ITILIZE":"#FF3B6B","EKSPIRE":"#4A7080"};document.getElementById("adm-total").textContent=d.codes.length;document.getElementById("adm-aktif").textContent=d.codes.filter(c=>c.status==="AKTIF").length;document.getElementById("adm-used").textContent=d.codes.filter(c=>c.status==="ITILIZE").length;document.getElementById("adm-sess").textContent=d.total_sessions;document.getElementById("adm-codes-list").innerHTML=`<table><tr><th>KÒD</th><th>STATUS</th><th>RETE</th><th>TIP</th><th>AKSYON</th></tr>${d.codes.map(c=>`<tr><td style="font-weight:700">${c.code}</td><td><span class="tag" style="color:${sc[c.status]||"#4A7080"};border-color:${sc[c.status]||"#4A7080"}44">${c.status}</span></td><td style="color:#4A7080">${c.remaining}</td><td>${c.is_adm?"👑":"👤"}</td><td style="display:flex;gap:4px">${c.status!=="ADM"?`<button onclick="admReset('${c.code}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">↺</button>`:""} ${c.code!=="BONHEURWIIN"?`<button onclick="admRevoke('${c.code}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕</button>`:""}</td></tr>`).join("")}</table>`;}}catch(e){console.error(e);}
+  try{const r2=await fetch("/api/admin/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d2=await r2.json();if(d2.ok){document.getElementById("adm-users-count").textContent=d2.total;document.getElementById("adm-users-list").innerHTML=d2.total===0?'<div style="color:#3A6070;text-align:center;padding:20px">Pa gen itilizatè</div>':`<table><tr><th>UID</th><th>AKTIF</th><th>BOT</th><th>BALANS</th><th>P&L</th><th>TRADES</th><th>AKSYON</th></tr>${d2.users.map(u=>`<tr><td style="color:#4A7080;font-size:10px">${u.uid}</td><td style="font-weight:700">${u.asset||"—"}</td><td><span class="tag ${u.running?"tb":"tg"}">${u.running?"LIVE":"IDLE"}</span></td><td style="color:#00D4FF">$${u.balance}</td><td style="color:${u.pnl>=0?"#00FF88":"#FF3B6B"}">${u.pnl>=0?"+":""}$${u.pnl}</td><td>${u.trades}</td><td style="display:flex;gap:4px">${u.running?`<button onclick="admStopUser('${u.uid}')" style="background:transparent;border:1px solid #FF3B6B44;color:#FF3B6B;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">■</button>`:""}<button onclick="admClearTrades('${u.uid}')" style="background:transparent;border:1px solid #FFD60044;color:#FFD600;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">📊🗑</button><button onclick="admClearUser('${u.uid}')" style="background:transparent;border:1px solid #4A708044;color:#4A7080;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">🗑</button></td></tr>`).join("")}</table>`;}}catch(e){}
+  try{const r3=await fetch("/api/admin/sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d3=await r3.json();if(d3.ok){document.getElementById("adm-sessions-list").innerHTML=d3.sessions.length===0?'<div style="text-align:center;padding:10px">Pa gen sesyon</div>':d3.sessions.map(s=>`<div style="padding:5px 0;border-bottom:1px solid #0D2233;display:flex;justify-content:space-between"><span style="color:#4A7080">${s.token}</span><span style="color:${s.is_admin?"#00D4FF":"#4A7080"}">${s.is_admin?"👑":"👤"}</span><span style="color:${s.active?"#00FF88":"#FF3B6B"}">${s.days_left} jou</span></div>`).join("");}}catch(e){}
 }
-
-async function admAddCode(){
-  const token=getStoredToken();const code=document.getElementById("new-code").value.trim().toUpperCase();
-  if(!code){document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>';return;}
-  const isAdm=document.getElementById("new-code-type").value==="adm";
-  const r=await fetch("/api/admin/add_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code,is_adm:isAdm})});
-  const d=await r.json();
-  document.getElementById("add-code-msg").innerHTML=`<div class="al ${d.ok?"ok":"er"}">${d.ok?d.msg:d.error}</div>`;
-  if(d.ok){document.getElementById("new-code").value="";admRefresh();}
-}
+async function admAddCode(){const token=getStoredToken();const code=document.getElementById("new-code").value.trim().toUpperCase();if(!code){document.getElementById("add-code-msg").innerHTML='<div class="al er">Mete yon kòd</div>';return;}const isAdm=document.getElementById("new-code-type").value==="adm";const r=await fetch("/api/admin/add_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code,is_adm:isAdm})});const d=await r.json();document.getElementById("add-code-msg").innerHTML=`<div class="al ${d.ok?"ok":"er"}">${d.ok?d.msg:d.error}</div>`;if(d.ok){document.getElementById("new-code").value="";admRefresh();}}
 async function admRevoke(code){if(!confirm(`Revoke ${code}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/revoke_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admReset(code){const token=getStoredToken();const r=await fetch("/api/admin/reset_code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,code})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admStopUser(uid){if(!confirm(`Kanpe bot ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/stop_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 async function admCleanSessions(){const token=getStoredToken();const r=await fetch("/api/admin/clean_sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
-
-async function admClearUser(uid){
-  if(!confirm(`Efase TOUT istorik ${uid}?`))return;
-  const token=getStoredToken();
-  const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();
-}
-
-async function admClearTrades(uid){
-  if(!confirm(`Efase trades sèlman pou ${uid}?`))return;
-  const token=getStoredToken();
-  const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});
-  const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();
-}
-
+async function admClearUser(uid){if(!confirm(`Efase TOUT istorik ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_user",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
+async function admClearTrades(uid){if(!confirm(`Efase trades sèlman pou ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
 function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}
-
 checkLogin();
 </script>
 </body>

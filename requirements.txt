@@ -1,6 +1,5 @@
-cat > /home/claude/requirements.txt << 'EOF'
 flask
-gunicorn
-pyquotex @ git+https://github.com/cleitonleonel/pyquotex.git
-EOF
-echo "done"
+websocket-client
+python-binance
+pandas
+numpy

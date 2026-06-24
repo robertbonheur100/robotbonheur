@@ -2125,6 +2125,7 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <button class="tab" onclick="sw('backtest',this)">BACKTEST</button>
   <button class="tab" onclick="sw('trades',this)">TRADES</button>
   <button class="tab" onclick="sw('log',this)">LOGS</button>
+ <button class="tab" onclick="sw('spin',this)">🎰 SPIN</button>
   <button class="tab" id="tab-admin" style="display:none;color:#FFD600" onclick="sw('admin',this)">⚙ ADMIN</button>
 </div>
 
@@ -2453,6 +2454,46 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
       <button class="btn b" style="padding:4px 12px;font-size:10px" onclick="admRefresh()">🔄 REFRESH</button>
     </div>
     <div id="adm-users-list"></div>
+  </div>
+</div>
+
+<!-- SPIN -->
+<div id="pg-spin" class="pg">
+  <div style="max-width:520px;margin:0 auto">
+    <div class="box" style="text-align:center">
+      <div class="bt" style="text-align:center;font-size:14px;letter-spacing:3px">🎰 LUCKY SPIN</div>
+      <div style="color:#4A7080;font-size:11px;margin-bottom:16px">Stake: <b style="color:#FFD600">$1.00 USD</b> | Chans genyen: <b style="color:#00FF88">~90%</b></div>
+
+      <!-- Balans -->
+      <div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:10px 18px;display:inline-block;margin-bottom:18px">
+        <span style="color:#4A7080;font-size:10px;letter-spacing:1px">BALANS AKTYÈL: </span>
+        <span id="spin-balance" style="color:#00D4FF;font-weight:700;font-size:16px">$0.00</span>
+      </div>
+
+      <!-- Wheel Container -->
+      <div style="position:relative;width:320px;height:320px;margin:0 auto 20px">
+        <!-- Pointer -->
+        <div style="position:absolute;top:-18px;left:50%;transform:translateX(-50%);z-index:10;font-size:28px;filter:drop-shadow(0 0 8px #FFD600)">▼</div>
+        <!-- Canvas -->
+        <canvas id="spinWheel" width="320" height="320" style="border-radius:50%;box-shadow:0 0 30px #00FF8833,0 0 60px #00D4FF22"></canvas>
+      </div>
+
+      <!-- Result -->
+      <div id="spin-result-box" style="display:none;margin-bottom:16px">
+        <div id="spin-result-msg" style="font-size:18px;font-weight:700;padding:14px 20px;border-radius:10px;display:inline-block"></div>
+      </div>
+
+      <!-- GO Button -->
+      <div>
+        <button id="spin-go-btn" class="btn" onclick="doSpin()"
+          style="font-size:16px;padding:14px 48px;letter-spacing:3px;border-width:2px;background:#00FF8815">
+          🎰 GO
+        </button>
+      </div>
+
+      <!-- History -->
+      <div id="spin-history" style="margin-top:20px;text-align:left"></div>
+    </div>
   </div>
 </div>
 

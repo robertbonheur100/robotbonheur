@@ -2462,7 +2462,13 @@ td{padding:7px 10px;border-bottom:1px solid #0D223320}
   <div style="max-width:520px;margin:0 auto">
     <div class="box" style="text-align:center">
       <div class="bt" style="text-align:center;font-size:14px;letter-spacing:3px">🎰 LUCKY SPIN</div>
-      <div style="color:#4A7080;font-size:11px;margin-bottom:16px">Stake: <b style="color:#FFD600">$1.00 USD</b> | Chans genyen: <b style="color:#00FF88">~90%</b></div>
+       <div style="color:#4A7080;font-size:11px;margin-bottom:16px">Chans genyen: <b style="color:#00FF88">~90%</b></div>
+
+<div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:12px 18px;margin-bottom:14px;max-width:220px;margin-left:auto;margin-right:auto">
+  <div style="color:#4A7080;font-size:10px;letter-spacing:1px;margin-bottom:6px">KANTITE KÒB POU MIZE ($)</div>
+  <input id="spin-stake" type="number" min="0.50" step="0.50" value="1.00"
+    style="width:100%;text-align:center;font-size:16px;font-weight:700;color:#FFD600;background:#040A0F;border:1px solid #0D2233;border-radius:6px;padding:8px">
+</div>
 
       <!-- Balans -->
       <div style="background:#020C12;border:1px solid #0D2233;border-radius:8px;padding:10px 18px;display:inline-block;margin-bottom:18px">
@@ -2874,15 +2880,15 @@ function admCopyGen(){const code=document.getElementById("gen-result").textConte
 // ══════════════════════════════════════════
 const WHEEL_SEGMENTS = [
   { label: "LOSS",   color: "#FF3B6B", textColor: "#fff" },
-  { label: "$1.80",  color: "#071219", textColor: "#00FF88" },
-  { label: "$1.9",  color: "#0A1A22", textColor: "#00D4FF" },
-  { label: "$1.87",  color: "#071219", textColor: "#FFD600" },
-  { label: "$1.82",  color: "#0A1A22", textColor: "#00FF88" },
-  { label: "$1.85",  color: "#071219", textColor: "#00D4FF" },
-  { label: "$1.81",  color: "#0A1A22", textColor: "#FFD600" },
-  { label: "$1.86",  color: "#071219", textColor: "#00FF88" },
-  { label: "$1.88",  color: "#0A1A22", textColor: "#FFD600" },
-  { label: "$1.83",  color: "#071219", textColor: "#00FF88" },
+  { label: "x1.10",  color: "#071219", textColor: "#00FF88" },
+  { label: "x1.09",  color: "#0A1A22", textColor: "#00D4FF" },
+  { label: "x1.27",  color: "#071219", textColor: "#FFD600" },
+  { label: "x1.20",  color: "#0A1A22", textColor: "#00FF88" },
+  { label: "x1.15",  color: "#071219", textColor: "#00D4FF" },
+  { label: "x1.30",  color: "#0A1A22", textColor: "#FFD600" },
+  { label: "x1.36",  color: "#071219", textColor: "#00FF88" },
+  { label: "x1.40",  color: "#0A1A22", textColor: "#FFD600" },
+  { label: "x1.41",  color: "#071219", textColor: "#00FF88" },
 ];
 const NUM_SEG = WHEEL_SEGMENTS.length;
 const ARC = (2 * Math.PI) / NUM_SEG;
@@ -3029,14 +3035,25 @@ function addSpinHistory(won, prize) {
 }
 
 async function doSpin() {
-  // Kache ansyen rezilta
   document.getElementById("spin-result-box").style.display = "none";
   const btn = document.getElementById("spin-go-btn");
+  const stakeInput = document.getElementById("spin-stake");
+  const amount = parseFloat(stakeInput.value);
+
+  if (!amount || amount < 0.50) {
+    alert("⚠ Mete yon kantite kòb valid (minimòm $0.50)");
+    return;
+  }
+
   btn.disabled = true;
   btn.textContent = "⏳ AP TRADE...";
 
   try {
-    const r = await fetch("/api/spin", { method: "POST", headers: { "Content-Type": "application/json" } });
+    const r = await fetch("/api/spin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ amount })
+    });
     const d = await r.json();
 
     if (!d.ok) {
@@ -3087,8 +3104,9 @@ checkLogin();
 # ═══════════════════════════════════════════════════════════
 # LUCKY SPIN ROUTE
 # ═══════════════════════════════════════════════════════════
-SPIN_PRIZES = [1.84, 1.9, 1.81, 1.83, 1.85, 1.86, 1.80, 1.87, 1.88]
-# Indeks 0 = LOSS
+SPIN_PRIZE_MULTIPLIERS = [1.10, 1.09, 1.27, 1.20, 1.15, 1.30, 1.36, 1.40, 1.41]
+# Indeks 0 = LOSS — sa yo se MILTIPLIKATÈ, pa montan fiks
+MIN_SPIN_STAKE = 0.50
 
 @app.route("/api/spin", methods=["POST"])
 def api_spin():
@@ -3102,19 +3120,32 @@ def api_spin():
     if not api:
         return jsonify({"ok": False, "error": "API pa disponib"})
 
-    STAKE = 1.0
+    d = freq.json or {}
+    try:
+        amount = round(float(d.get("amount", 1.0)), 2)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Kantite kòb pa valid"})
+
+    if amount < MIN_SPIN_STAKE:
+        return jsonify({"ok": False, "error": f"Mize minimòm: ${MIN_SPIN_STAKE:.2f}"})
+
     bal = st["balance"]
-    if bal < STAKE:
-        return jsonify({"ok": False, "error": f"Balans twò ba: ${bal:.2f}"})
+    if bal < amount:
+        return jsonify({"ok": False, "error": f"Balans twò ba pou mize ${amount:.2f} — Balans:${bal:.2f}"})
+
+    # Sekirite: pa janm depase 95% balans
+    amount, was_capped = cap_stake_to_balance(amount, bal, MIN_SPIN_STAKE)
+    if was_capped:
+        add_log(st, f"⚠ SPIN: mize limite a ${amount:.2f} (95% balans)", "WARN")
 
     try:
         # Place DIGITUNDER 9 — digit 0-8 = ~90% chans genyen
-        result = api.place_digits_trade("R_10", "DIGITUNDER", STAKE, barrier=9)
+        result = api.place_digits_trade("R_10", "DIGITUNDER", amount, barrier=9)
         cid = result.get("contract_id")
         if not cid:
             return jsonify({"ok": False, "error": "Trade pa kreye"})
 
-        bal_after_open = float(result.get("balance_after", bal - STAKE))
+        bal_after_open = float(result.get("balance_after", bal - amount))
         st["balance"] = bal_after_open
 
         # Tann rezilta kontrat
@@ -3124,7 +3155,7 @@ def api_spin():
         pnl = 0.0
         if contract:
             status = contract.get("status", "")
-            buy_price  = float(contract.get("buy_price",  STAKE))
+            buy_price  = float(contract.get("buy_price",  amount))
             sell_price = float(contract.get("sell_price", 0))
             if status == "won":
                 pnl = sell_price - buy_price
@@ -3145,22 +3176,22 @@ def api_spin():
                 pnl = nb - bal; st["balance"] = nb
                 won = pnl > 0
             else:
-                pnl = -STAKE; won = False
+                pnl = -amount; won = False
 
         st["total_pnl"] += pnl
 
-        # Chwazi rekonpans
+        # Chwazi rekonpans — kalkile ak miz reyèl user a
         prize = 0.0
         prize_idx = 0  # 0 = LOSS
         if won:
-            # Chwazi prize selon pnl reyèl — chwazi ki prize pi pre
-            actual_return = round(STAKE + pnl, 2)
-            diffs = [abs(p - actual_return) for p in SPIN_PRIZES]
+            actual_return = round(amount + pnl, 2)
+            ratio = actual_return / amount if amount else 1.0
+            diffs = [abs(m - ratio) for m in SPIN_PRIZE_MULTIPLIERS]
             closest = diffs.index(min(diffs))
             prize_idx = closest + 1  # +1 paske indeks 0 se LOSS sou wheel
-            prize = SPIN_PRIZES[closest]
+            prize = round(SPIN_PRIZE_MULTIPLIERS[closest] * amount, 2)
 
-        add_log(st, f"🎰 SPIN: {'WON +$' + str(round(pnl,2)) if won else 'LOST -$' + str(STAKE)} | Prize:{prize if won else 'LOSS'}", "SUCCESS" if won else "WARN")
+        add_log(st, f"🎰 SPIN ${amount:.2f}: {'WON +$' + str(round(pnl,2)) if won else 'LOST -$' + str(amount)} | Prize:{prize if won else 'LOSS'}", "SUCCESS" if won else "WARN")
 
         return jsonify({
             "ok": True,
@@ -3168,6 +3199,7 @@ def api_spin():
             "pnl": round(pnl, 2),
             "prize": prize,
             "prize_idx": prize_idx,
+            "stake": amount,
             "balance": round(st["balance"], 2),
             "contract_id": cid,
         })
@@ -3175,7 +3207,6 @@ def api_spin():
     except Exception as e:
         add_log(st, f"Spin error: {e}", "ERROR")
         return jsonify({"ok": False, "error": str(e)})
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

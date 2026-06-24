@@ -90,7 +90,7 @@ def cap_stake_to_balance(stake: float, balance: float, min_stake: float = 0.50) 
 
 ACCESS_CODES = {
     "BONHEURWIIN": {"created_at": None, "used": False, "is_adm": True},
-    "HJKy8kFD":    {"created_at": time.time(), "used": False, "is_adm": False},
+    "HGFJMB":    {"created_at": time.time(), "used": False, "is_adm": False},
     "GHt3hjI6":    {"created_at": time.time(), "used": False, "is_adm": False},
     "3KMM-9X":     {"created_at": time.time(), "used": False, "is_adm": False},
 }
@@ -2874,15 +2874,15 @@ function admCopyGen(){const code=document.getElementById("gen-result").textConte
 // ══════════════════════════════════════════
 const WHEEL_SEGMENTS = [
   { label: "LOSS",   color: "#FF3B6B", textColor: "#fff" },
-  { label: "$1.10",  color: "#071219", textColor: "#00FF88" },
-  { label: "$1.09",  color: "#0A1A22", textColor: "#00D4FF" },
-  { label: "$1.27",  color: "#071219", textColor: "#FFD600" },
-  { label: "$1.20",  color: "#0A1A22", textColor: "#00FF88" },
-  { label: "$1.15",  color: "#071219", textColor: "#00D4FF" },
-  { label: "$1.30",  color: "#0A1A22", textColor: "#FFD600" },
-  { label: "$1.36",  color: "#071219", textColor: "#00FF88" },
-  { label: "$1.40",  color: "#0A1A22", textColor: "#FFD600" },
-  { label: "$1.41",  color: "#071219", textColor: "#00FF88" },
+  { label: "$1.80",  color: "#071219", textColor: "#00FF88" },
+  { label: "$1.9",  color: "#0A1A22", textColor: "#00D4FF" },
+  { label: "$1.87",  color: "#071219", textColor: "#FFD600" },
+  { label: "$1.82",  color: "#0A1A22", textColor: "#00FF88" },
+  { label: "$1.85",  color: "#071219", textColor: "#00D4FF" },
+  { label: "$1.81",  color: "#0A1A22", textColor: "#FFD600" },
+  { label: "$1.86",  color: "#071219", textColor: "#00FF88" },
+  { label: "$1.88",  color: "#0A1A22", textColor: "#FFD600" },
+  { label: "$1.83",  color: "#071219", textColor: "#00FF88" },
 ];
 const NUM_SEG = WHEEL_SEGMENTS.length;
 const ARC = (2 * Math.PI) / NUM_SEG;
@@ -3087,7 +3087,7 @@ checkLogin();
 # ═══════════════════════════════════════════════════════════
 # LUCKY SPIN ROUTE
 # ═══════════════════════════════════════════════════════════
-SPIN_PRIZES = [1.10, 1.09, 1.27, 1.20, 1.15, 1.30, 1.36, 1.40, 1.41]
+SPIN_PRIZES = [1.84, 1.9, 1.81, 1.83, 1.85, 1.86, 1.80, 1.87, 1.88]
 # Indeks 0 = LOSS
 
 @app.route("/api/spin", methods=["POST"])

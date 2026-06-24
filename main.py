@@ -2869,10 +2869,313 @@ async function admCleanSessions(){const token=getStoredToken();const r=await fet
 async function admClearTrades(uid){if(!confirm(`Efase trades ${uid}?`))return;const token=getStoredToken();const r=await fetch("/api/admin/clear_trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin_token:token,uid})});const d=await r.json();alert(d.ok?d.msg:d.error);if(d.ok)admRefresh();}
 function genCode(len){const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let result="";for(let i=0;i<len;i++){if(i>0&&i%4===0)result+="-";result+=chars[Math.floor(Math.random()*chars.length)];}document.getElementById("gen-result").textContent=result;document.getElementById("gen-copy-btn").style.display="inline-block";document.getElementById("new-code").value=result;}
 function admCopyGen(){const code=document.getElementById("gen-result").textContent;navigator.clipboard.writeText(code).catch(()=>{});admAddCode();}
+// ══════════════════════════════════════════
+// LUCKY SPIN WHEEL
+// ══════════════════════════════════════════
+const WHEEL_SEGMENTS = [
+  { label: "LOSS",   color: "#FF3B6B", textColor: "#fff" },
+  { label: "$1.10",  color: "#071219", textColor: "#00FF88" },
+  { label: "$1.09",  color: "#0A1A22", textColor: "#00D4FF" },
+  { label: "$1.27",  color: "#071219", textColor: "#FFD600" },
+  { label: "$1.20",  color: "#0A1A22", textColor: "#00FF88" },
+  { label: "$1.15",  color: "#071219", textColor: "#00D4FF" },
+  { label: "$1.30",  color: "#0A1A22", textColor: "#FFD600" },
+  { label: "$1.36",  color: "#071219", textColor: "#00FF88" },
+  { label: "$1.40",  color: "#0A1A22", textColor: "#FFD600" },
+  { label: "$1.41",  color: "#071219", textColor: "#00FF88" },
+];
+const NUM_SEG = WHEEL_SEGMENTS.length;
+const ARC = (2 * Math.PI) / NUM_SEG;
+let spinAngle = 0;
+let spinHistory = [];
+
+function drawWheel(angle) {
+  const canvas = document.getElementById("spinWheel");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const cx = 160, cy = 160, r = 155;
+  ctx.clearRect(0, 0, 320, 320);
+
+  // Outer ring glow
+  ctx.beginPath();
+  ctx.arc(cx, cy, r + 2, 0, 2 * Math.PI);
+  ctx.strokeStyle = "#00FF8866";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  for (let i = 0; i < NUM_SEG; i++) {
+    const start = angle + i * ARC;
+    const end = start + ARC;
+    const seg = WHEEL_SEGMENTS[i];
+
+    // Segment fill
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, start, end);
+    ctx.closePath();
+    ctx.fillStyle = seg.color;
+    ctx.fill();
+
+    // Segment border
+    ctx.strokeStyle = "#0D2233";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Label
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(start + ARC / 2);
+    ctx.textAlign = "right";
+    ctx.fillStyle = seg.textColor;
+    ctx.font = i === 0 ? "bold 13px JetBrains Mono,monospace" : "bold 12px JetBrains Mono,monospace";
+    ctx.shadowColor = seg.textColor;
+    ctx.shadowBlur = 6;
+    ctx.fillText(seg.label, r - 10, 5);
+    ctx.restore();
+  }
+
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(cx, cy, 22, 0, 2 * Math.PI);
+  ctx.fillStyle = "#040A0F";
+  ctx.fill();
+  ctx.strokeStyle = "#00FF88";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#00FF88";
+  ctx.font = "bold 11px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("GO", cx, cy + 4);
+}
+
+function animateSpin(targetIdx, onDone) {
+  const btn = document.getElementById("spin-go-btn");
+  btn.disabled = true;
+  btn.textContent = "⏳ AP TRADE...";
+
+  // Segment pointer rive anlè = angle 0 + offset
+  // Pointer anlè = -PI/2 (12 o'clock)
+  // Pou segment i rive anba pointer: angle = -PI/2 - (i * ARC + ARC/2)
+  const pointer = -Math.PI / 2;
+  const segCenter = targetIdx * ARC + ARC / 2;
+  const finalAngle = (pointer - segCenter - spinAngle % (2 * Math.PI) + 6 * 2 * Math.PI) % (2 * Math.PI);
+  const totalRotation = 5 * 2 * Math.PI + finalAngle;
+
+  let start = null;
+  const duration = 4500;
+
+  function easeOut(t) {
+    return 1 - Math.pow(1 - t, 4);
+  }
+
+  function step(ts) {
+    if (!start) start = ts;
+    const elapsed = ts - start;
+    const progress = Math.min(elapsed / duration, 1);
+    const current = easeOut(progress) * totalRotation;
+    spinAngle = (spinAngle + current - (step._last || 0)) % (2 * Math.PI);
+    step._last = current;
+    drawWheel(spinAngle);
+    if (progress < 1) {
+      requestAnimationFrame(step);
+    } else {
+      spinAngle = ((pointer - segCenter) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+      drawWheel(spinAngle);
+      btn.disabled = false;
+      btn.textContent = "🎰 GO";
+      onDone();
+    }
+  }
+  requestAnimationFrame(step);
+}
+
+function showSpinResult(won, prize, balance) {
+  const box = document.getElementById("spin-result-box");
+  const msg = document.getElementById("spin-result-msg");
+  box.style.display = "block";
+  if (won) {
+    msg.style.background = "#00FF8815";
+    msg.style.border = "1px solid #00FF8844";
+    msg.style.color = "#00FF88";
+    msg.innerHTML = `🎉 Congratulations! You won <b>$${prize.toFixed(2)}</b>!`;
+  } else {
+    msg.style.background = "#FF3B6B15";
+    msg.style.border = "1px solid #FF3B6B44";
+    msg.style.color = "#FF3B6B";
+    msg.innerHTML = `😔 Sorry, you lost this round.`;
+  }
+  // Mis a jou balans
+  document.getElementById("spin-balance").textContent = "$" + balance.toFixed(2);
+  document.getElementById("hbal").textContent = "$" + balance.toFixed(2);
+  document.getElementById("s-bal").textContent = "$" + balance.toFixed(2);
+  document.getElementById("c-bal").textContent = "$" + balance.toFixed(2);
+}
+
+function addSpinHistory(won, prize) {
+  const ts = new Date().toLocaleTimeString("fr-HT", {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  spinHistory.unshift({ won, prize, ts });
+  if (spinHistory.length > 10) spinHistory.pop();
+  const el = document.getElementById("spin-history");
+  if (!spinHistory.length) { el.innerHTML = ""; return; }
+  el.innerHTML = `
+    <div class="bt" style="margin-bottom:8px">ISTWA SPIN</div>
+    <table><tr><th>Lè</th><th>Rezilta</th><th>Valè</th></tr>
+    ${spinHistory.map(h => `<tr>
+      <td style="color:#4A7080">${h.ts}</td>
+      <td><span class="tag ${h.won ? "tb" : "ts"}">${h.won ? "WON" : "LOST"}</span></td>
+      <td style="color:${h.won ? "#00FF88" : "#FF3B6B"};font-weight:700">${h.won ? "$" + h.prize.toFixed(2) : "-$1.00"}</td>
+    </tr>`).join("")}
+    </table>`;
+}
+
+async function doSpin() {
+  // Kache ansyen rezilta
+  document.getElementById("spin-result-box").style.display = "none";
+  const btn = document.getElementById("spin-go-btn");
+  btn.disabled = true;
+  btn.textContent = "⏳ AP TRADE...";
+
+  try {
+    const r = await fetch("/api/spin", { method: "POST", headers: { "Content-Type": "application/json" } });
+    const d = await r.json();
+
+    if (!d.ok) {
+      btn.disabled = false;
+      btn.textContent = "🎰 GO";
+      document.getElementById("spin-result-box").style.display = "block";
+      document.getElementById("spin-result-msg").style.cssText = "background:#FF3B6B15;border:1px solid #FF3B6B44;color:#FF3B6B";
+      document.getElementById("spin-result-msg").textContent = "✗ " + d.error;
+      return;
+    }
+
+    // prize_idx: 0=LOSS, 1-9 = prize
+    const targetIdx = d.won ? d.prize_idx : 0;
+
+    animateSpin(targetIdx, () => {
+      showSpinResult(d.won, d.prize, d.balance);
+      addSpinHistory(d.won, d.prize);
+    });
+
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "🎰 GO";
+    alert("Erè: " + e.message);
+  }
+}
+
+// Init wheel lè pg-spin louvri
+const origSw = window.sw || function(){};
+function sw(id, el) {
+  document.querySelectorAll(".pg").forEach(p => p.classList.remove("on"));
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("on"));
+  document.getElementById("pg-" + id).classList.add("on");
+  el.classList.add("on");
+  if (id === "spin") {
+    drawWheel(spinAngle);
+    // Mis a jou balans
+    fetch("/api/status").then(r => r.json()).then(d => {
+      document.getElementById("spin-balance").textContent = "$" + d.balance.toFixed(2);
+    }).catch(() => {});
+  }
+}
+
 checkLogin();
 </script>
 </body>
 </html>"""
+
+# ═══════════════════════════════════════════════════════════
+# LUCKY SPIN ROUTE
+# ═══════════════════════════════════════════════════════════
+SPIN_PRIZES = [1.10, 1.09, 1.27, 1.20, 1.15, 1.30, 1.36, 1.40, 1.41]
+# Indeks 0 = LOSS
+
+@app.route("/api/spin", methods=["POST"])
+def api_spin():
+    st = get_state()
+    if not st.get("access"):
+        return jsonify({"ok": False, "error": "Aksè refize"})
+    if not st["connected"]:
+        return jsonify({"ok": False, "error": "Konekte broker anvan!"})
+
+    api = st.get("deriv_api")
+    if not api:
+        return jsonify({"ok": False, "error": "API pa disponib"})
+
+    STAKE = 1.0
+    bal = st["balance"]
+    if bal < STAKE:
+        return jsonify({"ok": False, "error": f"Balans twò ba: ${bal:.2f}"})
+
+    try:
+        # Place DIGITUNDER 9 — digit 0-8 = ~90% chans genyen
+        result = api.place_digits_trade("R_10", "DIGITUNDER", STAKE, barrier=9)
+        cid = result.get("contract_id")
+        if not cid:
+            return jsonify({"ok": False, "error": "Trade pa kreye"})
+
+        bal_after_open = float(result.get("balance_after", bal - STAKE))
+        st["balance"] = bal_after_open
+
+        # Tann rezilta kontrat
+        contract = api.wait_contract_result(cid, timeout=60)
+
+        won = False
+        pnl = 0.0
+        if contract:
+            status = contract.get("status", "")
+            buy_price  = float(contract.get("buy_price",  STAKE))
+            sell_price = float(contract.get("sell_price", 0))
+            if status == "won":
+                pnl = sell_price - buy_price
+                won = True
+                st["balance"] = bal_after_open + pnl
+            elif status == "lost":
+                pnl = -buy_price
+                won = False
+                st["balance"] = bal_after_open
+            else:
+                nb = api.get_balance_sync()
+                if nb and nb > 0:
+                    pnl = nb - bal; st["balance"] = nb
+                    won = pnl > 0
+        else:
+            nb = api.get_balance_sync()
+            if nb and nb > 0:
+                pnl = nb - bal; st["balance"] = nb
+                won = pnl > 0
+            else:
+                pnl = -STAKE; won = False
+
+        st["total_pnl"] += pnl
+
+        # Chwazi rekonpans
+        prize = 0.0
+        prize_idx = 0  # 0 = LOSS
+        if won:
+            # Chwazi prize selon pnl reyèl — chwazi ki prize pi pre
+            actual_return = round(STAKE + pnl, 2)
+            diffs = [abs(p - actual_return) for p in SPIN_PRIZES]
+            closest = diffs.index(min(diffs))
+            prize_idx = closest + 1  # +1 paske indeks 0 se LOSS sou wheel
+            prize = SPIN_PRIZES[closest]
+
+        add_log(st, f"🎰 SPIN: {'WON +$' + str(round(pnl,2)) if won else 'LOST -$' + str(STAKE)} | Prize:{prize if won else 'LOSS'}", "SUCCESS" if won else "WARN")
+
+        return jsonify({
+            "ok": True,
+            "won": won,
+            "pnl": round(pnl, 2),
+            "prize": prize,
+            "prize_idx": prize_idx,
+            "balance": round(st["balance"], 2),
+            "contract_id": cid,
+        })
+
+    except Exception as e:
+        add_log(st, f"Spin error: {e}", "ERROR")
+        return jsonify({"ok": False, "error": str(e)})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
